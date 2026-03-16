@@ -281,6 +281,7 @@ plot_output.png
 | codex-shogun-system | ~/Claude/codex-shogun-system | Codex Shogun システム | main |
 | EMrel | ~/Claude/EMrel | 電磁相対論 | main |
 | webGL-test | ~/Claude/webGL-test | WebGLテスト | main |
+| claude-config | ~/Claude/claude-config | 共通設定（CONVENTIONS.md等） | main |
 
 **注意**: odakin のリポのみ操作する。yohey-w は絶対に触らない。
 
