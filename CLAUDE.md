@@ -6,7 +6,7 @@
 ## リポジトリ情報
 - パス: `~/Claude/claude-config/`
 - ブランチ: `main`
-- リモート: `odakin/claude-config` (private, GitHub)
+- リモート: `odakin/claude-config` (public, GitHub)
 
 ## 構造
 ```
