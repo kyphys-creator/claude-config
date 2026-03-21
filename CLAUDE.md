@@ -38,7 +38,7 @@ setup.sh が自動で行うこと:
 
 ## 関連リポ
 - `odakin/zenn-articles` — Zenn.dev 日本語記事（このリポについての記事もそちらに格納）
-- `odakin/zenn-articles-en` — 英語記事ソース（投稿先: dev.to）
+- `odakin/devto-articles` — 英語記事ソース（投稿先: dev.to）
 
 ## 安全規則（公開リポ）
 **このリポは public。** 以下を絶対にコミットしない:
