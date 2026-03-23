@@ -57,7 +57,8 @@ cd claude-config && ./setup.sh
 | §8 Git conventions | Branch strategy, commit messages, push protocol |
 | §9 Safety rules | Guardrails for destructive operations, LaTeX editing, credentials |
 | §10 Exhaustive verification | Mechanical checks before claiming completeness |
-| §11 Miscellaneous | Image output, GFM CJK rules reference |
+| §11 User-perspective design | Design from user's situation and behavior, not developer's sense of tidiness |
+| §12 Miscellaneous | Image output, GFM CJK rules reference |
 
 ## Key Concepts
 
@@ -230,7 +231,8 @@ cd claude-config && ./setup.sh
 | §8 Git 規約 | ブランチ戦略、コミットメッセージ、push プロトコル |
 | §9 安全規則 | 破壊的操作・LaTeX 編集・機密情報に関するガードレール |
 | §10 網羅性の検証 | 「全部」を主張する前の機械的検証 |
-| §11 その他 | 画像出力、GFM CJK ルール参照 |
+| §11 ユーザー視点での設計判断 | 開発者の「整理」ではなくユーザーの状況・行動から設計を判断 |
+| §12 その他 | 画像出力、GFM CJK ルール参照 |
 
 ## 核となるコンセプト
 
