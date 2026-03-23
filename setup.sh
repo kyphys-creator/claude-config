@@ -10,8 +10,6 @@
 #   gh repo clone odakin/claude-config
 #   cd claude-config && ./setup.sh
 
-set -e
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
@@ -28,11 +26,11 @@ if [ -L "$LINK" ]; then
 elif [ -f "$LINK" ]; then
     echo "  WARNING: $LINK exists as a regular file."
     echo "  Back up to $LINK.bak and replace with symlink."
-    mv "$LINK" "$LINK.bak"
-    ln -s "$REL_TARGET" "$LINK"
+    mv "$LINK" "$LINK.bak" || exit 1
+    ln -s "$REL_TARGET" "$LINK" || exit 1
     echo "  Created: $LINK -> $REL_TARGET"
 else
-    ln -s "$REL_TARGET" "$LINK"
+    ln -s "$REL_TARGET" "$LINK" || exit 1
     echo "  Created: $LINK -> $REL_TARGET"
 fi
 
@@ -46,7 +44,7 @@ HOOKS_DST="$HOME/.claude/hooks"
 SETTINGS="$HOME/.claude/settings.json"
 
 # 期待する hook 定義（settings.json にマージする内容）
-# hook を追加・削除する場合はここと EXPECTED_HOOKS を更新する
+# hook を追加・削除する場合はここと L132 の for ループを更新する
 HOOK_ENTRIES='[
   {
     "matcher": "Edit|Write",
@@ -105,7 +103,7 @@ install_hooks() {
     if [ ! -f "$SETTINGS" ]; then
         echo "  Creating settings.json with hooks config."
         mkdir -p "$(dirname "$SETTINGS")"
-        echo "$HOOK_ENTRIES" | jq --argjson entries "$HOOK_ENTRIES" \
+        jq -n --argjson entries "$HOOK_ENTRIES" \
             '{hooks: {PreToolUse: $entries}}' > "$SETTINGS"
         echo "  Created: $SETTINGS"
         return 0
