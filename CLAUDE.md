@@ -14,7 +14,9 @@ claude-config/
 ├── CLAUDE.md        # このファイル（リポ固有の指示書）
 ├── CONVENTIONS.md   # 全リポ共通規約（正本）
 ├── README.md        # プロジェクト説明（英語/日本語）
-├── setup.sh         # symlink セットアップスクリプト
+├── setup.sh         # symlink + hooks + clone セットアップスクリプト
+├── hooks/
+│   └── memory-guard.sh  # メモリ書き込みガード（§2 判別強制）
 ├── gfm-rules.md     # GFM CJK bold 対策リファレンス
 ├── LICENSE          # MIT
 └── .gitignore
@@ -29,7 +31,8 @@ cd claude-config && ./setup.sh
 
 setup.sh が自動で行うこと:
 1. `~/Claude/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の相対 symlink 作成
-2. `odakin` の全リポを `~/Claude/` 以下に clone（未取得のもののみ）
+2. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
+3. `odakin` の全リポを `~/Claude/` 以下に clone（未取得のもののみ）
 
 ## How to Resume
 1. このリポには SESSION.md は不要（永続的な設定リポのため）
