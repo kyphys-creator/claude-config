@@ -16,7 +16,8 @@ claude-config/
 ├── README.md        # プロジェクト説明（英語/日本語）
 ├── setup.sh         # symlink + hooks + clone セットアップスクリプト
 ├── hooks/
-│   └── memory-guard.sh  # メモリ書き込みガード（§2 判別強制）
+│   ├── memory-guard.sh       # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
+│   └── memory-guard-bash.sh  # メモリ書き込みガード — Bash 用（警告のみ）
 ├── gfm-rules.md     # GFM CJK bold 対策リファレンス
 ├── LICENSE          # MIT
 └── .gitignore

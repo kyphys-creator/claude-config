@@ -19,6 +19,7 @@ REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
 # --- 1. Symlink ---
 echo "=== Step 1: Setting up symlinks ==="
 
+# 相対パス: symlink とターゲットが同一ツリー (~/Claude/) 内
 REL_TARGET="$REPO_DIRNAME/CONVENTIONS.md"
 LINK="$CLAUDE_DIR/CONVENTIONS.md"
 
@@ -36,20 +37,52 @@ else
 fi
 
 # --- 2. Install hooks ---
+# Step 1 の失敗で Step 2-3 が止まらないよう、ここから先はエラーを個別処理
 echo ""
 echo "=== Step 2: Installing Claude Code hooks ==="
 
 HOOKS_SRC="$SCRIPT_DIR/hooks"
 HOOKS_DST="$HOME/.claude/hooks"
+SETTINGS="$HOME/.claude/settings.json"
 
-if [ -d "$HOOKS_SRC" ]; then
+# 期待する hook 定義（settings.json にマージする内容）
+# hook を追加・削除する場合はここと EXPECTED_HOOKS を更新する
+HOOK_ENTRIES='[
+  {
+    "matcher": "Edit|Write",
+    "hooks": [{"type": "command", "command": "~/.claude/hooks/memory-guard.sh"}]
+  },
+  {
+    "matcher": "Bash",
+    "hooks": [{"type": "command", "command": "~/.claude/hooks/memory-guard-bash.sh"}]
+  }
+]'
+
+install_hooks() {
+    if [ ! -d "$HOOKS_SRC" ]; then
+        echo "  No hooks directory found. Skipping."
+        return 0
+    fi
+
     mkdir -p "$HOOKS_DST"
+
+    # symlink 作成
+    # 絶対パス使用: ~/.claude/hooks/ と ~/Claude/claude-config/hooks/ は
+    # 異なるディレクトリツリーのため、相対パスは脆弱
     for HOOK in "$HOOKS_SRC"/*.sh; do
         [ -f "$HOOK" ] || continue
         HOOK_NAME="$(basename "$HOOK")"
         LINK="$HOOKS_DST/$HOOK_NAME"
         if [ -L "$LINK" ]; then
-            echo "  Symlink already exists: $LINK"
+            # symlink のリンク先が正しいか確認
+            CURRENT_TARGET="$(readlink "$LINK")"
+            if [ "$CURRENT_TARGET" = "$HOOK" ]; then
+                echo "  OK: $HOOK_NAME"
+            else
+                echo "  UPDATE: $HOOK_NAME (was -> $CURRENT_TARGET)"
+                rm "$LINK"
+                ln -s "$HOOK" "$LINK"
+            fi
         elif [ -f "$LINK" ]; then
             echo "  WARNING: $LINK exists as regular file. Backing up."
             mv "$LINK" "$LINK.bak"
@@ -61,48 +94,66 @@ if [ -d "$HOOKS_SRC" ]; then
         fi
     done
 
-    # Merge hooks config into ~/.claude/settings.json
-    SETTINGS="$HOME/.claude/settings.json"
-    if [ -f "$SETTINGS" ]; then
-        if command -v jq &> /dev/null; then
-            # Check if hooks key already exists
-            if jq -e '.hooks' "$SETTINGS" > /dev/null 2>&1; then
-                echo "  settings.json already has hooks config. Skipping merge."
-            else
-                echo "  Adding hooks config to settings.json ..."
-                HOOKS_CONFIG='{"hooks":{"PreToolUse":[{"matcher":"Edit|Write","hooks":[{"type":"command","command":"~/.claude/hooks/memory-guard.sh"}]}]}}'
-                jq --argjson h "$HOOKS_CONFIG" '. + $h' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-                echo "  Done."
-            fi
-        else
-            echo "  WARNING: jq not found. Cannot merge hooks into settings.json."
-            echo "  Install with: brew install jq"
-            echo "  Then manually add hooks config to $SETTINGS"
-        fi
-    else
-        echo "  WARNING: $SETTINGS not found. Creating with hooks config."
-        mkdir -p "$(dirname "$SETTINGS")"
-        cat > "$SETTINGS" << 'SETTINGSEOF'
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/memory-guard.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-SETTINGSEOF
-        echo "  Created: $SETTINGS"
+    # settings.json に hooks 設定をマージ
+    if ! command -v jq &> /dev/null; then
+        echo "  WARNING: jq not found. Cannot merge hooks into settings.json."
+        echo "  Install with: brew install jq"
+        echo "  Then re-run: ./setup.sh"
+        return 0
     fi
-else
-    echo "  No hooks directory found. Skipping."
+
+    if [ ! -f "$SETTINGS" ]; then
+        echo "  Creating settings.json with hooks config."
+        mkdir -p "$(dirname "$SETTINGS")"
+        echo "$HOOK_ENTRIES" | jq --argjson entries "$HOOK_ENTRIES" \
+            '{hooks: {PreToolUse: $entries}}' > "$SETTINGS"
+        echo "  Created: $SETTINGS"
+        return 0
+    fi
+
+    # 既存 settings.json にマージ
+    # hooks キーがない → 追加
+    # hooks キーがある → memory-guard エントリの有無を個別チェック
+    if ! jq -e '.hooks' "$SETTINGS" > /dev/null 2>&1; then
+        echo "  Adding hooks config to settings.json ..."
+        jq --argjson entries "$HOOK_ENTRIES" \
+            '. + {hooks: {PreToolUse: $entries}}' \
+            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        echo "  Done."
+    elif ! jq -e '.hooks.PreToolUse' "$SETTINGS" > /dev/null 2>&1; then
+        echo "  Adding PreToolUse hooks ..."
+        jq --argjson entries "$HOOK_ENTRIES" \
+            '.hooks.PreToolUse = $entries' \
+            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        echo "  Done."
+    else
+        # PreToolUse が存在する場合、各 hook が含まれているか個別確認
+        UPDATED=false
+        for HOOK_CMD in "memory-guard.sh" "memory-guard-bash.sh"; do
+            if ! jq -e --arg cmd "$HOOK_CMD" \
+                '.hooks.PreToolUse[] | select(.hooks[]?.command | contains($cmd))' \
+                "$SETTINGS" > /dev/null 2>&1; then
+                echo "  Adding missing hook: $HOOK_CMD"
+                # 対応するエントリを HOOK_ENTRIES から抽出して追加
+                ENTRY=$(echo "$HOOK_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
+                    '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
+                jq --argjson entry "$ENTRY" \
+                    '.hooks.PreToolUse += [$entry]' \
+                    "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                UPDATED=true
+            fi
+        done
+        if [ "$UPDATED" = false ]; then
+            echo "  All hooks already configured in settings.json."
+        else
+            echo "  Done."
+        fi
+    fi
+}
+
+# hook インストールの失敗は警告のみ（Step 3 を止めない）
+if ! install_hooks; then
+    echo "  ERROR: Hook installation failed. Continuing with remaining steps."
 fi
 
 # --- 3. Clone all odakin repos ---
