@@ -1,27 +1,40 @@
 #!/bin/bash
-# ~/Claude/claude-config/setup.sh
+# claude-config/setup.sh
 # 新しい端末で clone 後に実行するセットアップスクリプト
 #   1. CONVENTIONS.md の symlink を作成（相対パス）
 #   2. Claude Code hooks をインストール（symlink + settings.json マージ）
-#   3. odakin の全リポを ~/Claude 以下に clone（未取得のもののみ）
+#   3. git post-merge hook をインストール（git pull 時に hooks を自動同期）
+#   4. GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
 #
 # 使い方:
-#   mkdir -p ~/Claude && cd ~/Claude
-#   gh repo clone odakin/claude-config
+#   mkdir -p <base> && cd <base>
+#   gh repo clone <your-username>/claude-config
 #   cd claude-config && ./setup.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
 
+# --- GitHub ユーザー名を git remote から自動検出 ---
+GH_USER=$(cd "$SCRIPT_DIR" && gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "odakin")
+echo "GitHub user: $GH_USER"
+
+# --- OS 判定（Windows では symlink に管理者権限が必要なため cp にフォールバック）---
+IS_WINDOWS=false
+case "$(uname -s)" in MINGW*|CYGWIN*|MSYS*) IS_WINDOWS=true ;; esac
+
 # --- 1. Symlink ---
 echo "=== Step 1: Setting up symlinks ==="
 
-# 相対パス: symlink とターゲットが同一ツリー (~/Claude/) 内
+# 相対パス: symlink とターゲットが同一ツリー (<base>/) 内
 REL_TARGET="$REPO_DIRNAME/CONVENTIONS.md"
 LINK="$CLAUDE_DIR/CONVENTIONS.md"
 
-if [ -L "$LINK" ]; then
+if [ "$IS_WINDOWS" = true ]; then
+    # Windows: cp で同期（git pull 後の自動更新は post-merge hook が担当）
+    cp -f "$SCRIPT_DIR/CONVENTIONS.md" "$LINK" || exit 1
+    echo "  Copied (Windows): $LINK"
+elif [ -L "$LINK" ]; then
     echo "  Symlink already exists: $LINK -> $(readlink "$LINK")"
 elif [ -f "$LINK" ]; then
     echo "  WARNING: $LINK exists as a regular file."
@@ -35,7 +48,7 @@ else
 fi
 
 # --- 2. Install hooks ---
-# Step 1 の失敗で Step 2-3 が止まらないよう、ここから先はエラーを個別処理
+# Step 1 の失敗で Step 2-4 が止まらないよう、ここから先はエラーを個別処理
 echo ""
 echo "=== Step 2: Installing Claude Code hooks ==="
 
@@ -44,7 +57,7 @@ HOOKS_DST="$HOME/.claude/hooks"
 SETTINGS="$HOME/.claude/settings.json"
 
 # 期待する hook 定義（settings.json にマージする内容）
-# hook を追加・削除する場合はここと L132 の for ループを更新する
+# hook を追加・削除する場合はここと HOOK_CMD の for ループを同時に更新する
 HOOK_ENTRIES='[
   {
     "matcher": "Edit|Write",
@@ -64,14 +77,18 @@ install_hooks() {
 
     mkdir -p "$HOOKS_DST"
 
-    # symlink 作成
-    # 絶対パス使用: ~/.claude/hooks/ と ~/Claude/claude-config/hooks/ は
+    # symlink 作成（Windows は cp にフォールバック）
+    # 絶対パス使用: ~/.claude/hooks/ と <base>/claude-config/hooks/ は
     # 異なるディレクトリツリーのため、相対パスは脆弱
     for HOOK in "$HOOKS_SRC"/*.sh; do
         [ -f "$HOOK" ] || continue
         HOOK_NAME="$(basename "$HOOK")"
         LINK="$HOOKS_DST/$HOOK_NAME"
-        if [ -L "$LINK" ]; then
+        if [ "$IS_WINDOWS" = true ]; then
+            # Windows: cp で同期（git pull 後の自動更新は post-merge hook が担当）
+            cp -f "$HOOK" "$LINK"
+            echo "  Copied (Windows): $HOOK_NAME"
+        elif [ -L "$LINK" ]; then
             # symlink のリンク先が正しいか確認
             CURRENT_TARGET="$(readlink "$LINK")"
             if [ "$CURRENT_TARGET" = "$HOOK" ]; then
@@ -95,7 +112,11 @@ install_hooks() {
     # settings.json に hooks 設定をマージ
     if ! command -v jq &> /dev/null; then
         echo "  WARNING: jq not found. Cannot merge hooks into settings.json."
-        echo "  Install with: brew install jq"
+        if [ "$IS_WINDOWS" = true ]; then
+            echo "  Install with: winget install jqlang.jq"
+        else
+            echo "  Install with: brew install jq"
+        fi
         echo "  Then re-run: ./setup.sh"
         return 0
     fi
@@ -149,14 +170,63 @@ install_hooks() {
     fi
 }
 
-# hook インストールの失敗は警告のみ（Step 3 を止めない）
+# hook インストールの失敗は警告のみ（Step 3-4 を止めない）
 if ! install_hooks; then
     echo "  ERROR: Hook installation failed. Continuing with remaining steps."
 fi
 
-# --- 3. Clone all odakin repos ---
+# --- 3. Install git post-merge hook ---
+# git pull 後に hooks と CONVENTIONS.md を自動同期する
+# Windows では symlink の代わりに cp を使うため、pull 後の再同期が必要
 echo ""
-echo "=== Step 3: Cloning odakin repos ==="
+echo "=== Step 3: Installing git post-merge hook ==="
+
+GIT_HOOKS_DIR="$SCRIPT_DIR/.git/hooks"
+POST_MERGE="$GIT_HOOKS_DIR/post-merge"
+
+if [ ! -d "$GIT_HOOKS_DIR" ]; then
+    echo "  ERROR: .git/hooks not found. Is this a git repo?"
+else
+    cat > "$POST_MERGE" << 'POST_MERGE_EOF'
+#!/bin/bash
+# claude-config post-merge hook
+# git pull 後に ~/.claude/hooks/ と <base>/CONVENTIONS.md を自動同期
+# setup.sh が生成 — 手動編集不可（再実行で上書きされる）
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+PARENT_DIR="$(dirname "$REPO_DIR")"
+
+# --- hooks の同期（コピーの場合のみ。symlink は自動更新済み）---
+HOOKS_SRC="$REPO_DIR/hooks"
+HOOKS_DST="$HOME/.claude/hooks"
+if [ -d "$HOOKS_SRC" ] && [ -d "$HOOKS_DST" ]; then
+    for HOOK in "$HOOKS_SRC"/*.sh; do
+        [ -f "$HOOK" ] || continue
+        HOOK_NAME="$(basename "$HOOK")"
+        DEST="$HOOKS_DST/$HOOK_NAME"
+        # symlink でなければコピー（Windows の cp ファイルを更新）
+        if [ -f "$DEST" ] && [ ! -L "$DEST" ]; then
+            cp -f "$HOOK" "$DEST"
+            echo "[claude-config] Updated hook: $HOOK_NAME"
+        fi
+    done
+fi
+
+# --- CONVENTIONS.md の同期（コピーの場合のみ）---
+CONV_DEST="$PARENT_DIR/CONVENTIONS.md"
+if [ -f "$CONV_DEST" ] && [ ! -L "$CONV_DEST" ]; then
+    cp -f "$REPO_DIR/CONVENTIONS.md" "$CONV_DEST"
+    echo "[claude-config] Updated: CONVENTIONS.md"
+fi
+POST_MERGE_EOF
+    chmod +x "$POST_MERGE"
+    echo "  Installed: .git/hooks/post-merge"
+    echo "  git pull 後に hooks と CONVENTIONS.md が自動同期されます"
+fi
+
+# --- 4. Clone all repos ---
+echo ""
+echo "=== Step 4: Cloning $GH_USER repos ==="
 
 if ! command -v gh &> /dev/null; then
     echo "  ERROR: gh (GitHub CLI) is not installed. Skipping repo sync."
@@ -170,7 +240,7 @@ if ! gh auth status &> /dev/null; then
 fi
 
 # Get all repo names from GitHub
-REPOS=$(gh repo list odakin --limit 100 --json name --jq '.[].name')
+REPOS=$(gh repo list "$GH_USER" --limit 100 --json name --jq '.[].name')
 CLONED=0
 SKIPPED=0
 
@@ -179,8 +249,8 @@ for REPO in $REPOS; do
     if [ -d "$TARGET_DIR" ]; then
         SKIPPED=$((SKIPPED + 1))
     else
-        echo "  Cloning odakin/$REPO ..."
-        gh repo clone "odakin/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
+        echo "  Cloning $GH_USER/$REPO ..."
+        gh repo clone "$GH_USER/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
         CLONED=$((CLONED + 1))
     fi
 done
