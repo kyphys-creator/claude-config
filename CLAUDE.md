@@ -6,7 +6,7 @@
 ## リポジトリ情報
 - パス: `<base>/claude-config/`
 - ブランチ: `main`
-- リモート: `SuperQuiver/claude-config` (public, GitHub)
+- リモート: `odakin/claude-config` (public, GitHub)
 
 ## 構造
 ```
@@ -26,7 +26,7 @@ claude-config/
 ## セットアップ（新しい端末で）
 ```bash
 mkdir -p <base> && cd <base>
-gh repo clone SuperQuiver/claude-config
+gh repo clone odakin/claude-config
 cd claude-config && ./setup.sh
 ```
 
@@ -34,7 +34,7 @@ setup.sh が自動で行うこと:
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
 2. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
-4. `SuperQuiver` の全リポを `<base>/` 以下に clone（未取得のもののみ）
+4. `odakin` の全リポを `<base>/` 以下に clone（未取得のもののみ）
 
 ## How to Resume
 1. このリポには SESSION.md は不要（永続的な設定リポのため）

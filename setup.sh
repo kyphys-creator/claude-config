@@ -1,19 +1,23 @@
 #!/bin/bash
-# ~/github/claude-config/setup.sh
+# claude-config/setup.sh
 # 新しい端末で clone 後に実行するセットアップスクリプト
 #   1. CONVENTIONS.md の symlink を作成（相対パス）
 #   2. Claude Code hooks をインストール（symlink + settings.json マージ）
 #   3. git post-merge hook をインストール（git pull 時に hooks を自動同期）
-#   4. SuperQuiver の全リポを ~/github 以下に clone（未取得のもののみ）
+#   4. GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
 #
 # 使い方:
-#   mkdir -p ~/github && cd ~/github
-#   gh repo clone SuperQuiver/claude-config
+#   mkdir -p <base> && cd <base>
+#   gh repo clone <your-username>/claude-config
 #   cd claude-config && ./setup.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
+
+# --- GitHub ユーザー名を git remote から自動検出 ---
+GH_USER=$(cd "$SCRIPT_DIR" && gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "odakin")
+echo "GitHub user: $GH_USER"
 
 # --- OS 判定（Windows では symlink に管理者権限が必要なため cp にフォールバック）---
 IS_WINDOWS=false
@@ -22,7 +26,7 @@ case "$(uname -s)" in MINGW*|CYGWIN*|MSYS*) IS_WINDOWS=true ;; esac
 # --- 1. Symlink ---
 echo "=== Step 1: Setting up symlinks ==="
 
-# 相対パス: symlink とターゲットが同一ツリー (~/github/) 内
+# 相対パス: symlink とターゲットが同一ツリー (<base>/) 内
 REL_TARGET="$REPO_DIRNAME/CONVENTIONS.md"
 LINK="$CLAUDE_DIR/CONVENTIONS.md"
 
@@ -74,7 +78,7 @@ install_hooks() {
     mkdir -p "$HOOKS_DST"
 
     # symlink 作成（Windows は cp にフォールバック）
-    # 絶対パス使用: ~/.claude/hooks/ と ~/github/claude-config/hooks/ は
+    # 絶対パス使用: ~/.claude/hooks/ と <base>/claude-config/hooks/ は
     # 異なるディレクトリツリーのため、相対パスは脆弱
     for HOOK in "$HOOKS_SRC"/*.sh; do
         [ -f "$HOOK" ] || continue
@@ -186,7 +190,7 @@ else
     cat > "$POST_MERGE" << 'POST_MERGE_EOF'
 #!/bin/bash
 # claude-config post-merge hook
-# git pull 後に ~/.claude/hooks/ と ~/github/CONVENTIONS.md を自動同期
+# git pull 後に ~/.claude/hooks/ と <base>/CONVENTIONS.md を自動同期
 # setup.sh が生成 — 手動編集不可（再実行で上書きされる）
 
 REPO_DIR="$(git rev-parse --show-toplevel)"
@@ -220,9 +224,9 @@ POST_MERGE_EOF
     echo "  git pull 後に hooks と CONVENTIONS.md が自動同期されます"
 fi
 
-# --- 4. Clone all SuperQuiver repos ---
+# --- 4. Clone all repos ---
 echo ""
-echo "=== Step 4: Cloning SuperQuiver repos ==="
+echo "=== Step 4: Cloning $GH_USER repos ==="
 
 if ! command -v gh &> /dev/null; then
     echo "  ERROR: gh (GitHub CLI) is not installed. Skipping repo sync."
@@ -236,7 +240,7 @@ if ! gh auth status &> /dev/null; then
 fi
 
 # Get all repo names from GitHub
-REPOS=$(gh repo list SuperQuiver --limit 100 --json name --jq '.[].name')
+REPOS=$(gh repo list "$GH_USER" --limit 100 --json name --jq '.[].name')
 CLONED=0
 SKIPPED=0
 
@@ -245,8 +249,8 @@ for REPO in $REPOS; do
     if [ -d "$TARGET_DIR" ]; then
         SKIPPED=$((SKIPPED + 1))
     else
-        echo "  Cloning SuperQuiver/$REPO ..."
-        gh repo clone "SuperQuiver/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
+        echo "  Cloning $GH_USER/$REPO ..."
+        gh repo clone "$GH_USER/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
         CLONED=$((CLONED + 1))
     fi
 done
