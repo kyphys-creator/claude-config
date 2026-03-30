@@ -60,7 +60,8 @@ cd claude-config && ./setup.sh
 | §9 Safety rules | Guardrails for destructive operations, LaTeX editing, credentials |
 | §10 Exhaustive verification | Mechanical checks before claiming completeness |
 | §11 User-perspective design | Design from user's situation and behavior, not developer's sense of tidiness |
-| §12 Miscellaneous | Image output, GFM CJK rules reference |
+| §12 Google Calendar MCP | Operating rules for Calendar MCP connector |
+| §13 Miscellaneous | Image output, GFM CJK rules reference, MCP tool verification |
 
 ## Key Concepts
 
@@ -236,7 +237,8 @@ cd claude-config && ./setup.sh
 | §9 安全規則 | 破壊的操作・LaTeX 編集・機密情報に関するガードレール |
 | §10 網羅性の検証 | 「全部」を主張する前の機械的検証 |
 | §11 ユーザー視点での設計判断 | 開発者の「整理」ではなくユーザーの状況・行動から設計を判断 |
-| §12 その他 | 画像出力、GFM CJK ルール参照 |
+| §12 Google Calendar MCP | Calendar MCP コネクタの運用ルール |
+| §13 その他 | 画像出力、GFM CJK ルール参照、MCP ツール検証 |
 
 ## 核となるコンセプト
 
