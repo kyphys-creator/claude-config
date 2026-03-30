@@ -15,9 +15,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
 
-# --- GitHub ユーザー名を git remote から自動検出 ---
-GH_USER=$(cd "$SCRIPT_DIR" && gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "odakin")
-echo "GitHub user: $GH_USER"
+# --- GitHub ユーザー名を認証情報から自動検出（Step 4 で使用）---
+GH_USER=$(gh api user --jq '.login' 2>/dev/null)
+if [ -n "$GH_USER" ]; then
+    echo "GitHub user: $GH_USER"
+else
+    echo "WARNING: Could not detect GitHub user. Run 'gh auth login' first."
+    echo "Steps 1-3 will proceed. Step 4 (repo cloning) will be skipped."
+fi
 
 # --- OS 判定（Windows では symlink に管理者権限が必要なため cp にフォールバック）---
 IS_WINDOWS=false
@@ -226,36 +231,41 @@ fi
 
 # --- 4. Clone all repos ---
 echo ""
-echo "=== Step 4: Cloning $GH_USER repos ==="
+echo "=== Step 4: Cloning repos ==="
 
-if ! command -v gh &> /dev/null; then
-    echo "  ERROR: gh (GitHub CLI) is not installed. Skipping repo sync."
-    echo "  Install with: brew install gh"
-    exit 1
-fi
-
-if ! gh auth status &> /dev/null; then
-    echo "  ERROR: gh is not authenticated. Run: gh auth login"
-    exit 1
-fi
-
-# Get all repo names from GitHub
-REPOS=$(gh repo list "$GH_USER" --limit 100 --json name --jq '.[].name')
-CLONED=0
-SKIPPED=0
-
-for REPO in $REPOS; do
-    TARGET_DIR="$CLAUDE_DIR/$REPO"
-    if [ -d "$TARGET_DIR" ]; then
-        SKIPPED=$((SKIPPED + 1))
+if [ -z "$GH_USER" ]; then
+    echo "  SKIPPED: GitHub user not detected. Run 'gh auth login' and re-run setup.sh."
+elif ! command -v gh &> /dev/null; then
+    echo "  SKIPPED: gh (GitHub CLI) is not installed."
+    if [ "$IS_WINDOWS" = true ]; then
+        echo "  Install with: winget install GitHub.cli"
     else
-        echo "  Cloning $GH_USER/$REPO ..."
-        gh repo clone "$GH_USER/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
-        CLONED=$((CLONED + 1))
+        echo "  Install with: brew install gh"
     fi
-done
+elif ! gh auth status &> /dev/null; then
+    echo "  SKIPPED: gh is not authenticated. Run: gh auth login"
+else
+    echo "  User: $GH_USER"
+
+    # Get all repo names from GitHub
+    REPOS=$(gh repo list "$GH_USER" --limit 100 --json name --jq '.[].name')
+    CLONED=0
+    SKIPPED=0
+
+    for REPO in $REPOS; do
+        TARGET_DIR="$CLAUDE_DIR/$REPO"
+        if [ -d "$TARGET_DIR" ]; then
+            SKIPPED=$((SKIPPED + 1))
+        else
+            echo "  Cloning $GH_USER/$REPO ..."
+            gh repo clone "$GH_USER/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
+            CLONED=$((CLONED + 1))
+        fi
+    done
+
+    echo "  Cloned: $CLONED repos"
+    echo "  Skipped (already exist): $SKIPPED repos"
+fi
 
 echo ""
 echo "=== Done ==="
-echo "  Cloned: $CLONED repos"
-echo "  Skipped (already exist): $SKIPPED repos"

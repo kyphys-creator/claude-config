@@ -166,11 +166,11 @@ MEMORY.md → [actual repo table lives here]
 Fork or clone this repo and edit CONVENTIONS.md to match your workflow. The conventions are written in Japanese, but the structure is language-agnostic — translate or adapt as needed.
 
 Key things to customize:
-- §1: Replace the GitHub username in repo creation commands
+- §1: Uses `<username>` placeholder — works as-is
 - §4: Adjust the CLAUDE.md template to your project structure
 - §7: Modify directory naming conventions for your domain
 - §9: Add or remove safety rules for your use case
-- `setup.sh`: Change the GitHub username for repo cloning
+- `setup.sh`: Auto-detects authenticated GitHub user — works as-is
 
 ## License
 
@@ -342,11 +342,11 @@ MEMORY.md → [実際のリポ一覧テーブルがここにある]
 フォークまたは clone して、CONVENTIONS.md を自分のワークフローに合わせて編集する。
 
 カスタマイズのポイント:
-- §1: リポ作成コマンドの GitHub ユーザー名を変更
+- §1: `<username>` プレースホルダー使用 — そのまま動作
 - §4: CLAUDE.md テンプレートをプロジェクト構造に合わせて調整
 - §7: 自分の分野に合ったディレクトリ命名に変更
 - §9: ユースケースに応じて安全規則を追加・削除
-- `setup.sh`: リポ clone の GitHub ユーザー名を変更
+- `setup.sh`: 認証ユーザーを自動検出 — そのまま動作
 
 ## ライセンス
 

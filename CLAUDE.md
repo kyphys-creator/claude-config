@@ -34,21 +34,18 @@ setup.sh が自動で行うこと:
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
 2. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
-4. `odakin` の全リポを `<base>/` 以下に clone（未取得のもののみ）
+4. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
 
 ## How to Resume
 1. このリポには SESSION.md は不要（永続的な設定リポのため）
 2. 作業内容は CONVENTIONS.md と README.md の変更
 3. 変更後は commit + push（全リモートに）
 
-## 関連リポ
-- `odakin/neutrino-covariant-wp` — ニュートリノ波束コバリアント計算
-
 ## 安全規則（公開リポ）
 **このリポは public。** 以下を絶対にコミットしない:
 - 実名（GitHub ユーザー名 `odakin` は可）
 - メールアドレス
-- 非公開リポ名
+- 非公開リポ名（→ MEMORY.md に記載）
 - 金融データ・口座情報
 - 所属機関名
 - 他ユーザーのユーザー名
