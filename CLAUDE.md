@@ -1,10 +1,10 @@
 # claude-config
 
 ## 概要
-`~/github` 共通設定ファイルを管理する設定リポ。どの端末でも clone + setup.sh で同じ規約が適用される。
+共通設定ファイルを管理する設定リポ。どの端末でも clone + setup.sh で同じ規約が適用される。
 
 ## リポジトリ情報
-- パス: `~/github/claude-config/`
+- パス: `<base>/claude-config/`
 - ブランチ: `main`
 - リモート: `SuperQuiver/claude-config` (public, GitHub)
 
@@ -25,16 +25,16 @@ claude-config/
 
 ## セットアップ（新しい端末で）
 ```bash
-mkdir -p ~/github && cd ~/github
+mkdir -p <base> && cd <base>
 gh repo clone SuperQuiver/claude-config
 cd claude-config && ./setup.sh
 ```
 
 setup.sh が自動で行うこと:
-1. `~/github/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
+1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
 2. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
-4. `SuperQuiver` の全リポを `~/github/` 以下に clone（未取得のもののみ）
+4. `SuperQuiver` の全リポを `<base>/` 以下に clone（未取得のもののみ）
 
 ## How to Resume
 1. このリポには SESSION.md は不要（永続的な設定リポのため）
@@ -57,11 +57,11 @@ setup.sh が自動で行うこと:
 
 ## 運用ルール
 - CONVENTIONS.md の正本はこのリポ内のファイル
-- `~/github/CONVENTIONS.md` は symlink（setup.sh が作成。Windows は cp + post-merge hook で自動同期）
+- `<base>/CONVENTIONS.md` は symlink（setup.sh が作成。Windows は cp + post-merge hook で自動同期）
 - CONVENTIONS.md を変更したらこのリポで commit + push
 - 他端末では `git pull` で同期
 
 ## 自動更新ルール（必須）
 以下を人間に言われなくても自動で行う:
 - CONVENTIONS.md を変更したら → このリポで commit + push
-- CLAUDE.md のルールの詳細は `~/github/CONVENTIONS.md` 参照
+- CLAUDE.md のルールの詳細は `<base>/CONVENTIONS.md` 参照
