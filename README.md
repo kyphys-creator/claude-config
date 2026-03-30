@@ -22,6 +22,7 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 │   ├── CONVENTIONS.md      # the single source of truth
 │   ├── README.md           # this file
 │   ├── setup.sh            # bootstrap script
+│   ├── hooks/              # Claude Code hooks (memory-guard)
 │   ├── gfm-rules.md        # CJK markdown reference
 │   ├── LICENSE             # MIT
 │   └── .gitignore
@@ -72,7 +73,7 @@ cd claude-config && ./setup.sh
 
 This separation ensures that after context compression, Claude can always resume from SESSION.md without losing track of work.
 
-### Push-Before-Check
+### Pre-Push Check
 
 Before every `git push`, Claude automatically verifies that SESSION.md and CLAUDE.md reflect the actual state of the project. This prevents documentation drift.
 
@@ -199,6 +200,7 @@ MIT
 │   ├── CONVENTIONS.md      # 規約の正本
 │   ├── README.md           # このファイル
 │   ├── setup.sh            # セットアップスクリプト
+│   ├── hooks/              # Claude Code hooks（memory-guard）
 │   ├── gfm-rules.md        # CJK markdown リファレンス
 │   ├── LICENSE             # MIT
 │   └── .gitignore
