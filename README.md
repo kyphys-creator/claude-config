@@ -15,7 +15,7 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 ## How It Works
 
 ```
-~/Claude/
+~/github/
 ├── CONVENTIONS.md → claude-config/CONVENTIONS.md  (symlink)
 ├── claude-config/          # this repo
 │   ├── CLAUDE.md           # project-specific instructions for this repo
@@ -30,7 +30,7 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 └── ...
 ```
 
-Each project's `CLAUDE.md` references `~/Claude/CONVENTIONS.md` for shared rules and adds only project-specific instructions.
+Each project's `CLAUDE.md` references `~/github/CONVENTIONS.md` for shared rules and adds only project-specific instructions.
 
 ## Quick Start
 
@@ -41,8 +41,8 @@ cd claude-config && ./setup.sh
 ```
 
 `setup.sh` will:
-1. Create `~/Claude/CONVENTIONS.md` as a relative symlink to `claude-config/CONVENTIONS.md`
-2. Clone all your GitHub repos into `~/Claude/` (skips repos already present)
+1. Create `~/github/CONVENTIONS.md` as a relative symlink to `claude-config/CONVENTIONS.md`
+2. Clone all your GitHub repos into `~/github/` (skips repos already present)
 
 ## What's in CONVENTIONS.md
 
@@ -189,7 +189,7 @@ MIT
 ## 仕組み
 
 ```
-~/Claude/
+~/github/
 ├── CONVENTIONS.md → claude-config/CONVENTIONS.md  (symlink)
 ├── claude-config/          # このリポ
 │   ├── CLAUDE.md           # このリポ固有の指示書
@@ -204,7 +204,7 @@ MIT
 └── ...
 ```
 
-各プロジェクトの `CLAUDE.md` は `~/Claude/CONVENTIONS.md` を参照し、プロジェクト固有の指示のみ追記する。
+各プロジェクトの `CLAUDE.md` は `~/github/CONVENTIONS.md` を参照し、プロジェクト固有の指示のみ追記する。
 
 ## クイックスタート
 
@@ -215,8 +215,8 @@ cd claude-config && ./setup.sh
 ```
 
 `setup.sh` が行うこと:
-1. `~/Claude/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の相対 symlink を作成
-2. GitHub 上の全リポを `~/Claude/` 以下に clone（既存はスキップ）
+1. `~/github/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の相対 symlink を作成
+2. GitHub 上の全リポを `~/github/` 以下に clone（既存はスキップ）
 
 ## CONVENTIONS.md の構成
 

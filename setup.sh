@@ -1,13 +1,13 @@
 #!/bin/bash
-# ~/Claude/claude-config/setup.sh
+# ~/github/claude-config/setup.sh
 # 新しい端末で clone 後に実行するセットアップスクリプト
 #   1. CONVENTIONS.md の symlink を作成（相対パス）
 #   2. Claude Code hooks をインストール（symlink + settings.json マージ）
-#   3. odakin の全リポを ~/Claude 以下に clone（未取得のもののみ）
+#   3. SuperQuiver の全リポを ~/github 以下に clone（未取得のもののみ）
 #
 # 使い方:
-#   mkdir -p ~/Claude && cd ~/Claude
-#   gh repo clone odakin/claude-config
+#   mkdir -p ~/github && cd ~/github
+#   gh repo clone SuperQuiver/claude-config
 #   cd claude-config && ./setup.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,7 +17,7 @@ REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
 # --- 1. Symlink ---
 echo "=== Step 1: Setting up symlinks ==="
 
-# 相対パス: symlink とターゲットが同一ツリー (~/Claude/) 内
+# 相対パス: symlink とターゲットが同一ツリー (~/github/) 内
 REL_TARGET="$REPO_DIRNAME/CONVENTIONS.md"
 LINK="$CLAUDE_DIR/CONVENTIONS.md"
 
@@ -65,7 +65,7 @@ install_hooks() {
     mkdir -p "$HOOKS_DST"
 
     # symlink 作成
-    # 絶対パス使用: ~/.claude/hooks/ と ~/Claude/claude-config/hooks/ は
+    # 絶対パス使用: ~/.claude/hooks/ と ~/github/claude-config/hooks/ は
     # 異なるディレクトリツリーのため、相対パスは脆弱
     for HOOK in "$HOOKS_SRC"/*.sh; do
         [ -f "$HOOK" ] || continue
@@ -154,9 +154,9 @@ if ! install_hooks; then
     echo "  ERROR: Hook installation failed. Continuing with remaining steps."
 fi
 
-# --- 3. Clone all odakin repos ---
+# --- 3. Clone all SuperQuiver repos ---
 echo ""
-echo "=== Step 3: Cloning odakin repos ==="
+echo "=== Step 3: Cloning SuperQuiver repos ==="
 
 if ! command -v gh &> /dev/null; then
     echo "  ERROR: gh (GitHub CLI) is not installed. Skipping repo sync."
@@ -170,7 +170,7 @@ if ! gh auth status &> /dev/null; then
 fi
 
 # Get all repo names from GitHub
-REPOS=$(gh repo list odakin --limit 100 --json name --jq '.[].name')
+REPOS=$(gh repo list SuperQuiver --limit 100 --json name --jq '.[].name')
 CLONED=0
 SKIPPED=0
 
@@ -179,8 +179,8 @@ for REPO in $REPOS; do
     if [ -d "$TARGET_DIR" ]; then
         SKIPPED=$((SKIPPED + 1))
     else
-        echo "  Cloning odakin/$REPO ..."
-        gh repo clone "odakin/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
+        echo "  Cloning SuperQuiver/$REPO ..."
+        gh repo clone "SuperQuiver/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
         CLONED=$((CLONED + 1))
     fi
 done

@@ -4,9 +4,9 @@
 `~/Claude` 共通設定ファイルを管理する設定リポ。どの端末でも clone + setup.sh で同じ規約が適用される。
 
 ## リポジトリ情報
-- パス: `~/Claude/claude-config/`
+- パス: `~/github/claude-config/`
 - ブランチ: `main`
-- リモート: `odakin/claude-config` (public, GitHub)
+- リモート: `SuperQuiver/claude-config` (public, GitHub)
 
 ## 構造
 ```
@@ -25,8 +25,8 @@ claude-config/
 
 ## セットアップ（新しい端末で）
 ```bash
-mkdir -p ~/Claude && cd ~/Claude
-gh repo clone odakin/claude-config
+mkdir -p ~/github && cd ~/github
+gh repo clone SuperQuiver/claude-config
 cd claude-config && ./setup.sh
 ```
 
@@ -41,8 +41,7 @@ setup.sh が自動で行うこと:
 3. 変更後は commit + push（全リモートに）
 
 ## 関連リポ
-- `odakin/zenn-articles` — Zenn.dev 日本語記事（このリポについての記事もそちらに格納）
-- `odakin/devto-articles` — 英語記事ソース（投稿先: dev.to）
+- `SuperQuiver/neutrino-covariant-wp` — ニュートリノ波束コバリアント計算
 
 ## 安全規則（公開リポ）
 **このリポは public。** 以下を絶対にコミットしない:
@@ -64,4 +63,4 @@ setup.sh が自動で行うこと:
 ## 自動更新ルール（必須）
 以下を人間に言われなくても自動で行う:
 - CONVENTIONS.md を変更したら → このリポで commit + push
-- CLAUDE.md のルールの詳細は `~/Claude/CONVENTIONS.md` 参照
+- CLAUDE.md のルールの詳細は `~/github/CONVENTIONS.md` 参照
