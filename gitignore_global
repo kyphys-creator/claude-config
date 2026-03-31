@@ -21,7 +21,10 @@ Thumbs.db
 *.log
 *.out
 *.synctex.gz
+*.synctex
 *.toc
+*.lof
+*.lot
 *.dvi
 *.nav
 *.snm
