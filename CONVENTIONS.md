@@ -6,6 +6,11 @@
 > setup.sh が自動検出するため、スクリプト実行時の指定は不要。
 >
 > **`<username>`** = 自分の GitHub ユーザー名（`gh api user --jq '.login'` で確認）。
+>
+> **このファイルの正本は `<base>/claude-config/CONVENTIONS.md`。**
+> `<base>/CONVENTIONS.md` は symlink（Windows は cp）。
+> 編集後は必ず **`cd <base>/claude-config && git add CONVENTIONS.md && git commit && git push`** すること。
+> symlink 経由で編集しても実体は同じだが、commit & push を `claude-config` リポから行わないと他の端末に反映されない。
 
 ---
 
