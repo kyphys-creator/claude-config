@@ -267,5 +267,86 @@ else
     echo "  Skipped (already exist): $SKIPPED repos"
 fi
 
+# --- 5. Install pre-commit hook for LaTeX repos ---
+# .tex or .bib を含むリポに pre-commit hook (Unicode→LaTeX 自動修正) をインストール
+echo ""
+echo "=== Step 5: Installing pre-commit hooks for LaTeX repos ==="
+
+PRE_COMMIT_SRC="$SCRIPT_DIR/scripts/pre-commit-bib"
+
+if [ ! -f "$PRE_COMMIT_SRC" ]; then
+    echo "  ERROR: $PRE_COMMIT_SRC not found. Skipping."
+else
+    INSTALLED=0
+    SKIPPED_HOOK=0
+
+    for REPO_DIR in "$CLAUDE_DIR"/*/; do
+        [ -d "$REPO_DIR/.git" ] || continue
+
+        # LaTeX ファイルが存在するか簡易チェック
+        HAS_LATEX=false
+        for ext in tex bib; do
+            if ls "$REPO_DIR"*."$ext" "$REPO_DIR"**/*."$ext" 2>/dev/null | head -1 | grep -q .; then
+                HAS_LATEX=true
+                break
+            fi
+        done
+        [ "$HAS_LATEX" = true ] || continue
+
+        HOOK_DST="$REPO_DIR.git/hooks/pre-commit"
+        REPO_NAME="$(basename "$REPO_DIR")"
+
+        if [ "$IS_WINDOWS" = true ]; then
+            # Windows: コピー
+            if [ -f "$HOOK_DST" ] && grep -q "fix-bib-unicode" "$HOOK_DST" 2>/dev/null; then
+                SKIPPED_HOOK=$((SKIPPED_HOOK + 1))
+            else
+                if [ -f "$HOOK_DST" ]; then
+                    cp "$HOOK_DST" "$HOOK_DST.bak"
+                    echo "  WARNING: $REPO_NAME had existing pre-commit → backed up to .bak"
+                fi
+                cp -f "$PRE_COMMIT_SRC" "$HOOK_DST"
+                chmod +x "$HOOK_DST"
+                echo "  Installed (copy): $REPO_NAME"
+                INSTALLED=$((INSTALLED + 1))
+            fi
+        else
+            # Mac/Linux: symlink
+            if [ -L "$HOOK_DST" ]; then
+                CURRENT_TARGET="$(readlink "$HOOK_DST")"
+                if [ "$CURRENT_TARGET" = "$PRE_COMMIT_SRC" ]; then
+                    SKIPPED_HOOK=$((SKIPPED_HOOK + 1))
+                else
+                    echo "  UPDATE: $REPO_NAME (was -> $CURRENT_TARGET)"
+                    rm "$HOOK_DST"
+                    ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
+                    INSTALLED=$((INSTALLED + 1))
+                fi
+            elif [ -f "$HOOK_DST" ]; then
+                if grep -q "fix-bib-unicode" "$HOOK_DST" 2>/dev/null; then
+                    # 旧バージョン（直接コピー）→ symlink に差し替え
+                    rm "$HOOK_DST"
+                    ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
+                    echo "  Upgraded to symlink: $REPO_NAME"
+                    INSTALLED=$((INSTALLED + 1))
+                else
+                    cp "$HOOK_DST" "$HOOK_DST.bak"
+                    echo "  WARNING: $REPO_NAME had existing pre-commit → backed up to .bak"
+                    ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
+                    echo "  Installed (symlink): $REPO_NAME"
+                    INSTALLED=$((INSTALLED + 1))
+                fi
+            else
+                ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
+                echo "  Installed (symlink): $REPO_NAME"
+                INSTALLED=$((INSTALLED + 1))
+            fi
+        fi
+    done
+
+    echo "  Installed: $INSTALLED repos"
+    echo "  Already up to date: $SKIPPED_HOOK repos"
+fi
+
 echo ""
 echo "=== Done ==="

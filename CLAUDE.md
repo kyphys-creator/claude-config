@@ -18,6 +18,9 @@ claude-config/
 ├── hooks/
 │   ├── memory-guard.sh       # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
 │   └── memory-guard-bash.sh  # メモリ書き込みガード — Bash 用（警告のみ）
+├── scripts/
+│   ├── fix-bib-unicode.py    # LaTeX ソースの非LaTeX文字→LaTeX変換スクリプト
+│   └── pre-commit-bib        # Git pre-commit hook（上記を呼ぶシェルスクリプト）
 ├── gfm-rules.md     # GFM CJK bold 対策リファレンス
 ├── LICENSE          # MIT
 └── .gitignore
@@ -35,6 +38,7 @@ setup.sh が自動で行うこと:
 2. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 4. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
+5. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 
 ## How to Resume
 1. このリポには SESSION.md は不要（永続的な設定リポのため）

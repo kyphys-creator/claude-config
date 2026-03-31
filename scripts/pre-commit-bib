@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# pre-commit hook: auto-fix non-LaTeX characters in LaTeX source files.
+#
+# Canonical location: claude-config/scripts/pre-commit-bib
+# Installed by setup.sh to .git/hooks/pre-commit in repos containing
+# LaTeX files (.tex, .bib, .bst, .cls, .sty).
+#
+# The fixer script (fix-bib-unicode.py) is resolved relative to this file
+# when symlinked, or falls back to ~/Claude/claude-config/scripts/.
+
+set -euo pipefail
+
+# Locate fix-bib-unicode.py:
+#   1. Follow symlink to find the canonical scripts/ directory
+#   2. Fall back to ~/Claude/claude-config/scripts/
+SELF="$(readlink -f "$0" 2>/dev/null || readlink "$0" 2>/dev/null || echo "$0")"
+SCRIPTS_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+FIXER="$SCRIPTS_DIR/fix-bib-unicode.py"
+
+if [[ ! -f "$FIXER" ]]; then
+    # Fallback for Windows (cp install) where readlink may not resolve
+    FIXER="$HOME/Claude/claude-config/scripts/fix-bib-unicode.py"
+fi
+
+if [[ ! -f "$FIXER" ]]; then
+    echo "pre-commit: fix-bib-unicode.py not found. Skipping LaTeX check." >&2
+    exit 0
+fi
+
+# Check staged LaTeX-related files
+LATEX_FILES=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '\.(tex|bib|bst|cls|sty)$' || true)
+if [[ -z "$LATEX_FILES" ]]; then
+    exit 0
+fi
+
+# Run the fixer (exit 1 = files were modified, 0 = no changes)
+python3 "$FIXER" $LATEX_FILES && rc=0 || rc=$?
+
+if [[ $rc -eq 1 ]]; then
+    for f in $LATEX_FILES; do
+        git add "$f"
+    done
+    echo "pre-commit: auto-fixed non-LaTeX characters and re-staged."
+elif [[ $rc -ge 2 ]]; then
+    echo "pre-commit: fix-bib-unicode.py failed (exit $rc)." >&2
+    exit 1
+fi
+
+exit 0
