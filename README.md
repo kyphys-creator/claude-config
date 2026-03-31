@@ -44,6 +44,7 @@ cd claude-config && ./setup.sh
 
 `setup.sh` will:
 1. Create `<base>/CONVENTIONS.md` as a relative symlink to `claude-config/CONVENTIONS.md`
+1b. Install global gitignore (`~/.gitignore_global` → `claude-config/gitignore_global`)
 2. Install Claude Code hooks (memory-guard) into `~/.claude/hooks/` and merge settings into `~/.claude/settings.json`
 3. Install a git post-merge hook to auto-sync hooks and CONVENTIONS.md on `git pull`
 4. Clone all your GitHub repos into `<base>/` (skips repos already present)
@@ -224,6 +225,7 @@ cd claude-config && ./setup.sh
 
 `setup.sh` が行うこと:
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の相対 symlink を作成
+1b. グローバル gitignore をインストール（`~/.gitignore_global` → `claude-config/gitignore_global`）
 2. Claude Code hooks（memory-guard）を `~/.claude/hooks/` にインストールし、`~/.claude/settings.json` に設定をマージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 4. GitHub 上の全リポを `<base>/` 以下に clone（既存はスキップ）

@@ -1,10 +1,12 @@
 #!/bin/bash
 # claude-config/setup.sh
 # 新しい端末で clone 後に実行するセットアップスクリプト
-#   1. CONVENTIONS.md の symlink を作成（相対パス）
-#   2. Claude Code hooks をインストール（symlink + settings.json マージ）
-#   3. git post-merge hook をインストール（git pull 時に hooks を自動同期）
-#   4. GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
+#   1.  CONVENTIONS.md の symlink を作成（相対パス）
+#   1b. グローバル gitignore をインストール（~/.gitignore_global に symlink）
+#   2.  Claude Code hooks をインストール（symlink + settings.json マージ）
+#   3.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
+#   4.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
+#   5.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 #
 # 使い方:
 #   mkdir -p <base> && cd <base>
