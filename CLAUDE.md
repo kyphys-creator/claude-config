@@ -11,22 +11,27 @@
 ## 構造
 ```
 claude-config/
-├── CLAUDE.md        # このファイル（リポ固有の指示書）
-├── CONVENTIONS.md   # 全リポ共通規約（正本）
-├── README.md        # プロジェクト説明（英語/日本語）
-├── setup.sh         # symlink + hooks + clone セットアップスクリプト
-├── hooks/
-│   ├── memory-guard.sh       # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
-│   └── memory-guard-bash.sh  # メモリ書き込みガード — Bash 用（警告のみ）
-├── scripts/
-│   ├── fix-bib-unicode.py    # LaTeX ソースの非LaTeX文字→LaTeX変換スクリプト
-│   └── pre-commit-bib        # Git pre-commit hook（上記を呼ぶシェルスクリプト）
+├── CLAUDE.md               # このファイル（リポ固有の指示書）
+├── CONVENTIONS.md          # 全リポ共通規約（正本）
+├── README.md               # プロジェクト説明（English）
+├── README.ja.md            # プロジェクト説明（日本語）
+├── setup.sh                # セットアップスクリプト
 ├── conventions/
-│   ├── latex.md     # LaTeX 固有規約（物理リポで参照）
-│   └── mcp.md       # MCP 固有規約（MCP 使用時に参照）
-├── gitignore_global  # グローバル gitignore（~/.gitignore_global に symlink）
-├── gfm-rules.md     # GFM CJK bold 対策リファレンス
-├── LICENSE          # MIT
+│   ├── shared-repo.md      # 共有リポ固有規約
+│   ├── latex.md            # LaTeX 固有規約（物理リポで参照）
+│   └── mcp.md              # MCP 固有規約（MCP 使用時に参照）
+├── hooks/
+│   ├── memory-guard.sh         # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
+│   └── memory-guard-bash.sh    # メモリ書き込みガード — Bash 用（警告のみ）
+├── scripts/
+│   ├── fix-bib-unicode.py      # Unicode→LaTeX 変換スクリプト
+│   └── pre-commit-bib          # Git pre-commit hook（上記を呼ぶ）
+├── docs/
+│   ├── usage-tips.md           # 運用Tips（English）
+│   └── usage-tips.ja.md        # 運用Tips（日本語）
+├── gitignore_global        # グローバル gitignore（~/.gitignore_global に symlink）
+├── gfm-rules.md            # GFM CJK bold 対策リファレンス
+├── LICENSE                  # MIT
 └── .gitignore
 ```
 
