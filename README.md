@@ -23,7 +23,8 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 │   ├── README.md           # this file
 │   ├── setup.sh            # bootstrap script
 │   ├── conventions/        # domain-specific rules (loaded only when relevant)
-│   │   ├── latex.md        # LaTeX: equation safety, compiler, JHEP.bst, .gitignore
+│   │   ├── shared-repo.md  # shared repos: Git workflow guards, .gitignore, ~ paths
+│   │   ├── latex.md        # LaTeX: equation safety, compiler, JHEP.bst, pre-commit hook
 │   │   └── mcp.md          # MCP/GCal: pre-operation checks, naming conventions
 │   ├── hooks/              # Claude Code hooks (memory-guard)
 │   ├── scripts/            # Git pre-commit hooks (LaTeX Unicode auto-fix)
@@ -185,7 +186,8 @@ MIT
 │   ├── README.md           # このファイル
 │   ├── setup.sh            # セットアップスクリプト
 │   ├── conventions/        # ドメイン固有規約（必要時のみロード）
-│   │   ├── latex.md        # LaTeX: 式の安全規則、コンパイラ、JHEP.bst、.gitignore
+│   │   ├── shared-repo.md  # 共有リポ: Git workflow ガード、.gitignore、~ パス
+│   │   ├── latex.md        # LaTeX: 式の安全規則、コンパイラ、JHEP.bst、pre-commit hook
 │   │   └── mcp.md          # MCP/GCal: 操作前確認、命名規則
 │   ├── hooks/              # Claude Code hooks（memory-guard）
 │   ├── scripts/            # Git pre-commit hooks（LaTeX Unicode 自動修正）
