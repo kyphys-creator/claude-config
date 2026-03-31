@@ -21,6 +21,9 @@ claude-config/
 ├── scripts/
 │   ├── fix-bib-unicode.py    # LaTeX ソースの非LaTeX文字→LaTeX変換スクリプト
 │   └── pre-commit-bib        # Git pre-commit hook（上記を呼ぶシェルスクリプト）
+├── conventions/
+│   ├── latex.md     # LaTeX 固有規約（物理リポで参照）
+│   └── mcp.md       # MCP 固有規約（MCP 使用時に参照）
 ├── gitignore_global  # グローバル gitignore（~/.gitignore_global に symlink）
 ├── gfm-rules.md     # GFM CJK bold 対策リファレンス
 ├── LICENSE          # MIT

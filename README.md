@@ -22,6 +22,9 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 │   ├── CONVENTIONS.md      # the single source of truth
 │   ├── README.md           # this file
 │   ├── setup.sh            # bootstrap script
+│   ├── conventions/        # domain-specific rules (loaded only when relevant)
+│   │   ├── latex.md        # LaTeX: equation safety, compiler, JHEP.bst, .gitignore
+│   │   └── mcp.md          # MCP/GCal: pre-operation checks, naming conventions
 │   ├── hooks/              # Claude Code hooks (memory-guard)
 │   ├── scripts/            # Git pre-commit hooks (LaTeX Unicode auto-fix)
 │   ├── gfm-rules.md        # CJK markdown reference
@@ -32,7 +35,7 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 └── ...
 ```
 
-Each project's `CLAUDE.md` references `<base>/CONVENTIONS.md` for shared rules and adds only project-specific instructions.
+Each project's `CLAUDE.md` references `<base>/CONVENTIONS.md` for shared rules and `conventions/*.md` for domain-specific rules (LaTeX, MCP), adding only project-specific instructions. Domain rules are loaded on demand, not on every session.
 
 ## Quick Start
 
@@ -94,7 +97,7 @@ The conventions include strict safety rules to prevent AI-assisted accidents:
 
 - No destructive operations (force push, `reset --hard`, file deletion) without user confirmation
 - No credentials or secrets in commits
-- No modification of LaTeX equations without explicit approval (prevents hallucinated physics)
+- No modification of LaTeX equations without explicit approval (see `conventions/latex.md`)
 - Scope limited to owned repositories only
 
 ## Usage Tips
@@ -200,6 +203,9 @@ MIT
 │   ├── CONVENTIONS.md      # 規約の正本
 │   ├── README.md           # このファイル
 │   ├── setup.sh            # セットアップスクリプト
+│   ├── conventions/        # ドメイン固有規約（必要時のみロード）
+│   │   ├── latex.md        # LaTeX: 式の安全規則、コンパイラ、JHEP.bst、.gitignore
+│   │   └── mcp.md          # MCP/GCal: 操作前確認、命名規則
 │   ├── hooks/              # Claude Code hooks（memory-guard）
 │   ├── scripts/            # Git pre-commit hooks（LaTeX Unicode 自動修正）
 │   ├── gfm-rules.md        # CJK markdown リファレンス
@@ -210,7 +216,7 @@ MIT
 └── ...
 ```
 
-各プロジェクトの `CLAUDE.md` は `<base>/CONVENTIONS.md` を参照し、プロジェクト固有の指示のみ追記する。
+各プロジェクトの `CLAUDE.md` は `<base>/CONVENTIONS.md` を共通規約として参照し、`conventions/*.md` のドメイン固有規約（LaTeX, MCP）を必要に応じて参照する。プロジェクト固有の指示のみ追記する。
 
 ## クイックスタート
 
@@ -272,7 +278,7 @@ AI アシスタントによる事故を防ぐための厳格なルール:
 
 - 破壊的操作（force push、`reset --hard`、ファイル削除）はユーザー確認なしに実行しない
 - 機密情報・認証情報をコミットしない
-- LaTeX の数式は明示的な承認なしに変更しない（物理のハルシネーション防止）
+- LaTeX の数式は明示的な承認なしに変更しない（`conventions/latex.md` 参照）
 - 操作範囲は自分のリポジトリのみに限定
 
 ## 運用Tips
