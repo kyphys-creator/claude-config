@@ -4,9 +4,10 @@
 #   1.  CONVENTIONS.md の symlink を作成（相対パス）
 #   1b. グローバル gitignore をインストール（~/.gitignore_global に symlink）
 #   2.  Claude Code hooks をインストール（symlink + settings.json マージ）
-#   3.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
-#   4.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
-#   5.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+#   3.  Claude Code パーミッション設定（安全なツールを自動許可）
+#   4.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
+#   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
+#   6.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 #
 # 使い方:
 #   mkdir -p <base> && cd <base>
@@ -218,11 +219,70 @@ if ! install_hooks; then
     echo "  ERROR: Hook installation failed. Continuing with remaining steps."
 fi
 
-# --- 3. Install git post-merge hook ---
+# --- 3. Configure permissions ---
+# 安全なツールを自動許可し、非破壊的操作のたびに確認を求めないようにする
+echo ""
+echo "=== Step 3: Configuring Claude Code permissions ==="
+
+SAFE_TOOLS='["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch"]'
+
+configure_permissions() {
+    if ! command -v jq &> /dev/null; then
+        echo "  WARNING: jq not found. Cannot configure permissions."
+        return 0
+    fi
+
+    if [ ! -f "$SETTINGS" ]; then
+        echo "  Creating settings.json with permissions config."
+        mkdir -p "$(dirname "$SETTINGS")"
+        jq -n --argjson tools "$SAFE_TOOLS" \
+            '{permissions: {allow: $tools, deny: []}}' > "$SETTINGS"
+        echo "  Created: $SETTINGS"
+        return 0
+    fi
+
+    # permissions キーがない → 追加
+    if ! jq -e '.permissions' "$SETTINGS" > /dev/null 2>&1; then
+        echo "  Adding permissions config ..."
+        jq --argjson tools "$SAFE_TOOLS" \
+            '. + {permissions: {allow: $tools, deny: []}}' \
+            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        echo "  Done."
+    elif ! jq -e '.permissions.allow' "$SETTINGS" > /dev/null 2>&1; then
+        echo "  Adding permissions.allow ..."
+        jq --argjson tools "$SAFE_TOOLS" \
+            '.permissions.allow = $tools' \
+            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        echo "  Done."
+    else
+        # allow が存在する場合、不足しているツールを追加
+        UPDATED=false
+        for TOOL in $(echo "$SAFE_TOOLS" | jq -r '.[]'); do
+            if ! jq -e --arg t "$TOOL" '.permissions.allow | index($t)' "$SETTINGS" > /dev/null 2>&1; then
+                echo "  Adding missing permission: $TOOL"
+                jq --arg t "$TOOL" \
+                    '.permissions.allow += [$t]' \
+                    "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                UPDATED=true
+            fi
+        done
+        if [ "$UPDATED" = false ]; then
+            echo "  All safe tools already permitted."
+        else
+            echo "  Done."
+        fi
+    fi
+}
+
+if ! configure_permissions; then
+    echo "  ERROR: Permission configuration failed. Continuing with remaining steps."
+fi
+
+# --- 4. Install git post-merge hook ---
 # git pull 後に hooks と CONVENTIONS.md を自動同期する
 # Windows では symlink の代わりに cp を使うため、pull 後の再同期が必要
 echo ""
-echo "=== Step 3: Installing git post-merge hook ==="
+echo "=== Step 4: Installing git post-merge hook ==="
 
 GIT_HOOKS_DIR="$SCRIPT_DIR/.git/hooks"
 POST_MERGE="$GIT_HOOKS_DIR/post-merge"
@@ -267,9 +327,9 @@ POST_MERGE_EOF
     echo "  git pull 後に hooks と CONVENTIONS.md が自動同期されます"
 fi
 
-# --- 4. Clone all repos ---
+# --- 5. Clone all repos ---
 echo ""
-echo "=== Step 4: Cloning repos ==="
+echo "=== Step 5: Cloning repos ==="
 
 if [ -z "$GH_USER" ]; then
     echo "  SKIPPED: GitHub user not detected. Run 'gh auth login' and re-run setup.sh."
@@ -305,10 +365,10 @@ else
     echo "  Skipped (already exist): $SKIPPED repos"
 fi
 
-# --- 5. Install pre-commit hook for LaTeX repos ---
+# --- 6. Install pre-commit hook for LaTeX repos ---
 # .tex or .bib を含むリポに pre-commit hook (Unicode→LaTeX 自動修正) をインストール
 echo ""
-echo "=== Step 5: Installing pre-commit hooks for LaTeX repos ==="
+echo "=== Step 6: Installing pre-commit hooks for LaTeX repos ==="
 
 PRE_COMMIT_SRC="$SCRIPT_DIR/scripts/pre-commit-bib"
 

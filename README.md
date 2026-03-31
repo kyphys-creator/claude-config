@@ -15,7 +15,7 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 ## How It Works
 
 ```
-<base>/
+~/Claude/                   # recommended base directory
 ├── CONVENTIONS.md → claude-config/CONVENTIONS.md  (symlink)
 ├── claude-config/          # this repo
 │   ├── CLAUDE.md           # project-specific instructions for this repo
@@ -36,8 +36,10 @@ Each project's `CLAUDE.md` references `<base>/CONVENTIONS.md` for shared rules a
 
 ## Quick Start
 
+We recommend using `~/Claude` as the base directory — a single dedicated workspace for all your Claude Code projects:
+
 ```bash
-mkdir -p <base> && cd <base>
+mkdir -p ~/Claude && cd ~/Claude
 gh repo clone <your-username>/claude-config
 cd claude-config && ./setup.sh
 ```
@@ -46,9 +48,10 @@ cd claude-config && ./setup.sh
 1. Create `<base>/CONVENTIONS.md` as a relative symlink to `claude-config/CONVENTIONS.md`
 1b. Install global gitignore (`~/.gitignore_global` → `claude-config/gitignore_global`)
 2. Install Claude Code hooks (memory-guard) into `~/.claude/hooks/` and merge settings into `~/.claude/settings.json`
-3. Install a git post-merge hook to auto-sync hooks and CONVENTIONS.md on `git pull`
-4. Clone all your GitHub repos into `<base>/` (skips repos already present)
-5. Install pre-commit hooks for LaTeX repos (auto-fix Unicode → LaTeX in `.tex`/`.bib` files)
+3. Configure Claude Code permissions — auto-allow safe tools (Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch) so Claude doesn't ask for confirmation on every non-destructive operation
+4. Install a git post-merge hook to auto-sync hooks and CONVENTIONS.md on `git pull`
+5. Clone all your GitHub repos into `<base>/` (skips repos already present)
+6. Install pre-commit hooks for LaTeX repos (auto-fix Unicode → LaTeX in `.tex`/`.bib` files)
 
 ## What's in CONVENTIONS.md
 
@@ -196,7 +199,7 @@ MIT
 ## 仕組み
 
 ```
-<base>/
+~/Claude/                   # 推奨ベースディレクトリ
 ├── CONVENTIONS.md → claude-config/CONVENTIONS.md  (symlink)
 ├── claude-config/          # このリポ
 │   ├── CLAUDE.md           # このリポ固有の指示書
@@ -217,8 +220,10 @@ MIT
 
 ## クイックスタート
 
+ベースディレクトリとして `~/Claude` を推奨 — Claude Code の全プロジェクトを一箇所にまとめるワークスペース:
+
 ```bash
-mkdir -p <base> && cd <base>
+mkdir -p ~/Claude && cd ~/Claude
 gh repo clone <your-username>/claude-config
 cd claude-config && ./setup.sh
 ```
@@ -227,9 +232,10 @@ cd claude-config && ./setup.sh
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の相対 symlink を作成
 1b. グローバル gitignore をインストール（`~/.gitignore_global` → `claude-config/gitignore_global`）
 2. Claude Code hooks（memory-guard）を `~/.claude/hooks/` にインストールし、`~/.claude/settings.json` に設定をマージ
-3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
-4. GitHub 上の全リポを `<base>/` 以下に clone（既存はスキップ）
-5. LaTeX リポ（`.tex`/`.bib` を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+3. Claude Code のパーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可し、非破壊的操作のたびに確認を求めないようにする
+4. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
+5. GitHub 上の全リポを `<base>/` 以下に clone（既存はスキップ）
+6. LaTeX リポ（`.tex`/`.bib` を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 
 ## CONVENTIONS.md の構成
 
