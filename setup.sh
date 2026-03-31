@@ -52,6 +52,42 @@ else
     echo "  Created: $LINK -> $REL_TARGET"
 fi
 
+# --- 1b. Install global gitignore ---
+echo ""
+echo "=== Step 1b: Installing global gitignore ==="
+
+GITIGNORE_SRC="$SCRIPT_DIR/gitignore_global"
+GITIGNORE_DST="$HOME/.gitignore_global"
+
+if [ ! -f "$GITIGNORE_SRC" ]; then
+    echo "  WARNING: gitignore_global not found in repo. Skipping."
+else
+    if [ "$IS_WINDOWS" = true ]; then
+        cp -f "$GITIGNORE_SRC" "$GITIGNORE_DST"
+        echo "  Copied (Windows): $GITIGNORE_DST"
+    elif [ -L "$GITIGNORE_DST" ]; then
+        CURRENT_TARGET="$(readlink "$GITIGNORE_DST")"
+        if [ "$CURRENT_TARGET" = "$GITIGNORE_SRC" ]; then
+            echo "  OK: $GITIGNORE_DST -> $CURRENT_TARGET"
+        else
+            echo "  UPDATE: was -> $CURRENT_TARGET"
+            rm "$GITIGNORE_DST"
+            ln -s "$GITIGNORE_SRC" "$GITIGNORE_DST"
+        fi
+    elif [ -f "$GITIGNORE_DST" ]; then
+        echo "  WARNING: $GITIGNORE_DST exists as regular file. Backing up."
+        mv "$GITIGNORE_DST" "$GITIGNORE_DST.bak"
+        ln -s "$GITIGNORE_SRC" "$GITIGNORE_DST"
+        echo "  Created: $GITIGNORE_DST -> $GITIGNORE_SRC"
+    else
+        ln -s "$GITIGNORE_SRC" "$GITIGNORE_DST"
+        echo "  Created: $GITIGNORE_DST -> $GITIGNORE_SRC"
+    fi
+    # Register with git
+    git config --global core.excludesfile "$GITIGNORE_DST"
+    echo "  Set git config --global core.excludesfile = $GITIGNORE_DST"
+fi
+
 # --- 2. Install hooks ---
 # Step 1 の失敗で Step 2-4 が止まらないよう、ここから先はエラーを個別処理
 echo ""

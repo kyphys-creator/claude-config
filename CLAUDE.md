@@ -21,6 +21,7 @@ claude-config/
 ├── scripts/
 │   ├── fix-bib-unicode.py    # LaTeX ソースの非LaTeX文字→LaTeX変換スクリプト
 │   └── pre-commit-bib        # Git pre-commit hook（上記を呼ぶシェルスクリプト）
+├── gitignore_global  # グローバル gitignore（~/.gitignore_global に symlink）
 ├── gfm-rules.md     # GFM CJK bold 対策リファレンス
 ├── LICENSE          # MIT
 └── .gitignore
@@ -35,6 +36,7 @@ cd claude-config && ./setup.sh
 
 setup.sh が自動で行うこと:
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
+1b. `~/.gitignore_global` → `claude-config/gitignore_global` の symlink + `git config --global core.excludesfile` 設定
 2. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 4. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）

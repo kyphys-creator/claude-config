@@ -1,0 +1,41 @@
+# claude-config/gitignore_global
+# Installed by setup.sh → ~/.gitignore_global
+# git config --global core.excludesfile ~/.gitignore_global
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# === Claude Code ===
+.claude/
+
+# === LaTeX intermediates (NOT pdf — PDFs are tracked) ===
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.dvi
+*.nav
+*.snm
+*.vrb
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# === Mathematica ===
+*.mx
+
+# === Node ===
+node_modules/
