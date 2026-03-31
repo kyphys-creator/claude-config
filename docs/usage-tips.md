@@ -59,7 +59,7 @@ Pick exactly one place for each piece of information. Reference it from other pl
 ```markdown
 # Bad — circular reference
 CONVENTIONS.md: "Repo list is in MEMORY.md"
-MEMORY.md: "Repo list is in CONVENTIONS.md §9"
+MEMORY.md: "Repo list is in CONVENTIONS.md §1"
 
 # Good — single source with precise pointer
 CONVENTIONS.md: "Repo list: see MEMORY.md, section 'Repo Index'"

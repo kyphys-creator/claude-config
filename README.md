@@ -94,7 +94,7 @@ The conventions define a decision table for where information belongs (CONVENTIO
 
 | Information type | Destination |
 |-----------------|-------------|
-| User preferences, feedback | Memory (`~/.claude/`) |
+| User preferences, feedback, external references | Memory (`~/.claude/`) |
 | Current work state, tasks | SESSION.md |
 | Permanent specs, structure | CLAUDE.md |
 | Design rationale | DESIGN.md |
