@@ -23,6 +23,7 @@ The idea is simple: keep one authoritative set of conventions and symlink it int
 │   ├── README.md           # this file
 │   ├── setup.sh            # bootstrap script
 │   ├── hooks/              # Claude Code hooks (memory-guard)
+│   ├── scripts/            # Git pre-commit hooks (LaTeX Unicode auto-fix)
 │   ├── gfm-rules.md        # CJK markdown reference
 │   ├── LICENSE             # MIT
 │   └── .gitignore
@@ -46,6 +47,7 @@ cd claude-config && ./setup.sh
 2. Install Claude Code hooks (memory-guard) into `~/.claude/hooks/` and merge settings into `~/.claude/settings.json`
 3. Install a git post-merge hook to auto-sync hooks and CONVENTIONS.md on `git pull`
 4. Clone all your GitHub repos into `<base>/` (skips repos already present)
+5. Install pre-commit hooks for LaTeX repos (auto-fix Unicode → LaTeX in `.tex`/`.bib` files)
 
 ## What's in CONVENTIONS.md
 
@@ -201,6 +203,7 @@ MIT
 │   ├── README.md           # このファイル
 │   ├── setup.sh            # セットアップスクリプト
 │   ├── hooks/              # Claude Code hooks（memory-guard）
+│   ├── scripts/            # Git pre-commit hooks（LaTeX Unicode 自動修正）
 │   ├── gfm-rules.md        # CJK markdown リファレンス
 │   ├── LICENSE             # MIT
 │   └── .gitignore
@@ -224,6 +227,7 @@ cd claude-config && ./setup.sh
 2. Claude Code hooks（memory-guard）を `~/.claude/hooks/` にインストールし、`~/.claude/settings.json` に設定をマージ
 3. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 4. GitHub 上の全リポを `<base>/` 以下に clone（既存はスキップ）
+5. LaTeX リポ（`.tex`/`.bib` を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 
 ## CONVENTIONS.md の構成
 
