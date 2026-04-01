@@ -52,8 +52,8 @@ setup.sh が自動で行うこと:
 7. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 
 ## How to Resume
-1. このリポには SESSION.md は不要（永続的な設定リポのため）
-2. 作業内容は CONVENTIONS.md と README.md の変更
+1. SESSION.md を読む → 現在状態と残タスクを把握
+2. 残タスクに従って作業継続
 3. 変更後は commit + push（全リモートに）
 
 ## 安全規則（公開リポ）
