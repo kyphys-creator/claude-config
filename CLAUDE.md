@@ -20,7 +20,8 @@ claude-config/
 ├── conventions/
 │   ├── shared-repo.md      # 共有リポ固有規約
 │   ├── latex.md            # LaTeX 固有規約（物理リポで参照）
-│   └── mcp.md              # MCP 固有規約（MCP 使用時に参照）
+│   ├── mcp.md              # MCP 固有規約（MCP 使用時に参照）
+│   └── substack.md         # Substack 入稿規約（Markdown→リッチテキスト変換手順）
 ├── hooks/
 │   ├── memory-guard.sh         # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
 │   └── memory-guard-bash.sh    # メモリ書き込みガード — Bash 用（警告のみ）
