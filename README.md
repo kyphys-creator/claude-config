@@ -47,6 +47,7 @@ On Windows (MSYS/Cygwin), symlinks are replaced with file copies, and the `post-
 ├── CONVENTIONS.md → claude-config/CONVENTIONS.md  (symlink)
 ├── claude-config/              # this repo
 │   ├── CLAUDE.md               # project-specific instructions
+│   ├── SESSION.md              # current work state and tasks
 │   ├── CONVENTIONS.md          # shared rules (single source of truth)
 │   ├── README.md               # this file (English)
 │   ├── README.ja.md            # Japanese version
