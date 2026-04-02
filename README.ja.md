@@ -34,9 +34,9 @@ cd claude-config && ./setup.sh
 4. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
 5. git `post-merge` hook をインストール（`git pull` 後に自動同期）
 6. GitHub 上の全リポを clone（既存はスキップ）
-7. git-crypt 暗号化リポを自動 unlock（鍵があれば）
-8. LaTeX リポに pre-commit hook をインストール（`.tex`/`.bib` の Unicode→LaTeX 自動修正）
-9. Hammerspoon 設定をインストール（Claude for Mac の Cmd+Q 誤終了防止、macOS のみ）
+7. LaTeX リポに pre-commit hook をインストール（`.tex`/`.bib` の Unicode→LaTeX 自動修正）
+8. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
+9. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
 
 > **`<base>`** = `claude-config` を clone した親ディレクトリ（例: `~/Claude/`）。`setup.sh` が自動検出。
 

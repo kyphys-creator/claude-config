@@ -368,19 +368,12 @@ else
 fi
 
 # --- 5b. Unlock git-crypt repos ---
-# git-crypt で暗号化されたリポを自動 unlock する
-echo ""
-echo "=== Step 5b: Unlocking git-crypt repos ==="
-
+# git-crypt + 鍵が両方ある場合のみ実行（なければサイレントスキップ）
 GIT_CRYPT_KEY="$HOME/.secrets/git-crypt.key"
 
-if ! command -v git-crypt &> /dev/null; then
-    echo "  WARNING: git-crypt not installed. Encrypted repos will remain locked."
-    echo "  Install with: brew install git-crypt"
-elif [ ! -f "$GIT_CRYPT_KEY" ]; then
-    echo "  WARNING: Key not found at $GIT_CRYPT_KEY"
-    echo "  See secrets-config/CLAUDE.md for key backup restoration."
-else
+if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
+    echo ""
+    echo "=== Step 5b: Unlocking git-crypt repos ==="
     UNLOCKED=0
     SKIPPED_CRYPT=0
     # .gitattributes に git-crypt 設定があるリポを自動検出
@@ -483,19 +476,18 @@ else
 fi
 
 # --- 7. Install Hammerspoon config ---
-# Claude for Mac の Cmd+Q 誤終了防止（eventtap で Cmd+Tab 経由も捕捉）
-echo ""
-echo "=== Step 7: Installing Hammerspoon config ==="
-
+# Hammerspoon がインストール済みの場合のみ実行（なければサイレントスキップ）
 HS_SRC="$SCRIPT_DIR/hammerspoon/init.lua"
 HS_DIR="$HOME/.hammerspoon"
 HS_DST="$HS_DIR/init.lua"
 
-if [ "$(uname -s)" != "Darwin" ]; then
-    echo "  SKIPPED: Hammerspoon is macOS only."
+if [ "$(uname -s)" != "Darwin" ] || [ ! -d "/Applications/Hammerspoon.app" ]; then
+    : # macOS 以外 or Hammerspoon 未インストール → サイレントスキップ
 elif [ ! -f "$HS_SRC" ]; then
-    echo "  WARNING: hammerspoon/init.lua not found in repo. Skipping."
+    : # init.lua がリポにない → スキップ
 else
+    echo ""
+    echo "=== Step 7: Installing Hammerspoon config ==="
     mkdir -p "$HS_DIR"
     if [ -L "$HS_DST" ]; then
         CURRENT_TARGET="$(readlink "$HS_DST")"
