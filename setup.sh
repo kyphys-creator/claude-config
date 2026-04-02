@@ -455,13 +455,13 @@ HS_SRC="$SCRIPT_DIR/hammerspoon/init.lua"
 HS_DIR="$HOME/.hammerspoon"
 HS_DST="$HS_DIR/init.lua"
 
-if [ ! -f "$HS_SRC" ]; then
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "  SKIPPED: Hammerspoon is macOS only."
+elif [ ! -f "$HS_SRC" ]; then
     echo "  WARNING: hammerspoon/init.lua not found in repo. Skipping."
 else
     mkdir -p "$HS_DIR"
-    if [ "$IS_WINDOWS" = true ]; then
-        echo "  SKIPPED: Hammerspoon is macOS only."
-    elif [ -L "$HS_DST" ]; then
+    if [ -L "$HS_DST" ]; then
         CURRENT_TARGET="$(readlink "$HS_DST")"
         if [ "$CURRENT_TARGET" = "$HS_SRC" ]; then
             echo "  OK: $HS_DST -> $CURRENT_TARGET"
