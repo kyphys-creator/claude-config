@@ -1,14 +1,16 @@
 # SESSION — claude-config
 
 ## 現在の状態
-**完了**: README 書き直し完了、全ファイル push 済み
+**完了**: Hammerspoon 設定追加・memory-guard フック変更・整合性修正、全ファイル push 済み
 
 ## 残タスク
 なし
 
-## 直近の作業（2026-04-01）
+## 直近の作業（2026-04-02）
 
-- README をゼロベースで書き直し: 英日分離（README.md + README.ja.md）、Tips を docs/ に分離
-- hooks/scripts/conventions/gitignore_global を正式にドキュメント化
-- 4軸レビューで3件の不整合を検出・修正（setup.sh ステップ番号、判別表の外部参照欠落、旧セクション番号参照）
-- CLAUDE.md の構造セクションを新ファイル構成に更新
+- Hammerspoon 設定追加（`hammerspoon/init.lua`）: Claude for Mac の Cmd+Q 誤終了防止（eventtap で Cmd+Tab 経由も捕捉）
+- setup.sh に Step 7（Hammerspoon symlink、macOS 専用ガード付き）を追加
+- memory-guard.sh を `exit 2`（自動ブロック）→ `exit 0` + `permissionDecision: "ask"`（ユーザー確認プロンプト）に変更
+- 整合性チェックで6件の不整合を検出・修正:
+  - README.md / README.ja.md: Step 8 追加、ツリーに `hammerspoon/`・`scheduled-tasks.md`・`substack.md` 追加、memory-guard 説明更新
+  - `.gitignore` に `__pycache__/` 追加

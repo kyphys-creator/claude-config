@@ -35,6 +35,7 @@ cd claude-config && ./setup.sh
 5. Installs a git `post-merge` hook for auto-sync on `git pull`
 6. Clones all your GitHub repos (skips existing)
 7. Installs pre-commit hooks for LaTeX repos (Unicode → LaTeX auto-fix in `.tex`/`.bib`)
+8. Installs Hammerspoon config for Claude for Mac Cmd+Q quit prevention (macOS only)
 
 > **`<base>`** = the parent directory where you cloned claude-config (e.g. `~/Claude/`). Detected automatically by `setup.sh`.
 
@@ -55,13 +56,17 @@ On Windows (MSYS/Cygwin), symlinks are replaced with file copies, and the `post-
 │   ├── conventions/            # domain-specific rules
 │   │   ├── shared-repo.md      # shared repos: Git workflow, .gitignore, ~ paths
 │   │   ├── latex.md            # LaTeX: equation safety, compiler, JHEP.bst, pre-commit
-│   │   └── mcp.md              # MCP/GCal: pre-operation checks, naming conventions
+│   │   ├── mcp.md              # MCP/GCal: pre-operation checks, naming conventions
+│   │   ├── scheduled-tasks.md  # Scheduled Tasks: SKILL.md dual structure, sync rules
+│   │   └── substack.md         # Substack: Markdown → rich text conversion
 │   ├── hooks/                  # Claude Code hooks
 │   │   ├── memory-guard.sh         # Edit/Write guard
 │   │   └── memory-guard-bash.sh    # Bash guard (warning only)
 │   ├── scripts/                # Git hooks
 │   │   ├── fix-bib-unicode.py      # Unicode → LaTeX conversion
 │   │   └── pre-commit-bib          # pre-commit hook shell wrapper
+│   ├── hammerspoon/            # Hammerspoon config (macOS)
+│   │   └── init.lua                # Claude Cmd+Q quit prevention (eventtap)
 │   ├── docs/
 │   │   ├── usage-tips.md           # usage tips (English)
 │   │   └── usage-tips.ja.md        # usage tips (Japanese)
@@ -104,7 +109,7 @@ The conventions define a decision table for where information belongs (CONVENTIO
 
 The memory-guard hooks enforce this mechanically:
 
-- **`memory-guard.sh`** (Edit/Write) — Blocks writes to the memory directory, forcing confirmation that the storage destination is correct. MEMORY.md (the index) is allowed through.
+- **`memory-guard.sh`** (Edit/Write) — Prompts for user confirmation on writes to the memory directory, ensuring the storage destination is correct. MEMORY.md (the index) is allowed through.
 - **`memory-guard-bash.sh`** (Bash) — Warns on shell commands that write to the memory directory. Warning only, since shell command detection has false-positive risk.
 
 Both are installed as symlinks by `setup.sh`, so updates propagate on `git pull`.
