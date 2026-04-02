@@ -365,6 +365,44 @@ else
     echo "  Skipped (already exist): $SKIPPED repos"
 fi
 
+# --- 5b. Unlock git-crypt repos ---
+# git-crypt で暗号化されたリポを自動 unlock する
+echo ""
+echo "=== Step 5b: Unlocking git-crypt repos ==="
+
+GIT_CRYPT_KEY="$HOME/.gmail-mcp/git-crypt.key"
+REDACTED_REPO_LIST
+
+if ! command -v git-crypt &> /dev/null; then
+    echo "  WARNING: git-crypt not installed. Encrypted repos will remain locked."
+    echo "  Install with: brew install git-crypt"
+elif [ ! -f "$GIT_CRYPT_KEY" ]; then
+    echo "  WARNING: Key not found at $GIT_CRYPT_KEY"
+    echo "  Restore from backup:"
+    echo "    REDACTED_RESTORE_COMMAND"
+else
+    UNLOCKED=0
+    SKIPPED_CRYPT=0
+    for REPO_NAME in $GIT_CRYPT_REPOS; do
+        REPO_PATH="$CLAUDE_DIR/$REPO_NAME"
+        if [ ! -d "$REPO_PATH/.git" ]; then
+            continue
+        fi
+        # 既に unlock されているかチェック（.gitattributes に git-crypt があり、かつファイルが読めるか）
+        if [ -f "$REPO_PATH/.gitattributes" ] && grep -q "git-crypt" "$REPO_PATH/.gitattributes" 2>/dev/null; then
+            if git-crypt status "$REPO_PATH" 2>/dev/null | grep -q "encrypted:"; then
+                echo "  Unlocking $REPO_NAME ..."
+                (cd "$REPO_PATH" && git-crypt unlock "$GIT_CRYPT_KEY" 2>&1 | sed 's/^/    /')
+                UNLOCKED=$((UNLOCKED + 1))
+            else
+                SKIPPED_CRYPT=$((SKIPPED_CRYPT + 1))
+            fi
+        fi
+    done
+    echo "  Unlocked: $UNLOCKED repos"
+    echo "  Already unlocked: $SKIPPED_CRYPT repos"
+fi
+
 # --- 6. Install pre-commit hook for LaTeX repos ---
 # .tex or .bib を含むリポに pre-commit hook (Unicode→LaTeX 自動修正) をインストール
 echo ""

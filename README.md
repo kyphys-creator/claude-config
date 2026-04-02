@@ -34,8 +34,9 @@ cd claude-config && ./setup.sh
 4. Configures Claude Code permissions — auto-allows safe tools (Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch)
 5. Installs a git `post-merge` hook for auto-sync on `git pull`
 6. Clones all your GitHub repos (skips existing)
-7. Installs pre-commit hooks for LaTeX repos (Unicode → LaTeX auto-fix in `.tex`/`.bib`)
-8. Installs Hammerspoon config for Claude for Mac Cmd+Q quit prevention (macOS only)
+7. Unlocks git-crypt encrypted repos (if key is available)
+8. Installs pre-commit hooks for LaTeX repos (Unicode → LaTeX auto-fix in `.tex`/`.bib`)
+9. Installs Hammerspoon config for Claude for Mac Cmd+Q quit prevention (macOS only)
 
 > **`<base>`** = the parent directory where you cloned claude-config (e.g. `~/Claude/`). Detected automatically by `setup.sh`.
 
