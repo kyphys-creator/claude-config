@@ -7,7 +7,9 @@
 #   3.  Claude Code パーミッション設定（安全なツールを自動許可）
 #   4.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
 #   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
+#   5b. git-crypt 暗号化リポを自動 unlock（鍵があれば）
 #   6.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+#   7.  Hammerspoon 設定をインストール（Claude Cmd+Q 誤終了防止、macOS のみ）
 #
 # 使い方:
 #   mkdir -p <base> && cd <base>
