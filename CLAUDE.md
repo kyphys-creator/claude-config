@@ -21,6 +21,8 @@ claude-config/
 │   ├── shared-repo.md      # 共有リポ固有規約
 │   ├── latex.md            # LaTeX 固有規約（物理リポで参照）
 │   ├── mcp.md              # MCP 固有規約（MCP 使用時に参照）
+│   ├── research-email.md   # 研究メール分類・記録規約
+│   ├── collaborators.md    # 共同研究者DB規約
 │   ├── scheduled-tasks.md  # Scheduled Tasks 規約（SKILL.md 二重構造・同期ルール）
 │   └── substack.md         # Substack 入稿規約（Markdown→リッチテキスト変換手順）
 ├── hooks/
@@ -69,7 +71,7 @@ setup.sh が自動で行うこと:
 **このリポは public。** 以下を絶対にコミットしない:
 - 実名（GitHub ユーザー名 `odakin` は可）
 - メールアドレス
-- 非公開リポ名（→ MEMORY.md に記載）。例外: MCP 設定リポ名（`gmail-mcp-config`）は可
+- 非公開リポ名（→ MEMORY.md に記載）。例外: ツール・運用設定リポ名（`gmail-mcp-config`, `research-collab`, `email-office`）は可
 - 金融データ・口座情報
 - 所属機関名
 - 他ユーザーのユーザー名
