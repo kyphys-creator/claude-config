@@ -1,10 +1,10 @@
 # リポジトリ規約
 
-最終更新: 2026-03-31
+最終更新: 2026-04-02
 
 > **正本は `~/Claude/claude-config/CONVENTIONS.md`。** `~/Claude/CONVENTIONS.md` は symlink。
 > 編集後は `cd ~/Claude/claude-config && git add -A && git commit && git push`。
-> ドメイン固有規約は `conventions/` に分離: [shared-repo.md](conventions/shared-repo.md), [latex.md](conventions/latex.md), [mcp.md](conventions/mcp.md), [substack.md](conventions/substack.md)
+> ドメイン固有規約は `conventions/` に分離: [shared-repo.md](conventions/shared-repo.md), [latex.md](conventions/latex.md), [mcp.md](conventions/mcp.md), [substack.md](conventions/substack.md), [scheduled-tasks.md](conventions/scheduled-tasks.md)
 >
 > **パスの記述規則:** CLAUDE.md・SESSION.md 等でローカルパスを記述する際は `~` で表記（例: `~/Dropbox/...`）。`/Users/odakin/` のようなユーザー固有の絶対パスは共同編集者の環境で壊れるため使わない。
 
