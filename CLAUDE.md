@@ -26,6 +26,8 @@ claude-config/
 ├── hooks/
 │   ├── memory-guard.sh         # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
 │   └── memory-guard-bash.sh    # メモリ書き込みガード — Bash 用（警告のみ）
+├── hammerspoon/
+│   └── init.lua                # Hammerspoon 設定（Claude Cmd+Q 誤終了防止）
 ├── scripts/
 │   ├── fix-bib-unicode.py      # Unicode→LaTeX 変換スクリプト
 │   └── pre-commit-bib          # Git pre-commit hook（上記を呼ぶ）
@@ -53,6 +55,7 @@ setup.sh が自動で行うこと:
 5. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 6. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
 7. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+8. Hammerspoon 設定をインストール（Claude for Mac の Cmd+Q 誤終了防止、macOS のみ）
 
 ## How to Resume
 1. SESSION.md を読む → 現在状態と残タスクを把握

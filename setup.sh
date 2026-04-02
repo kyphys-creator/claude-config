@@ -446,5 +446,41 @@ else
     echo "  Already up to date: $SKIPPED_HOOK repos"
 fi
 
+# --- 7. Install Hammerspoon config ---
+# Claude for Mac の Cmd+Q 誤終了防止（eventtap で Cmd+Tab 経由も捕捉）
+echo ""
+echo "=== Step 7: Installing Hammerspoon config ==="
+
+HS_SRC="$SCRIPT_DIR/hammerspoon/init.lua"
+HS_DIR="$HOME/.hammerspoon"
+HS_DST="$HS_DIR/init.lua"
+
+if [ ! -f "$HS_SRC" ]; then
+    echo "  WARNING: hammerspoon/init.lua not found in repo. Skipping."
+else
+    mkdir -p "$HS_DIR"
+    if [ "$IS_WINDOWS" = true ]; then
+        echo "  SKIPPED: Hammerspoon is macOS only."
+    elif [ -L "$HS_DST" ]; then
+        CURRENT_TARGET="$(readlink "$HS_DST")"
+        if [ "$CURRENT_TARGET" = "$HS_SRC" ]; then
+            echo "  OK: $HS_DST -> $CURRENT_TARGET"
+        else
+            echo "  UPDATE: was -> $CURRENT_TARGET"
+            rm "$HS_DST"
+            ln -s "$HS_SRC" "$HS_DST"
+            echo "  Created: $HS_DST -> $HS_SRC"
+        fi
+    elif [ -f "$HS_DST" ]; then
+        echo "  WARNING: $HS_DST exists as regular file. Backing up."
+        mv "$HS_DST" "$HS_DST.bak"
+        ln -s "$HS_SRC" "$HS_DST"
+        echo "  Created: $HS_DST -> $HS_SRC"
+    else
+        ln -s "$HS_SRC" "$HS_DST"
+        echo "  Created: $HS_DST -> $HS_SRC"
+    fi
+fi
+
 echo ""
 echo "=== Done ==="
