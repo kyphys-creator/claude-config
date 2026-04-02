@@ -70,7 +70,9 @@ On Windows (MSYS/Cygwin), symlinks are replaced with file copies, and the `post-
 │   │   └── init.lua                # Claude Cmd+Q quit prevention (eventtap)
 │   ├── docs/
 │   │   ├── usage-tips.md           # usage tips (English)
-│   │   └── usage-tips.ja.md        # usage tips (Japanese)
+│   │   ├── usage-tips.ja.md        # usage tips (Japanese)
+│   │   ├── git-crypt-guide.md      # git-crypt encryption guide (English)
+│   │   └── git-crypt-guide.ja.md   # git-crypt encryption guide (Japanese)
 │   ├── gitignore_global        # → ~/.gitignore_global (symlink)
 │   ├── gfm-rules.md            # CJK markdown reference
 │   └── LICENSE                  # MIT
@@ -119,6 +121,10 @@ Both are installed as symlinks by `setup.sh`, so updates propagate on `git pull`
 
 - **`fix-bib-unicode.py`** — Converts non-LaTeX Unicode characters (em-dashes, curly quotes, etc.) to LaTeX equivalents in `.tex` and `.bib` files
 - **`pre-commit-bib`** — Git pre-commit hook that runs the above script automatically. Installed by `setup.sh` for repos containing LaTeX files.
+
+### Encryption
+
+- **[git-crypt-guide.md](docs/git-crypt-guide.md)** — How to encrypt sensitive repos with git-crypt: setup, key management, `.gitattributes` configuration, multi-repo key sharing, and troubleshooting. `setup.sh` auto-unlocks repos when a key is present.
 
 ### Other files
 
