@@ -1,3 +1,6 @@
+-- CLI (hs コマンド) を有効化
+require("hs.ipc")
+
 -- Claude for Mac: Cmd+Q 誤終了防止
 -- eventtap で低レベルにキーイベントを捕捉し、
 -- Claude 宛の Cmd+Q をブロックする
