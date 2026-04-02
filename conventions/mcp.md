@@ -7,6 +7,8 @@ MCP ツールを使うリポで適用。CLAUDE.md から参照: `~/Claude/claude
 - セッション開始時に `get_profile` 等でデフォルト MCP の接続先アカウントを確認・報告する
 - 操作前にプロファイル取得で接続先アカウントを確認。思い込みで操作しない
 - アカウント一覧・端末別セットアップ状況は各 MCP 設定リポの CLAUDE.md を正本とする
+  - Gmail: `gmail-mcp-config/CLAUDE.md`
+  - Google Calendar: `gcal-mcp-config/CLAUDE.md`（存在する場合）
 
 ## Google Calendar MCP
 - 操作前にカレンダー一覧で対象カレンダーが正しいことを確認
