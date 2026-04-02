@@ -6,7 +6,7 @@
 # setup.sh が ~/.claude/hooks/ に symlink を作成
 #
 # 対象: PreToolUse (Edit|Write)
-# 動作: メモリディレクトリへの書き込みを exit 2 でブロック
+# 動作: メモリディレクトリへの書き込みを permissionDecision=ask でユーザー確認
 #       メモリ以外は exit 0 で素通し
 # 依存: jq（なければ grep フォールバック）
 
@@ -29,10 +29,14 @@ fi
 # MEMORY.md（インデックス）は通過
 [[ "$FILE_PATH" == */MEMORY.md ]] && exit 0
 
-# --- ブロック ---
+# --- ユーザー確認 ---
 cat >&2 << 'EOF'
-BLOCKED: メモリファイルへの書き込み
-CONVENTIONS.md §2「記録先の判別」の表を確認し、適切な書き先を選べ。
-本当にメモリが適切か？ユーザーに確認せよ。
+メモリファイルへの書き込み検出。
+CONVENTIONS.md §2「記録先の判別」の表を確認し、適切な書き先か確認せよ。
 EOF
-exit 2
+if command -v jq &> /dev/null; then
+    jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}'
+else
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}'
+fi
+exit 0
