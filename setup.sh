@@ -370,14 +370,14 @@ fi
 echo ""
 echo "=== Step 5b: Unlocking git-crypt repos ==="
 
-GIT_CRYPT_KEY="$HOME/.gmail-mcp/git-crypt.key"
+GIT_CRYPT_KEY="$HOME/.secrets/git-crypt.key"
 
 if ! command -v git-crypt &> /dev/null; then
     echo "  WARNING: git-crypt not installed. Encrypted repos will remain locked."
     echo "  Install with: brew install git-crypt"
 elif [ ! -f "$GIT_CRYPT_KEY" ]; then
     echo "  WARNING: Key not found at $GIT_CRYPT_KEY"
-    echo "  See gmail-mcp-config/CLAUDE.md for key backup restoration."
+    echo "  See secrets-config/CLAUDE.md for key backup restoration."
 else
     UNLOCKED=0
     SKIPPED_CRYPT=0
