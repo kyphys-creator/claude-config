@@ -371,32 +371,28 @@ echo ""
 echo "=== Step 5b: Unlocking git-crypt repos ==="
 
 GIT_CRYPT_KEY="$HOME/.gmail-mcp/git-crypt.key"
-REDACTED_REPO_LIST
 
 if ! command -v git-crypt &> /dev/null; then
     echo "  WARNING: git-crypt not installed. Encrypted repos will remain locked."
     echo "  Install with: brew install git-crypt"
 elif [ ! -f "$GIT_CRYPT_KEY" ]; then
     echo "  WARNING: Key not found at $GIT_CRYPT_KEY"
-    echo "  Restore from backup:"
-    echo "    REDACTED_RESTORE_COMMAND"
+    echo "  See gmail-mcp-config/CLAUDE.md for key backup restoration."
 else
     UNLOCKED=0
     SKIPPED_CRYPT=0
-    for REPO_NAME in $GIT_CRYPT_REPOS; do
-        REPO_PATH="$CLAUDE_DIR/$REPO_NAME"
-        if [ ! -d "$REPO_PATH/.git" ]; then
-            continue
-        fi
-        # 既に unlock されているかチェック（.gitattributes に git-crypt があり、かつファイルが読めるか）
-        if [ -f "$REPO_PATH/.gitattributes" ] && grep -q "git-crypt" "$REPO_PATH/.gitattributes" 2>/dev/null; then
-            if git-crypt status "$REPO_PATH" 2>/dev/null | grep -q "encrypted:"; then
-                echo "  Unlocking $REPO_NAME ..."
-                (cd "$REPO_PATH" && git-crypt unlock "$GIT_CRYPT_KEY" 2>&1 | sed 's/^/    /')
-                UNLOCKED=$((UNLOCKED + 1))
-            else
-                SKIPPED_CRYPT=$((SKIPPED_CRYPT + 1))
-            fi
+    # .gitattributes に git-crypt 設定があるリポを自動検出
+    for REPO_DIR in "$CLAUDE_DIR"/*/; do
+        [ -d "$REPO_DIR/.git" ] || continue
+        [ -f "$REPO_DIR/.gitattributes" ] || continue
+        grep -q "git-crypt" "$REPO_DIR/.gitattributes" 2>/dev/null || continue
+        REPO_NAME="$(basename "$REPO_DIR")"
+        if (cd "$REPO_DIR" && git-crypt status 2>/dev/null | grep -q "encrypted:"); then
+            echo "  Unlocking $REPO_NAME ..."
+            (cd "$REPO_DIR" && git-crypt unlock "$GIT_CRYPT_KEY" 2>&1 | sed 's/^/    /')
+            UNLOCKED=$((UNLOCKED + 1))
+        else
+            SKIPPED_CRYPT=$((SKIPPED_CRYPT + 1))
         fi
     done
     echo "  Unlocked: $UNLOCKED repos"
