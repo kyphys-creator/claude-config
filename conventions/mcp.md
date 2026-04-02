@@ -2,12 +2,12 @@
 
 MCP ツールを使うリポで適用。CLAUDE.md から参照: `~/Claude/claude-config/conventions/mcp.md`
 
-## 共通
-- 同一サービス（Gmail, Calendar 等）に対して複数の MCP サーバーが同時接続されているのが常態。どのアカウントで操作するか常に意識すること
-- セッション開始時に `get_profile` 等でデフォルト MCP の接続先アカウントを確認・報告する
-- 操作前にプロファイル取得で接続先アカウントを確認。思い込みで操作しない
-- アカウント一覧・端末別セットアップ状況は各 MCP 設定リポの CLAUDE.md を正本とする
-  - Gmail: `gmail-mcp-config/CLAUDE.md`
+## 共通（CONVENTIONS.md §5.7 の手順詳細）
+
+- **確認方法**: Gmail は `gmail_get_profile`、Calendar は `gcal_list_calendars` で接続先アカウントを確認
+- **複数 MCP がある場合**: セッションの deferred tools 一覧で同一サービスの MCP が何個あるか確認し、それぞれ `get_profile` を実行して UUID→アカウントの対応を把握する
+- **アカウント一覧の正本**: 各 MCP 設定リポの CLAUDE.md を参照（メモリや CLAUDE.md にハードコードしない）
+  - Gmail: `~/Claude/gmail-mcp-config/CLAUDE.md`
 
 ## Google Calendar MCP
 - 操作前にカレンダー一覧で対象カレンダーが正しいことを確認
