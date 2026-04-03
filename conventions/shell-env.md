@@ -25,7 +25,9 @@ Claude Code（デスクトップ版）は起動時にシェルスナップショ
 
 ```bash
 #!/bin/zsh
-FULL_PATH="/Users/odakin/.local/bin:/Users/odakin/.npm-global/bin:/Library/TeX/texbin:/Users/odakin/Library/Python/3.9/bin:/opt/homebrew/opt/python@3.12/libexec/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+# FULL_PATH は自分の環境に合わせて設定する
+# 例: source ~/.zshenv && echo $PATH で確認
+FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
   if grep -q 'export PATH=/usr/bin' "$f" 2>/dev/null; then
@@ -34,7 +36,7 @@ for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
 done
 ```
 
-`chmod +x` を忘れずに。
+`chmod +x` を忘れずに。`FULL_PATH` の値は環境ごとに異なるため、`source ~/.zshenv && echo $PATH` で確認して設定する。
 
 ### 2. settings.json への登録
 
