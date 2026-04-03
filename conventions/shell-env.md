@@ -21,6 +21,8 @@ Claude Code（デスクトップ版）は起動時にシェルスナップショ
 
 PreToolUse フックで毎回パッチする方式は棄却した（理由は DESIGN.md 参照）。
 
+**セットアップ:** `setup.sh` の Step 2 (hooks symlink) + Step 2b (launchd plist) で自動インストールされる。以下は仕組みの説明。
+
 ### 1. パッチスクリプト
 
 `~/.claude/hooks/fix-snapshot-path-patch.sh`:
@@ -29,7 +31,7 @@ PreToolUse フックで毎回パッチする方式は棄却した（理由は DE
 #!/bin/zsh
 sleep 1  # スナップショット生成完了を待つ
 # FULL_PATH は自分の環境に合わせて設定する
-FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
   if grep -q 'export PATH=/usr/bin' "$f" 2>/dev/null; then

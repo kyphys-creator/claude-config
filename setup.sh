@@ -4,6 +4,7 @@
 #   1.  CONVENTIONS.md の symlink を作成（相対パス）
 #   1b. グローバル gitignore をインストール（~/.gitignore_global に symlink）
 #   2.  Claude Code hooks をインストール（symlink + settings.json マージ）
+#   2b. launchd エージェントをインストール（スナップショット PATH 自動修正、macOS のみ）
 #   3.  Claude Code パーミッション設定（安全なツールを自動許可）
 #   4.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
 #   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
@@ -219,6 +220,50 @@ install_hooks() {
 # hook インストールの失敗は警告のみ（Step 3-4 を止めない）
 if ! install_hooks; then
     echo "  ERROR: Hook installation failed. Continuing with remaining steps."
+fi
+
+# --- 2b. Install launchd agent for snapshot PATH fix (macOS only) ---
+# fix-snapshot-path-patch.sh を自動実行する launchd エージェントをインストール
+PLIST_LABEL="com.user.claude-snapshot-fix"
+PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOOKS_DST/fix-snapshot-path-patch.sh" ]; then
+    echo ""
+    echo "=== Step 2b: Installing launchd agent for snapshot PATH fix ==="
+
+    PATCH_SCRIPT="$HOOKS_DST/fix-snapshot-path-patch.sh"
+    SNAPSHOT_DIR="$HOME/.claude/shell-snapshots"
+
+    if launchctl list "$PLIST_LABEL" &>/dev/null; then
+        echo "  OK: $PLIST_LABEL already loaded."
+    else
+        mkdir -p "$(dirname "$PLIST_DST")"
+        cat > "$PLIST_DST" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$PLIST_LABEL</string>
+    <key>WatchPaths</key>
+    <array>
+        <string>$SNAPSHOT_DIR</string>
+    </array>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PATCH_SCRIPT</string>
+    </array>
+</dict>
+</plist>
+PLIST_EOF
+        launchctl load "$PLIST_DST" 2>&1
+        if launchctl list "$PLIST_LABEL" &>/dev/null; then
+            echo "  Installed and loaded: $PLIST_DST"
+        else
+            echo "  WARNING: Failed to load $PLIST_LABEL"
+        fi
+    fi
 fi
 
 # --- 3. Configure permissions ---

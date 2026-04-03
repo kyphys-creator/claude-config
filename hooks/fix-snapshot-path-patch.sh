@@ -5,7 +5,7 @@
 # スナップショット生成完了を待ってからパッチする。
 sleep 1
 
-FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
   if grep -q 'export PATH=/usr/bin' "$f" 2>/dev/null; then

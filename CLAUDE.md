@@ -59,12 +59,13 @@ setup.sh が自動で行うこと:
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
 2. `~/.gitignore_global` → `claude-config/gitignore_global` の symlink + `git config --global core.excludesfile` 設定
 3. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
-4. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
-5. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
-6. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
-7. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
-8. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
-9. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
+4. *(macOS のみ)* launchd エージェントをインストール（スナップショット PATH 自動修正）
+5. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
+6. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
+7. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
+8. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+9. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
+10. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
 
 ## How to Resume
 1. SESSION.md を読む → 現在状態と残タスクを把握
