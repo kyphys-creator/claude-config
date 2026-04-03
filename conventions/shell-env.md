@@ -54,11 +54,12 @@ done
     <string>com.user.claude-snapshot-fix</string>
     <key>WatchPaths</key>
     <array>
-        <string>$HOME/.claude/shell-snapshots</string>
+        <!-- plist は $HOME を展開しない。フルパスで記述する -->
+        <string>/Users/YOUR_USERNAME/.claude/shell-snapshots</string>
     </array>
     <key>ProgramArguments</key>
     <array>
-        <string>$HOME/.claude/hooks/fix-snapshot-path-patch.sh</string>
+        <string>/Users/YOUR_USERNAME/.claude/hooks/fix-snapshot-path-patch.sh</string>
     </array>
 </dict>
 </plist>

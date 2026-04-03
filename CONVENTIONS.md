@@ -1,6 +1,6 @@
 # リポジトリ規約
 
-最終更新: 2026-04-02
+最終更新: 2026-04-03
 
 > **正本は `~/Claude/claude-config/CONVENTIONS.md`。** `~/Claude/CONVENTIONS.md` は symlink。
 > 編集後は `cd ~/Claude/claude-config && git add -A && git commit && git push`。
