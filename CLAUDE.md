@@ -64,8 +64,9 @@ setup.sh が自動で行うこと:
 6. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 7. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
 8. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
-9. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
-10. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
+9. *(条件付き)* JHEP.bst を texmf-local にインストール（odakin: 自動、他ユーザー: オプション表示）
+10. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
+11. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
 
 ## How to Resume
 1. SESSION.md を読む → 現在状態と残タスクを把握

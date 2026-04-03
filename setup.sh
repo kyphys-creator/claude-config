@@ -10,6 +10,7 @@
 #   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
 #   5b. git-crypt 暗号化リポを自動 unlock（鍵があれば）
 #   6.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+#   6b. JHEP.bst を texmf-local にインストール（全リポからグローバル利用）
 #   7.  Hammerspoon 設定をインストール（Claude Cmd+Q 誤終了防止、macOS のみ）
 #
 # 使い方:
@@ -368,6 +369,30 @@ if [ -f "$CONV_DEST" ] && [ ! -L "$CONV_DEST" ]; then
     cp -f "$REPO_DIR/CONVENTIONS.md" "$CONV_DEST"
     echo "[claude-config] Updated: CONVENTIONS.md"
 fi
+
+# --- JHEP.bst の同期（texmf-local にインストール済みの場合）---
+JHEP_SRC="$REPO_DIR/JHEP.bst"
+if [ -f "$JHEP_SRC" ] && command -v kpsewhich &> /dev/null; then
+    TEXMF_LOCAL="$(kpsewhich -var-value TEXMFLOCAL 2>/dev/null)"
+    BST_DST="$TEXMF_LOCAL/bibtex/bst/local/JHEP.bst"
+    if [ -n "$BST_DST" ] && [ -f "$BST_DST" ]; then
+        if ! diff -q "$JHEP_SRC" "$BST_DST" > /dev/null 2>&1; then
+            GH_LOGIN="$(gh api user --jq '.login' 2>/dev/null)"
+            if [ "$GH_LOGIN" = "odakin" ]; then
+                if cp -f "$JHEP_SRC" "$BST_DST" 2>/dev/null; then
+                    texhash "$TEXMF_LOCAL" 2>/dev/null
+                    echo "[claude-config] JHEP.bst updated in texmf-local."
+                else
+                    echo "[claude-config] JHEP.bst updated. Run:"
+                    echo "  sudo cp $JHEP_SRC $BST_DST && sudo texhash"
+                fi
+            else
+                echo "[claude-config] JHEP.bst updated. To sync:"
+                echo "  sudo cp $JHEP_SRC $BST_DST && sudo texhash"
+            fi
+        fi
+    fi
+fi
 POST_MERGE_EOF
     chmod +x "$POST_MERGE"
     echo "  Installed: .git/hooks/post-merge"
@@ -518,6 +543,58 @@ else
 
     echo "  Installed: $INSTALLED repos"
     echo "  Already up to date: $SKIPPED_HOOK repos"
+fi
+
+# --- 6b. Install JHEP.bst to texmf-local (optional) ---
+# JHEP.bst (modified ver. 2.18, note 有効化) を texmf-local にインストール
+# odakin: 自動インストール / 他ユーザー: オプション表示のみ
+JHEP_SRC="$SCRIPT_DIR/JHEP.bst"
+
+if [ -f "$JHEP_SRC" ]; then
+    # texmf-local のパスを検出
+    TEXMF_LOCAL=""
+    if command -v kpsewhich &> /dev/null; then
+        TEXMF_LOCAL="$(kpsewhich -var-value TEXMFLOCAL 2>/dev/null)"
+    elif [ -d "/usr/local/texlive/texmf-local" ]; then
+        TEXMF_LOCAL="/usr/local/texlive/texmf-local"
+    fi
+
+    if [ -n "$TEXMF_LOCAL" ]; then
+        BST_DIR="$TEXMF_LOCAL/bibtex/bst/local"
+        BST_DST="$BST_DIR/JHEP.bst"
+        NEEDS_UPDATE=false
+
+        if [ -f "$BST_DST" ] && diff -q "$JHEP_SRC" "$BST_DST" > /dev/null 2>&1; then
+            : # already up to date
+        else
+            NEEDS_UPDATE=true
+        fi
+
+        if [ "$NEEDS_UPDATE" = true ]; then
+            echo ""
+            echo "=== Step 6b: JHEP.bst (texmf-local) ==="
+            if [ "$GH_USER" = "odakin" ]; then
+                # 自分の端末: 自動インストール試行
+                mkdir -p "$BST_DIR" 2>/dev/null
+                if cp -f "$JHEP_SRC" "$BST_DST" 2>/dev/null; then
+                    echo "  Installed: $BST_DST"
+                    if command -v texhash &> /dev/null; then
+                        texhash "$TEXMF_LOCAL" 2>&1 | sed 's/^/    /'
+                    fi
+                else
+                    echo "  JHEP.bst needs update. Run:"
+                    echo "    sudo cp $JHEP_SRC $BST_DST && sudo texhash"
+                fi
+            else
+                # 他ユーザー: オプション表示のみ
+                echo "  Optional: JHEP.bst (modified ver. 2.18, note enabled) is available."
+                echo "  To install globally for BibTeX:"
+                echo "    sudo mkdir -p $BST_DIR"
+                echo "    sudo cp $JHEP_SRC $BST_DST"
+                echo "    sudo texhash"
+            fi
+        fi
+    fi
 fi
 
 # --- 7. Install Hammerspoon config ---

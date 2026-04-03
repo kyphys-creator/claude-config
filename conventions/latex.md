@@ -12,6 +12,13 @@ LaTeX を含むリポで適用。CLAUDE.md から参照: `~/Claude/claude-config
 - BibTeX フルビルド: `platex → bibtex → platex → platex → dvipdfmx`
 - リポの CLAUDE.md に手順があればそちらを優先
 
+## Bibliography スタイル
+- **JHEP.bst を使う**（個人的好み）。`note` フィールドも表示するバージョンを使用
+- 正本: `~/Claude/claude-config/JHEP.bst`（ver. 2.18 ベース + note 全 entry type で有効化、md5: `bcca8042…`）
+- `setup.sh` が texmf-local にインストール（odakin: 自動、他ユーザー: オプション表示）
+- texmf-local 未設定の場合は正本からリポにコピーして使う
+- `\bibliographystyle{JHEP}` を指定
+
 ## JHEP.bst 記法
 JHEP.bst はフィールドから自動リンクを生成するので `\href` 手書き不要（二重リンクの原因）。
 - `doi`: DOI 本体のみ（例: `10.1103/PhysRevA.61.012104`）
