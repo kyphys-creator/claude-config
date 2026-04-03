@@ -59,7 +59,7 @@ setup.sh が自動で行うこと:
 1. `<base>/CONVENTIONS.md` → `claude-config/CONVENTIONS.md` の symlink（Windows は cp）
 2. `~/.gitignore_global` → `claude-config/gitignore_global` の symlink + `git config --global core.excludesfile` 設定
 3. Claude Code hooks を `~/.claude/hooks/` に symlink + `settings.json` に設定マージ
-4. *(macOS のみ)* launchd エージェントをインストール（スナップショット PATH 自動修正）
+4. *(macOS のみ)* PATH 消失防止（`.zprofile` の重複 `brew shellenv` 修正 + スナップショット自動パッチ用 launchd エージェント）
 5. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
 6. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 7. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）

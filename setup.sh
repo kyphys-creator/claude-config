@@ -5,6 +5,7 @@
 #   1b. グローバル gitignore をインストール（~/.gitignore_global に symlink）
 #   2.  Claude Code hooks をインストール（symlink + settings.json マージ）
 #   2b. launchd エージェントをインストール（スナップショット PATH 自動修正、macOS のみ）
+#   2c. .zprofile の重複 brew shellenv を修正（PATH 消失防止、macOS のみ）
 #   3.  Claude Code パーミッション設定（安全なツールを自動許可）
 #   4.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
 #   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
@@ -264,6 +265,25 @@ PLIST_EOF
         else
             echo "  WARNING: Failed to load $PLIST_LABEL"
         fi
+    fi
+fi
+
+# --- 2c. Fix .zprofile duplicate brew shellenv (macOS only) ---
+# Homebrew のインストーラが .zprofile に eval "$(brew shellenv)" を追加するが、
+# .zshenv にも同じ行がある場合、.zprofile の path_helper が .zshenv の
+# if-blocks で追加した PATH（TeX, Python 等）を上書きする。
+# 詳細: conventions/shell-env.md
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOME/.zprofile" ]; then
+    if grep -q 'brew shellenv' "$HOME/.zprofile" && grep -q 'brew shellenv' "$HOME/.zshenv" 2>/dev/null; then
+        echo ""
+        echo "=== Step 2c: Fixing .zprofile duplicate brew shellenv ==="
+        # brew shellenv 行をコメントに置換（他の内容は保持）
+        sed -i '' '/eval.*brew shellenv/c\
+# brew shellenv は ~/.zshenv で実行済み（全 shell type 対応）\
+# ここで二重実行すると path_helper が PATH を再構築し、\
+# .zshenv の if-blocks で追加した TeX, Python 等が消える問題があった' "$HOME/.zprofile"
+        echo "  Replaced brew shellenv in .zprofile with comment."
+        echo "  PATH setup is now handled solely by .zshenv."
     fi
 fi
 
