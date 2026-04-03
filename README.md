@@ -54,15 +54,20 @@ On Windows (MSYS/Cygwin), symlinks are replaced with file copies, and the `post-
 │   ├── README.md               # this file (English)
 │   ├── README.ja.md            # Japanese version
 │   ├── setup.sh                # bootstrap script
+│   ├── DESIGN.md               # design rationale (Why / alternatives / tradeoffs)
 │   ├── conventions/            # domain-specific rules
 │   │   ├── shared-repo.md      # shared repos: Git workflow, .gitignore, ~ paths
 │   │   ├── latex.md            # LaTeX: equation safety, compiler, JHEP.bst, pre-commit
 │   │   ├── mcp.md              # MCP/GCal: pre-operation checks, naming conventions
+│   │   ├── research-email.md   # research email classification and logging
+│   │   ├── collaborators.md    # collaborator DB conventions
 │   │   ├── scheduled-tasks.md  # Scheduled Tasks: SKILL.md dual structure, sync rules
-│   │   └── substack.md         # Substack: Markdown → rich text conversion
+│   │   ├── substack.md         # Substack: Markdown → rich text conversion
+│   │   └── shell-env.md        # shell env: PATH snapshot fix, macOS deny rules
 │   ├── hooks/                  # Claude Code hooks
-│   │   ├── memory-guard.sh         # Edit/Write guard
-│   │   └── memory-guard-bash.sh    # Bash guard (warning only)
+│   │   ├── memory-guard.sh             # Edit/Write guard
+│   │   ├── memory-guard-bash.sh        # Bash guard (warning only)
+│   │   └── fix-snapshot-path-patch.sh  # PATH snapshot fix (called by launchd)
 │   ├── scripts/                # Git hooks
 │   │   ├── fix-bib-unicode.py      # Unicode → LaTeX conversion
 │   │   └── pre-commit-bib          # pre-commit hook shell wrapper
@@ -96,6 +101,9 @@ Domain-specific rules, loaded only when relevant:
 - **[shared-repo.md](conventions/shared-repo.md)** — Rules for repos shared with collaborators: Git workflow guards, `.gitignore` requirements, `~` path prohibition
 - **[latex.md](conventions/latex.md)** — LaTeX-specific rules: equation safety (no AI edits without approval), compiler settings, `JHEP.bst`, pre-commit hook for Unicode cleanup
 - **[mcp.md](conventions/mcp.md)** — MCP connector rules: pre-operation account verification, Google Calendar naming conventions
+- **[research-email.md](conventions/research-email.md)** — Research email classification and logging conventions
+- **[collaborators.md](conventions/collaborators.md)** — Collaborator DB schema and update rules
+- **[shell-env.md](conventions/shell-env.md)** — Shell environment: PATH snapshot fix for Claude Code desktop, macOS deny rules for dangerous commands
 
 ### Hooks: memory-guard
 
