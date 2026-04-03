@@ -31,12 +31,13 @@ cd claude-config && ./setup.sh
 1. `CONVENTIONS.md` を親ディレクトリに symlink
 2. グローバル gitignore をインストール（`~/.gitignore_global` → `claude-config/gitignore_global`）
 3. Claude Code hooks（memory-guard）を `~/.claude/hooks/` にインストール + `settings.json` に設定マージ
-4. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
-5. git `post-merge` hook をインストール（`git pull` 後に自動同期）
-6. GitHub 上の全リポを clone（既存はスキップ）
-7. LaTeX リポに pre-commit hook をインストール（`.tex`/`.bib` の Unicode→LaTeX 自動修正）
-8. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
-9. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
+4. *(macOS のみ)* launchd エージェントをインストール（スナップショット PATH 自動修正）
+5. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
+6. git `post-merge` hook をインストール（`git pull` 後に自動同期）
+7. GitHub 上の全リポを clone（既存はスキップ）
+8. LaTeX リポに pre-commit hook をインストール（`.tex`/`.bib` の Unicode→LaTeX 自動修正）
+9. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
+10. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
 
 > **`<base>`** = `claude-config` を clone した親ディレクトリ（例: `~/Claude/`）。`setup.sh` が自動検出。
 

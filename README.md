@@ -31,12 +31,13 @@ cd claude-config && ./setup.sh
 1. Symlinks `CONVENTIONS.md` into the parent directory
 2. Installs global gitignore (`~/.gitignore_global` → `claude-config/gitignore_global`)
 3. Installs Claude Code hooks (memory-guard) + merges settings into `~/.claude/settings.json`
-4. Configures Claude Code permissions — auto-allows safe tools (Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch)
-5. Installs a git `post-merge` hook for auto-sync on `git pull`
-6. Clones all your GitHub repos (skips existing)
-7. Installs pre-commit hooks for LaTeX repos (Unicode → LaTeX auto-fix in `.tex`/`.bib`)
-8. *(optional)* Unlocks git-crypt encrypted repos (only if `~/.secrets/git-crypt.key` exists)
-9. *(optional)* Installs Hammerspoon config for Claude for Mac Cmd+Q quit prevention (only if Hammerspoon is installed)
+4. *(macOS only)* Installs launchd agent for automatic shell-snapshot PATH fix
+5. Configures Claude Code permissions — auto-allows safe tools (Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch)
+6. Installs a git `post-merge` hook for auto-sync on `git pull`
+7. Clones all your GitHub repos (skips existing)
+8. Installs pre-commit hooks for LaTeX repos (Unicode → LaTeX auto-fix in `.tex`/`.bib`)
+9. *(optional)* Unlocks git-crypt encrypted repos (only if `~/.secrets/git-crypt.key` exists)
+10. *(optional)* Installs Hammerspoon config for Claude for Mac Cmd+Q quit prevention (only if Hammerspoon is installed)
 
 > **`<base>`** = the parent directory where you cloned claude-config (e.g. `~/Claude/`). Detected automatically by `setup.sh`.
 
