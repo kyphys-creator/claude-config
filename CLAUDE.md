@@ -24,10 +24,13 @@ claude-config/
 │   ├── research-email.md   # 研究メール分類・記録規約
 │   ├── collaborators.md    # 共同研究者DB規約
 │   ├── scheduled-tasks.md  # Scheduled Tasks 規約（SKILL.md 二重構造・同期ルール）
-│   └── substack.md         # Substack 入稿規約（Markdown→リッチテキスト変換手順）
+│   ├── substack.md         # Substack 入稿規約（Markdown→リッチテキスト変換手順）
+│   └── shell-env.md        # シェル環境（PATH スナップショット修正、macOS deny ルール）
 ├── hooks/
-│   ├── memory-guard.sh         # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
-│   └── memory-guard-bash.sh    # メモリ書き込みガード — Bash 用（警告のみ）
+│   ├── memory-guard.sh             # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
+│   ├── memory-guard-bash.sh        # メモリ書き込みガード — Bash 用（警告のみ）
+│   ├── fix-snapshot-path.sh        # PATH スナップショット修正（Bash PreToolUse）
+│   └── dangerous-commands-guard.sh # 危険コマンド警告（deny ルールと二重防御）
 ├── hammerspoon/
 │   └── init.lua                # Hammerspoon 設定（Claude Cmd+Q 誤終了防止）
 ├── scripts/

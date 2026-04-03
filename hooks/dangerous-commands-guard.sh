@@ -2,7 +2,10 @@
 # dangerous-commands-guard.sh — 危険な macOS システムコマンドをブロック
 #
 # 対象: PreToolUse (Bash)
-# 動作: tccutil reset 等の破壊的システムコマンドを検出し、実行を阻止する
+# 動作: tccutil reset 等の破壊的システムコマンドを検出し、警告を出す
+# 注意: exit 2 ではブロックできない（Claude Code の仕様）。
+#       実際のブロックは settings.json の deny ルールが担う。
+#       このフックは二重防御の警告層。
 #
 # 背景: tccutil reset Calendar を実行し、全アプリのカレンダー権限が消失した事故
 #       (2026-04-03)。ユーザーが手動で全アプリを再許可する必要があった。

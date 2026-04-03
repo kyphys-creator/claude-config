@@ -1,7 +1,11 @@
 #!/bin/zsh
 # Fix shell snapshot PATH on every new Claude Code session
 # Snapshots override .zshenv, so we patch them to include full PATH
-FULL_PATH="/Users/odakin/.local/bin:/Users/odakin/.npm-global/bin:/Library/TeX/texbin:/Users/odakin/Library/Python/3.9/bin:/opt/homebrew/opt/python@3.12/libexec/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+#
+# FULL_PATH は環境ごとに異なる。setup.sh がインストール時に
+# source ~/.zshenv && echo $PATH の結果で置換する。
+# 手動設定する場合もこの値を自分の環境に合わせること。
+FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
   if grep -q 'export PATH=/usr/bin' "$f" 2>/dev/null; then
