@@ -15,18 +15,22 @@ Claude Code（デスクトップ版）は起動時にシェルスナップショ
 | `settings.json` の `env.PATH` | スナップショットが優先される |
 | LaunchAgent plist | 同上 |
 
-## 解決策: PreToolUse フックでスナップショットをパッチ
+## 解決策: launchd WatchPaths でスナップショットを自動パッチ
 
-毎回の Bash 実行前にスナップショット内の PATH を正しい値に書き換える。
+スナップショットディレクトリの変更を launchd が検知し、即座にパッチする。Bash 呼び出しには一切介入しない（オーバーヘッド 0秒）。
 
-### 1. フックスクリプト
+### 棄却した方法: PreToolUse フック
 
-`~/.claude/hooks/fix-snapshot-path.sh`:
+当初は PreToolUse フックで毎回パッチしていたが、zsh 起動コスト ~0.03秒が毎 Bash 呼び出しにかかる。セッション中にスナップショットは変わらないので、毎回チェックは設計として間違い。
+
+### 1. パッチスクリプト
+
+`~/.claude/hooks/fix-snapshot-path-patch.sh`:
 
 ```bash
 #!/bin/zsh
+sleep 1  # スナップショット生成完了を待つ
 # FULL_PATH は自分の環境に合わせて設定する
-# 例: source ~/.zshenv && echo $PATH で確認
 FULL_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
@@ -36,35 +40,36 @@ for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
 done
 ```
 
-`chmod +x` を忘れずに。`FULL_PATH` の値は環境ごとに異なるため、`source ~/.zshenv && echo $PATH` で確認して設定する。
+### 2. launchd エージェント
 
-### 2. settings.json への登録
+`~/Library/LaunchAgents/com.user.claude-snapshot-fix.plist`:
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/fix-snapshot-path.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.claude-snapshot-fix</string>
+    <key>WatchPaths</key>
+    <array>
+        <string>$HOME/.claude/shell-snapshots</string>
+    </array>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HOME/.claude/hooks/fix-snapshot-path-patch.sh</string>
+    </array>
+</dict>
+</plist>
 ```
 
-既存の Bash フックがある場合は hooks 配列に追加。
+`launchctl load ~/Library/LaunchAgents/com.user.claude-snapshot-fix.plist` で有効化。
 
 ### 補足
 
 - `.zshenv` は Terminal.app 等の通常シェルで有効なので残しておく価値がある
-- `settings.json` の `env.PATH` も残しておいて損はない（将来スナップショット機構が変わった場合に効く可能性）
-- PATH に追加するディレクトリが変わった場合、フックスクリプトの `FULL_PATH` を更新すること
+- PATH に追加するディレクトリが変わった場合、パッチスクリプトの `FULL_PATH` を更新すること
 
 ## macOS システムコマンドの deny ルール
 

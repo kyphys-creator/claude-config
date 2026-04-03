@@ -29,8 +29,8 @@ claude-config/
 ├── hooks/
 │   ├── memory-guard.sh             # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
 │   ├── memory-guard-bash.sh        # メモリ書き込みガード — Bash 用（警告のみ）
-│   ├── fix-snapshot-path.sh        # PATH スナップショット修正（Bash PreToolUse）
-│   └── dangerous-commands-guard.sh # 危険コマンド警告（deny ルールと二重防御）
+│   ├── fix-snapshot-path-patch.sh   # PATH スナップショット修正（launchd WatchPaths から呼ばれる）
+│   └── dangerous-commands-guard.sh # 危険コマンド警告（deny ルールの補助、参照用）
 ├── hammerspoon/
 │   └── init.lua                # Hammerspoon 設定（Claude Cmd+Q 誤終了防止）
 ├── scripts/
