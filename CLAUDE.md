@@ -40,7 +40,8 @@ claude-config/
 │   ├── usage-tips.md           # 運用Tips（English）
 │   ├── usage-tips.ja.md        # 運用Tips（日本語）
 │   ├── git-crypt-guide.md      # git-crypt 暗号化ガイド（English）
-│   └── git-crypt-guide.ja.md   # git-crypt 暗号化ガイド（日本語）
+│   ├── git-crypt-guide.ja.md   # git-crypt 暗号化ガイド（日本語）
+│   └── convention-design-principles.md # 規約設計の原則（メタレベル）
 ├── gitignore_global        # グローバル gitignore（~/.gitignore_global に symlink）
 ├── gfm-rules.md            # GFM CJK bold 対策リファレンス
 ├── LICENSE                  # MIT

@@ -103,6 +103,8 @@ Domain-specific rules, loaded only when relevant:
 - **[mcp.md](conventions/mcp.md)** — MCP connector rules: pre-operation account verification, Google Calendar naming conventions
 - **[research-email.md](conventions/research-email.md)** — Research email classification and logging conventions
 - **[collaborators.md](conventions/collaborators.md)** — Collaborator DB schema and update rules
+- **[scheduled-tasks.md](conventions/scheduled-tasks.md)** — Scheduled Tasks: SKILL.md dual structure, sync rules
+- **[substack.md](conventions/substack.md)** — Substack: Markdown → rich text conversion workflow
 - **[shell-env.md](conventions/shell-env.md)** — Shell environment: PATH snapshot fix for Claude Code desktop, macOS deny rules for dangerous commands
 
 ### Hooks: memory-guard
