@@ -6,6 +6,7 @@ MCP ツールを使うリポで適用。CLAUDE.md から参照: `~/Claude/claude
 
 - **確認方法**: Gmail は `gmail_get_profile`、Calendar は `gcal_list_calendars` で接続先アカウントを確認
 - **複数 MCP がある場合**: セッションの deferred tools 一覧で同一サービスの MCP が何個あるか確認し、それぞれ `get_profile` を実行して UUID→アカウントの対応を把握する
+- **期待数との照合**: アカウント一覧の正本と照合し、不足があればユーザーに報告する。1つ見つけて満足しない
 - **アカウント一覧の正本**: 各 MCP 設定リポの CLAUDE.md を参照（メモリや CLAUDE.md にハードコードしない）
   - Gmail: `~/Claude/gmail-mcp-config/CLAUDE.md`
 
