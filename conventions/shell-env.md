@@ -65,3 +65,19 @@ done
 - `.zshenv` は Terminal.app 等の通常シェルで有効なので残しておく価値がある
 - `settings.json` の `env.PATH` も残しておいて損はない（将来スナップショット機構が変わった場合に効く可能性）
 - PATH に追加するディレクトリが変わった場合、フックスクリプトの `FULL_PATH` を更新すること
+
+## macOS システムコマンドの deny ルール
+
+settings.json の `deny` に以下を設定し、破壊的な macOS システムコマンドをブロックする:
+
+```json
+"Bash(*tccutil*)",
+"Bash(*defaults delete com.apple*)",
+"Bash(*csrutil disable*)",
+"Bash(*launchctl remove com.apple*)",
+"Bash(*launchctl unload com.apple*)"
+```
+
+`Bash(*)` パターンはコマンド文字列全体にマッチするため、文字列中に含まれるだけでもブロックされる。正当な用途（grep 等）は専用ツール（Grep, Read）で代替可能なので実害なし。
+
+**背景:** `tccutil reset Calendar` を実行して全アプリのカレンダー権限が消失する事故が発生（2026-04-03）。PreToolUse フックの `exit 2` ではブロックできなかったため、deny ルールで対応。
