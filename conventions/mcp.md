@@ -12,10 +12,7 @@ MCP ツールを使うリポで適用。CLAUDE.md から参照: `~/Claude/claude
 
 ## Gmail API 直接アクセス（MCP の代替）
 
-MCP ツールは個別メール操作に最適だが、バッチ操作（一括削除・ラベル付け・統計取得等）には向かない。1000件/回の batchModify 等を使いたい場合は、MCP の OAuth 認証情報（`~/.gmail-mcp/`）を Python から直接利用できる。
-
-- 設計判断と使い分け: `~/Claude/gmail-mcp-config/DESIGN.md`「認証情報の二重用途」
-- 実装例: `~/Claude/gmail-cleanup/bulk_delete.py` の `load_credentials()`
+MCP ツールは個別メール操作に最適だが、バッチ操作（一括削除・ラベル付け・統計取得等）には向かない。MCP 用の OAuth 認証情報が既にあるなら、Python から Gmail API を直接呼ぶことで batchModify/batchDelete 等のバッチ操作が可能。設計判断と使い分けの詳細は各 MCP 設定リポの DESIGN.md を参照。
 
 ## Google Calendar MCP
 - 操作前にカレンダー一覧で対象カレンダーが正しいことを確認
