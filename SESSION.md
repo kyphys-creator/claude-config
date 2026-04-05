@@ -22,4 +22,4 @@
 - dangerous-commands-guard.sh を削除（deny ルールで十分）
 
 ## 残タスク
-なし
+- [ ] ARCHITECTURE.md を必須ファイルに追加するか検討。LorentzArena で導入済み（コード構造・依存関係・データフローの記述用）。DESIGN.md（設計判断の Why）とは別に、現状の構造を図示する役割。全リポに適用するか、コードリポ限定か、CONVENTIONS.md §2 に追加するかを判断する
