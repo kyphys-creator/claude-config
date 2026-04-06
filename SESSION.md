@@ -46,6 +46,14 @@
 - **git history scrubbing**: 「暫定方針」を外し「**確定: 見送り**」に書き換え (DESIGN.md)。理由は外部キャッシュ残留で完全秘匿不可のため scrubbing 利得が小さく、force-push のコストが上回る
 - **CONVENTIONS.md / conventions/ の自己言及 odakin 記述**: 既に「現状維持」確定文言だったため見出しに「(確定: 現状維持 2026-04-06)」を追記してユーザー再確認済みであることを明示
 
+## 今セッションの変更（2026-04-07 第5回: 4 軸レビュー修正）
+
+### DESIGN.md / EXPLORING.md 分離 convention の追加修正
+- 前回導入した convention の 4 軸レビューで 6 件のバグを検出し、うち 5 件を修正（[6] 効率性: claude-config/DESIGN.md と principles §6 の内容重複 → DESIGN.md を thin pointer 化）
+- **LorentzArena 2+1 側**: 別コミットで用語再考を DESIGN.md → EXPLORING.md に migrate（`88ed267` でヘッダーが誤置換され orphan 化していた問題も併せて解決、stale L428 参照も削除）
+- **docs/convention-design-principles.md §6 適用事例**: 「用語再考は当面 DESIGN.md に残す」を削除し、「初回適用リポ内の既存 (b) は EXPLORING.md 新設時に同時 migrate するのが自然」という学びを追記
+- **DESIGN.md「DESIGN.md と EXPLORING.md の分離」**: principles §6 と重複していた 3 カテゴリ表・3 つの実害・棄却した代替案を削除し、principles §6 を正本として参照する thin 構成に変更。決定固有の context（トリガー・初回適用・4-07 修正経緯）のみ残す
+
 ## 今セッションの変更（2026-04-06 第4回）
 
 ### DESIGN.md と EXPLORING.md の分離（新規 convention）
