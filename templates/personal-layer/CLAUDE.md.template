@@ -1,0 +1,36 @@
+# CLAUDE.md — <your-name>'s Claude Code Home
+
+> このファイルは個人層 (`<base>/<your>-prefs/CLAUDE.md`) の正本。
+> `<base>/CLAUDE.md` はこのファイルへの symlink（claude-config の setup.sh が作成）。
+
+## ⚠️ Claude への必須指示: 個人規約の読み込み
+
+セッション開始時、および関連タスクに入る前に、このディレクトリ配下の以下の規約ファイルを必ず読み込むこと。これらは個人ルールで、全ジャンルのタスクに横断的に適用される強制ルール。**CLAUDE.md を読んだだけでは不十分で、各 `*.md` ファイルの本文を具体的に参照する必要がある**。
+
+### 読み込み必須の規約ファイル一覧
+
+| 規約 | ファイル | 適用タイミング |
+|---|---|---|
+| ユーザー身元 | [`user-profile.md`](user-profile.md) | 宛名・署名・アカウント切替の判断時 |
+| リポ一覧 | [`repos.md`](repos.md) | 新規リポ作成前・作業対象判断時 |
+| 共有プロジェクト鍵 | [`shared-project-keys.md`](shared-project-keys.md) | 共有プロジェクトで git-crypt unlock するとき |
+| <他のルール> | <ファイル名> | <いつ参照するか> |
+
+### 規約追加時の手順
+
+新しい個人ルールが発生したら:
+1. このディレクトリ配下に新しい `*.md` を作成
+2. 上記「読み込み必須」テーブルに追記（**Claude はテーブルに載っていないファイルを自動では読まない**）
+3. commit + push（git 管理しているなら）
+
+## 共通規約参照（claude-config、public）
+
+- 共通: `<base>/CONVENTIONS.md`（→ `claude-config/CONVENTIONS.md` への symlink）
+- MCP: `<base>/claude-config/conventions/mcp.md`
+- 共有リポ: `<base>/claude-config/conventions/shared-repo.md`
+- LaTeX: `<base>/claude-config/conventions/latex.md`
+- 個人層モデル: `<base>/claude-config/docs/personal-layer.md`
+
+## Projects
+
+リポ一覧の正本は [`repos.md`](repos.md)。揮発的な「現在の作業プロジェクト」状態は `~/.claude/.../memory/MEMORY.md` 側で管理。

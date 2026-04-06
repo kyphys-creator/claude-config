@@ -1,0 +1,56 @@
+# <project-name>
+
+**⚠️ private リポ**。<漏れると困る情報の種類を1行で>。
+
+<このリポが何のためのリポか、1-2 行で>
+
+## 共同編集者向け
+
+このリポは複数人で編集する shared-project layer です。各自:
+
+- claude-config ([github.com/<owner>/claude-config](https://github.com/<owner>/claude-config)) を clone することを推奨（共通規約と Claude Code 流儀のため）
+- 自分の個人層（[personal-layer 規約](https://github.com/<owner>/claude-config/blob/main/docs/personal-layer.md)）があればそれが cascade で適用される
+- 個人層を持っていない場合も本リポは standalone で動作する
+
+## (オプション) git-crypt
+
+`<encrypted-paths>` のみ暗号化する場合の例:
+
+```
+**git-crypt 有効**（`<encrypted-paths>` のみ暗号化）。
+
+**復号**: `git-crypt unlock <your-key-path>`
+- 鍵の正本: <共有フォルダ>/<project-name>.key
+- 個人層の `shared-project-keys.md` にエントリを足すと Claude が自動で正しいパスを使う
+- なければ fallback: `~/.secrets/<project-name>.key`
+```
+
+詳細: [claude-config/conventions/shared-repo.md](https://github.com/<owner>/claude-config/blob/main/conventions/shared-repo.md) の「共有 git-crypt 鍵パターン」セクション。
+
+## 責務
+
+<このリポで扱う業務範囲をリストアップ>
+
+## 原則
+
+<TODO/SESSION/ファイル運用の原則を 3-5 個>
+
+## 構造
+
+```
+<project-name>/
+├── CLAUDE.md            # このファイル
+├── README.md            # 公開向け説明（最小限）
+├── SESSION.md           # 現在の作業状態
+├── DESIGN.md            # 設計判断と理由
+├── TODO.yaml            # タスクの正本（あれば）
+└── ...
+```
+
+## 共通規約参照
+
+共有リポの一般ルール: [claude-config/conventions/shared-repo.md](https://github.com/<owner>/claude-config/blob/main/conventions/shared-repo.md)
+
+## 公開前 audit
+
+新しい collaborator を追加する前に、[`AUDIT.md`](AUDIT.md) のチェックリストを通すこと。
