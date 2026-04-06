@@ -34,6 +34,14 @@ description は英語。リポ一覧の正本は **MEMORY.md**。新規作成前
 
 CLAUDE.md は「どうやるか」、SESSION.md は「今どこにいるか」、DESIGN.md は「なぜそうしたか」。
 
+### 任意ファイル
+
+**`ARCHITECTURE.md`**（または `docs/ARCHITECTURE.md`）— コードの 30,000ft ナラティブ。レイヤ構成・主要概念・データフローを散文で書く。
+
+- **作る基準:** コードリポで CLAUDE.md の構造説明が表 1 つに収まらず、ファイル名やクラス名から関係性が読み取れない場合（例: 物理/通信/UI が分離、非同期パイプライン、独自の概念モデル）
+- **作らない:** LaTeX 論文・記事・データ運用・薄いスクリプト集など構造説明が CLAUDE.md に収まるリポ。ファイルツリーやクラス一覧だけになるなら不要
+- **前例:** [LorentzArena/docs/ARCHITECTURE.ja.md](https://github.com/sogebu/LorentzArena/blob/main/docs/ARCHITECTURE.ja.md)
+
 ### 記録先の判別
 
 | 情報の性質 | 書き先 |

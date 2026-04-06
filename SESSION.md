@@ -21,5 +21,12 @@
 - CONVENTIONS.md §5 に OS セキュリティ設定変更禁止を追加
 - dangerous-commands-guard.sh を削除（deny ルールで十分）
 
+## 今セッションの変更（2026-04-06）
+
+### ARCHITECTURE.md と RUNBOOK 系の位置づけ決着
+- **ARCHITECTURE.md**: 必須化せず CONVENTIONS.md §2 に「任意ファイル」として追加（5 行）。判断の根拠と棄却した代替案は DESIGN.md の該当セクション参照
+- **RUNBOOK 系**: 規約化を待つ（実例不足）。判断の根拠は DESIGN.md の該当セクション参照
+- 30 リポ実地レビューの結果と「CLAUDE.md 肥大化の真因はランブック」という発見も DESIGN.md に記録済み
+
 ## 残タスク
-- [ ] ARCHITECTURE.md を必須ファイルに追加するか検討。LorentzArena で導入済み（コード構造・依存関係・データフローの記述用）。DESIGN.md（設計判断の Why）とは別に、現状の構造を図示する役割。全リポに適用するか、コードリポ限定か、CONVENTIONS.md §2 に追加するかを判断する
+- [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
