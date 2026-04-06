@@ -457,26 +457,93 @@ else
     echo "  Skipped (already exist): $SKIPPED repos"
 fi
 
-# --- 5a. Personal home symlink ---
-# ユーザーに odakin-prefs (個人規約 private リポ) があれば、~/Claude/CLAUDE.md を
-# その CLAUDE.md への symlink にする（cross-machine 同期される個人ホーム指示書）。
-# odakin-prefs が無いユーザーには影響なし（サイレントスキップ）。
-PERSONAL_PREFS_CLAUDE="$CLAUDE_DIR/odakin-prefs/CLAUDE.md"
+# --- 5a. Personal home symlink (four-layer architecture, layer 2) ---
+# ユーザの個人層 (personal layer) を検出し、~/Claude/CLAUDE.md をそこへ symlink する。
+# 詳しい層モデルは docs/personal-layer.md 参照。
+#
+# 検出ロジック:
+#   1. CLAUDE_PERSONAL_LAYER 環境変数が設定されていればそれを使う
+#      (値が "none" なら検出を無効化、デフォルトテンプレを設置)
+#   2. それ以外: <base>/*/.claude-personal-layer マーカーファイルを検索
+#      0 件 → 個人層なし、デフォルトテンプレを設置
+#      1 件 → そのディレクトリを個人層として採用、symlink を張る
+#      2 件以上 → エラーで停止 (CLAUDE_PERSONAL_LAYER で明示するよう促す)
 HOME_CLAUDE="$CLAUDE_DIR/CLAUDE.md"
+DEFAULT_ROOT_TEMPLATE="$SCRIPT_DIR/templates/root-CLAUDE.md.default"
 
-if [ -f "$PERSONAL_PREFS_CLAUDE" ]; then
+# nullglob 相当: マッチしない glob を空配列に
+LAYER=""
+if [ "${CLAUDE_PERSONAL_LAYER:-}" = "none" ]; then
+    LAYER=""
+elif [ -n "${CLAUDE_PERSONAL_LAYER:-}" ]; then
+    if [ -f "$CLAUDE_PERSONAL_LAYER/.claude-personal-layer" ] && [ -f "$CLAUDE_PERSONAL_LAYER/CLAUDE.md" ]; then
+        LAYER="${CLAUDE_PERSONAL_LAYER%/}"
+    else
+        echo ""
+        echo "=== Step 5a: Personal home symlink ==="
+        echo "  WARNING: CLAUDE_PERSONAL_LAYER=$CLAUDE_PERSONAL_LAYER does not contain"
+        echo "           both .claude-personal-layer and CLAUDE.md. Skipping detection."
+    fi
+else
+    LAYERS=()
+    for d in "$CLAUDE_DIR"/*/; do
+        if [ -f "${d}.claude-personal-layer" ] && [ -f "${d}CLAUDE.md" ]; then
+            LAYERS+=("${d%/}")
+        fi
+    done
+    case ${#LAYERS[@]} in
+        0)  LAYER="" ;;
+        1)  LAYER="${LAYERS[0]}" ;;
+        *)  echo ""
+            echo "=== Step 5a: Personal home symlink ==="
+            echo "  ERROR: multiple personal layers detected:"
+            for l in "${LAYERS[@]}"; do echo "    - $l"; done
+            echo "  Set CLAUDE_PERSONAL_LAYER env var to specify which one to use,"
+            echo "  or 'none' to disable detection."
+            exit 1
+            ;;
+    esac
+fi
+
+if [ -n "$LAYER" ]; then
     echo ""
     echo "=== Step 5a: Personal home symlink ==="
-    if [ -L "$HOME_CLAUDE" ] && [ "$(readlink "$HOME_CLAUDE")" = "odakin-prefs/CLAUDE.md" ]; then
-        echo "  Already linked: $HOME_CLAUDE -> odakin-prefs/CLAUDE.md"
+    LAYER_BASENAME="$(basename "$LAYER")"
+    REL_LAYER_TARGET="$LAYER_BASENAME/CLAUDE.md"
+    if [ -L "$HOME_CLAUDE" ] && [ "$(readlink "$HOME_CLAUDE")" = "$REL_LAYER_TARGET" ]; then
+        echo "  Already linked: $HOME_CLAUDE -> $REL_LAYER_TARGET"
     else
         if [ -e "$HOME_CLAUDE" ] && [ ! -L "$HOME_CLAUDE" ]; then
-            cp "$HOME_CLAUDE" "$HOME_CLAUDE.bak.$(date +%s)"
-            echo "  Backed up existing $HOME_CLAUDE"
+            BACKUP="$HOME_CLAUDE.bak.$(date +%s)"
+            cp "$HOME_CLAUDE" "$BACKUP"
+            echo "  Backed up existing $HOME_CLAUDE -> $BACKUP"
         fi
         rm -f "$HOME_CLAUDE"
-        (cd "$CLAUDE_DIR" && ln -s "odakin-prefs/CLAUDE.md" "CLAUDE.md")
-        echo "  Linked: $HOME_CLAUDE -> odakin-prefs/CLAUDE.md"
+        (cd "$CLAUDE_DIR" && ln -s "$REL_LAYER_TARGET" "CLAUDE.md")
+        echo "  Linked: $HOME_CLAUDE -> $REL_LAYER_TARGET"
+    fi
+elif [ -f "$DEFAULT_ROOT_TEMPLATE" ]; then
+    echo ""
+    echo "=== Step 5a: Personal home symlink (no personal layer detected) ==="
+    if [ -L "$HOME_CLAUDE" ]; then
+        # 既に symlink (どこかを指している) → 個人層が消えた可能性
+        # 安全のため触らず警告のみ
+        echo "  $HOME_CLAUDE is a symlink to $(readlink "$HOME_CLAUDE")."
+        echo "  No personal layer detected. Leaving symlink in place."
+        echo "  Remove it manually if you want to install the default template."
+    elif [ -e "$HOME_CLAUDE" ]; then
+        if cmp -s "$HOME_CLAUDE" "$DEFAULT_ROOT_TEMPLATE"; then
+            echo "  Default template already installed at $HOME_CLAUDE"
+        else
+            BACKUP="$HOME_CLAUDE.bak.$(date +%s)"
+            mv "$HOME_CLAUDE" "$BACKUP"
+            cp "$DEFAULT_ROOT_TEMPLATE" "$HOME_CLAUDE"
+            echo "  Backed up existing $HOME_CLAUDE -> $BACKUP"
+            echo "  Installed default $HOME_CLAUDE"
+        fi
+    else
+        cp "$DEFAULT_ROOT_TEMPLATE" "$HOME_CLAUDE"
+        echo "  Installed default $HOME_CLAUDE"
     fi
 fi
 
@@ -490,12 +557,23 @@ if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
     UNLOCKED=0
     SKIPPED_CRYPT=0
     # .gitattributes に git-crypt 設定があるリポを自動検出
+    # 個人鍵 + 共有プロジェクト鍵 (~/.secrets/<repo>.key) を順に試す
     for REPO_DIR in "$CLAUDE_DIR"/*/; do
         [ -d "$REPO_DIR/.git" ] || continue
         [ -f "$REPO_DIR/.gitattributes" ] || continue
         grep -q "git-crypt" "$REPO_DIR/.gitattributes" 2>/dev/null || continue
         REPO_NAME="$(basename "$REPO_DIR")"
         if (cd "$REPO_DIR" && git-crypt status 2>/dev/null | grep -q "encrypted:"); then
+            # 共有プロジェクト鍵 (~/.secrets/<repo>.key) があれば優先
+            REPO_KEY="$HOME/.secrets/${REPO_NAME}.key"
+            if [ -f "$REPO_KEY" ]; then
+                echo "  Unlocking $REPO_NAME (shared key) ..."
+                if (cd "$REPO_DIR" && git-crypt unlock "$REPO_KEY" 2>&1 | sed 's/^/    /'); then
+                    UNLOCKED=$((UNLOCKED + 1))
+                    continue
+                fi
+                echo "    shared key failed, trying personal key ..."
+            fi
             echo "  Unlocking $REPO_NAME ..."
             (cd "$REPO_DIR" && git-crypt unlock "$GIT_CRYPT_KEY" 2>&1 | sed 's/^/    /')
             UNLOCKED=$((UNLOCKED + 1))
