@@ -505,6 +505,30 @@ if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
     done
     echo "  Unlocked: $UNLOCKED repos"
     echo "  Already unlocked: $SKIPPED_CRYPT repos"
+
+    # --- 5c. Pin git-crypt absolute path in repo .git/config ---
+    # Claude Code の Bash ツールなど PATH に /usr/local/bin 等を持たないプロセスから
+    # git commit / checkout 時に「git-crypt: command not found」で filter が失敗するのを防ぐ。
+    # secrets-config/CLAUDE.md にも「git filter は絶対パス使用」と明記済み。
+    GITCRYPT_ABS="$(command -v git-crypt)"
+    if [ -n "$GITCRYPT_ABS" ]; then
+        echo ""
+        echo "=== Step 5c: Pinning git-crypt absolute path in .git/config ==="
+        echo "  Using: $GITCRYPT_ABS"
+        PINNED=0
+        for REPO_DIR in "$CLAUDE_DIR"/*/; do
+            [ -d "$REPO_DIR/.git" ] || continue
+            [ -f "$REPO_DIR/.gitattributes" ] || continue
+            grep -q "git-crypt" "$REPO_DIR/.gitattributes" 2>/dev/null || continue
+            REPO_NAME="$(basename "$REPO_DIR")"
+            (cd "$REPO_DIR" && \
+                git config filter.git-crypt.smudge "$GITCRYPT_ABS smudge" && \
+                git config filter.git-crypt.clean "$GITCRYPT_ABS clean" && \
+                git config diff.git-crypt.textconv "$GITCRYPT_ABS diff")
+            PINNED=$((PINNED + 1))
+        done
+        echo "  Pinned: $PINNED repos"
+    fi
 fi
 
 # --- 6. Install pre-commit hook for LaTeX repos ---
