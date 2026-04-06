@@ -42,8 +42,10 @@
 - DESIGN.md「~/Claude/CLAUDE.md の symlink 化」セクションを「完了」に書き換え (移管マッピング・bundling 根拠を記録)
 - 残痕: `~/Claude/CLAUDE.md.pre-symlink-backup` (動作確認後に削除予定)
 
+### 残タスクの確定 (2 件 close)
+- **git history scrubbing**: 「暫定方針」を外し「**確定: 見送り**」に書き換え (DESIGN.md)。理由は外部キャッシュ残留で完全秘匿不可のため scrubbing 利得が小さく、force-push のコストが上回る
+- **CONVENTIONS.md / conventions/ の自己言及 odakin 記述**: 既に「現状維持」確定文言だったため見出しに「(確定: 現状維持 2026-04-06)」を追記してユーザー再確認済みであることを明示
+
 ## 残タスク
 - [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
-- [ ] **claude-config git history scrubbing**: HEAD は既にクリーン。過去 commit の処理は force-push 必要・外部キャッシュ残留などリスク大で現状は見送り方針。再検討トリガーは DESIGN.md「claude-config git history scrubbing」セクション参照
-- [ ] **CONVENTIONS.md / conventions/ の自己言及 odakin 記述**: 現状維持を結論済み。削除検討トリガーは DESIGN.md「自己言及的 odakin 記述」セクション参照
 - [ ] **`~/Claude/CLAUDE.md.pre-symlink-backup` の削除**: 次セッション起動時に symlink 経由で正常読み込みを確認したのちに削除
