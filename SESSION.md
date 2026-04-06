@@ -28,5 +28,10 @@
 - **RUNBOOK 系**: 規約化を待つ（実例不足）。判断の根拠は DESIGN.md の該当セクション参照
 - 30 リポ実地レビューの結果と「CLAUDE.md 肥大化の真因はランブック」という発見も DESIGN.md に記録済み
 
+### CONVENTIONS.md §2 表の user-specific instance を除去
+- 特定ドメインの参照データを特定 private リポの管理ツールに送る instance 行を削除 (universal table への混入 + 安全規則違反)
+- 同等ルールは odakin-prefs に専用ファイルとして移管 + odakin-prefs/CLAUDE.md テーブルに追記
+- 詳細と移管先選定の理由は DESIGN.md「CONVENTIONS.md §2 記録判別表」セクション参照
+
 ## 残タスク
 - [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
