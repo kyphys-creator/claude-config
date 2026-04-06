@@ -67,3 +67,4 @@
 
 ## 残タスク
 - [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
+- [ ] **規約 rollout 原則の一般化の再検討**: 現状は `docs/convention-design-principles.md §6` に EXPLORING.md 特化の学びとして記録（L149 の 2026-04-07 note、および L148 の scope 明確化）。case 2 発生（RUNBOOK 導入 or 他 content-reorganization 系 convention 追加）で一般原則（principles §7 新設など）に昇格するか再判断。1 データポイントでの formalize は YAGNI で defer 中
