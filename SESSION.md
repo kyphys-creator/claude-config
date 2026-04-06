@@ -46,5 +46,16 @@
 - **git history scrubbing**: 「暫定方針」を外し「**確定: 見送り**」に書き換え (DESIGN.md)。理由は外部キャッシュ残留で完全秘匿不可のため scrubbing 利得が小さく、force-push のコストが上回る
 - **CONVENTIONS.md / conventions/ の自己言及 odakin 記述**: 既に「現状維持」確定文言だったため見出しに「(確定: 現状維持 2026-04-06)」を追記してユーザー再確認済みであることを明示
 
+## 今セッションの変更（2026-04-06 第4回）
+
+### DESIGN.md と EXPLORING.md の分離（新規 convention）
+- LorentzArena 2+1/DESIGN.md 500+ 行の肥大化とスマホ UI 思考メモの記録先問題を契機に、DESIGN.md に決定 / 探索 / メタ決定の 3 カテゴリが混在している構造を識別
+- **CONVENTIONS.md §2**: DESIGN.md 定義を「決定した設計判断（defer 含む）」に絞り、任意ファイル `EXPLORING.md` を新設（ARCHITECTURE.md と同じ任意ファイル扱い）
+- **§2 の 記録先判別表** も更新（DESIGN.md / EXPLORING.md の使い分けを追加）
+- **docs/convention-design-principles.md §6 新設**: 3 カテゴリ分析、棄却した代替案（3 ファイル分割・タグ付け・サブディレクトリ）、lifecycle、境界判別ルールを記録
+- **DESIGN.md**: 「DESIGN.md と EXPLORING.md の分離（2026-04-06）」セクション追加
+- **初回適用**: LorentzArena 2+1/EXPLORING.md を新規作成し、スマホ UI の設計思考（option space 分析、α/β 候補、open questions、un-shelve トリガー）を移動。2+1/SESSION.md の「次にやること」からポインタ
+- **retroactive migration はしない**: 既存リポの既存 DESIGN.md は触らない。新規探索が発生したリポから順に導入
+
 ## 残タスク
 - [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
