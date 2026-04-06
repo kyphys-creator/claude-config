@@ -48,4 +48,3 @@
 
 ## 残タスク
 - [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
-- [ ] **`~/Claude/CLAUDE.md.pre-symlink-backup` の削除**: 次セッション起動時に symlink 経由で正常読み込みを確認したのちに削除
