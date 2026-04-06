@@ -63,6 +63,7 @@ setup.sh が自動で行うこと:
 5. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
 6. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 7. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
+   - *(条件付き)* `odakin-prefs` リポが存在すれば、`<base>/CLAUDE.md` をそのリポの `CLAUDE.md` への symlink にする（個人ホーム指示書の cross-machine 同期）
 8. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 9. *(条件付き)* JHEP.bst を texmf-local にインストール（odakin: 自動、他ユーザー: オプション表示）
 10. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）

@@ -457,6 +457,29 @@ else
     echo "  Skipped (already exist): $SKIPPED repos"
 fi
 
+# --- 5a. Personal home symlink ---
+# ユーザーに odakin-prefs (個人規約 private リポ) があれば、~/Claude/CLAUDE.md を
+# その CLAUDE.md への symlink にする（cross-machine 同期される個人ホーム指示書）。
+# odakin-prefs が無いユーザーには影響なし（サイレントスキップ）。
+PERSONAL_PREFS_CLAUDE="$CLAUDE_DIR/odakin-prefs/CLAUDE.md"
+HOME_CLAUDE="$CLAUDE_DIR/CLAUDE.md"
+
+if [ -f "$PERSONAL_PREFS_CLAUDE" ]; then
+    echo ""
+    echo "=== Step 5a: Personal home symlink ==="
+    if [ -L "$HOME_CLAUDE" ] && [ "$(readlink "$HOME_CLAUDE")" = "odakin-prefs/CLAUDE.md" ]; then
+        echo "  Already linked: $HOME_CLAUDE -> odakin-prefs/CLAUDE.md"
+    else
+        if [ -e "$HOME_CLAUDE" ] && [ ! -L "$HOME_CLAUDE" ]; then
+            cp "$HOME_CLAUDE" "$HOME_CLAUDE.bak.$(date +%s)"
+            echo "  Backed up existing $HOME_CLAUDE"
+        fi
+        rm -f "$HOME_CLAUDE"
+        (cd "$CLAUDE_DIR" && ln -s "odakin-prefs/CLAUDE.md" "CLAUDE.md")
+        echo "  Linked: $HOME_CLAUDE -> odakin-prefs/CLAUDE.md"
+    fi
+fi
+
 # --- 5b. Unlock git-crypt repos ---
 # git-crypt + 鍵が両方ある場合のみ実行（なければサイレントスキップ）
 GIT_CRYPT_KEY="$HOME/.secrets/git-crypt.key"
