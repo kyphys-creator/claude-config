@@ -63,10 +63,11 @@ setup.sh が自動で行うこと:
 5. Claude Code パーミッション設定 — 安全なツール（Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch）を自動許可
 6. git post-merge hook をインストール（`git pull` 後に hooks と CONVENTIONS.md を自動同期）
 7. 認証ユーザーの全リポを `<base>/` 以下に clone（未取得のもののみ）
-   - *(条件付き)* `odakin-prefs` リポが存在すれば、`<base>/CLAUDE.md` をそのリポの `CLAUDE.md` への symlink にする（個人ホーム指示書の cross-machine 同期）
+   - *(条件付き)* 個人層 (`.claude-personal-layer` マーカーファイルを持つディレクトリ) を `<base>/` 直下から検出し、見つかれば `<base>/CLAUDE.md` をそのディレクトリの `CLAUDE.md` への symlink にする。`CLAUDE_PERSONAL_LAYER` 環境変数で明示指定可（`none` で無効化）。検出ロジックの詳細は `docs/personal-layer.md` 参照
+   - *(条件付き)* 個人層が見つからない場合は `templates/root-CLAUDE.md.default` をデフォルトの `<base>/CLAUDE.md` として設置
 8. LaTeX リポ（.tex/.bib を含む）に pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 9. *(条件付き)* JHEP.bst を texmf-local にインストール（odakin: 自動、他ユーザー: オプション表示）
-10. *(条件付き)* git-crypt 暗号化リポを自動 unlock（`~/.secrets/git-crypt.key` が存在する場合のみ）
+10. *(条件付き)* git-crypt 暗号化リポを自動 unlock。共有プロジェクト鍵 (`~/.secrets/<repo>.key`) があればそれを優先、なければ個人鍵 (`~/.secrets/git-crypt.key`) で fallback
 11. *(条件付き)* Hammerspoon 設定をインストール（macOS + Hammerspoon インストール済みの場合のみ）
 
 ## How to Resume
@@ -78,7 +79,7 @@ setup.sh が自動で行うこと:
 **このリポは public。** 以下を絶対にコミットしない:
 - 実名（GitHub ユーザー名 `odakin` は可）
 - メールアドレス
-- 非公開リポ名（→ MEMORY.md に記載）。例外: ツール・運用設定リポ名（`gmail-mcp-config`, `research-collab`, `email-office`）は可
+- 非公開リポ名（→ 個人層の `repos.md` に記載）。例外: ツール・運用設定リポ名（`gmail-mcp-config`, `research-collab`, `email-office`, `odakin-prefs`, `secrets-config`）は可
 - 金融データ・口座情報
 - 所属機関名
 - 他ユーザーのユーザー名
