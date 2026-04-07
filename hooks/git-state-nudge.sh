@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
 # git-state-nudge.sh
 #
-# PostToolUse hook (Bash matcher): nudge Claude when the repo has state
-# that needs attention. This hook is the SOLE git-state monitor — it
-# subsumes the former SessionStart hook (`session-git-check.sh`) by
-# performing a one-time `git fetch` on first-sighting of a repo, so
-# remote-divergence detection still happens but without the noise of a
-# notification on every session startup.
+# PostToolUse(Bash) hook: nudge Claude when a git repo has state needing
+# attention. The hook is the SOLE git-state monitor — it subsumes the
+# former SessionStart hook (`session-git-check.sh`) by performing a
+# one-time `git fetch` on first-sighting of a repo, so remote-divergence
+# detection still happens but without the noise of a notification on
+# every session startup.
 #
-# Three distinct cases handled:
+# Cases handled (per repo, in priority order):
 #
-#   (1) "Just committed but not pushed" — HEAD ahead of upstream AND last
-#       commit within the last 60 seconds. Enforces CONVENTIONS §4
+#   (1) "Forced-update / orphan-tree on origin" — refs/remotes/origin/<branch>
+#       reflog shows `forced-update` (= someone elsewhere force-pushed),
+#       OR HEAD has NO common ancestor with @{u} (= origin was re-init'd
+#       from scratch). This is the failure mode that fooled Claude on
+#       2026-04-07 ("twcu-seminar stale clone 誤読 事件" — see
+#       odakin-prefs/push-workflow.md). The nudge tells Claude that
+#       AHEAD commits are likely ORPHANED, not unpushed, and to follow
+#       the "divergence の解釈規律" 4-query checklist.
+#
+#   (2) "Just committed but not pushed" — HEAD ahead of upstream AND
+#       last commit within the last 60 seconds. Enforces CONVENTIONS §4
 #       "コミット後は常に push" by surfacing a reminder right after the
 #       commit, when there is no excuse to defer.
 #
-#   (2) "First sighting of a stale repo (within the last 4 hours)" —
+#   (3) "First sighting of a stale repo (within the last 4 hours)" —
 #       first time the hook sees this repo within SEEN_THRESHOLD, AND
 #       repo has dirty tree / ahead / behind. Catches the case where the
 #       session base directory is not a git repo (e.g. ~/Claude) and
@@ -23,154 +32,291 @@
 #       The 4-hour window is a deliberate cross-session choice to avoid
 #       spamming when the user opens multiple short sessions in quick
 #       succession.
+#       On first sighting, a one-time `git fetch` (5s timeout) is run
+#       so the BEHIND check sees fresh remote state.
 #
-#   (3) "Behind remote on first-sighting" — same first-sighting trigger
-#       as (2), but the BEHIND check uses a fresh `git fetch` (with a
-#       short timeout) so the user is warned about remote progress
-#       BEFORE making any changes. This is the divergence-prevention
-#       function that the old SessionStart hook handled.
+# Multi-repo follow (Fix B, 2026-04-07):
+#   The hook reads the bash command from the Claude Code hook protocol
+#   stdin JSON and additionally checks any literal `git -C <path>` and
+#   `git --git-dir=<path>` targets. Variable-substituted paths (e.g.
+#   `git -C "$d"` inside a for loop) are NOT resolved — those will only
+#   be checked if cwd later changes into the repo. A diagnostic line is
+#   emitted when `git -C` is seen but no literal path could be
+#   extracted, so Claude knows the safety net is partial for that call.
 #
 # Silent when:
-#   - CWD is not a git repo
-#   - Repo is clean and in sync
+#   - All inspected repos are clean and in sync
 #   - Already nudged for the same HEAD sha (no duplicate warnings)
 #   - Repo has been seen recently (within 4h) AND HEAD has not advanced
 #
 # Design notes:
-#   - First-sighting branch does ONE `git fetch` (5s timeout). Subsequent
-#     calls within the 4h window skip fetch entirely → fast (~0.2s).
+#   - First-sighting branch does ONE `git fetch` per repo (5s timeout).
+#     Subsequent calls within the 4h window skip fetch entirely → fast.
 #   - State is kept in $HOME/.claude/state/git-nudge/ as small marker
 #     files. Cross-session state is acceptable here — the goal is to
-#     avoid re-nudging within minutes, not to enforce per-session
-#     freshness.
+#     avoid re-nudging within minutes, not enforce per-session freshness.
 #   - Output to stdout is injected into the session as context (per the
 #     Claude Code hook spec for PostToolUse).
 #   - Per-HEAD-sha suppression means each commit produces at most ONE
-#     push reminder, no matter how many Bash calls follow.
+#     push reminder, no matter how many Bash calls follow. The
+#     forced-update nudge uses a separate suffix ("-fu") so that the
+#     push reminder and the forced-update warning don't shadow each
+#     other for the same HEAD.
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: deliberately NOT using `set -e`. The hook contains many `grep`
+# and `git` calls that may legitimately exit non-zero (no match, no
+# upstream, etc.); set -e would kill the hook on the first such call.
+# Each command that needs failure handling does so explicitly.
 
-# Fast path: not a git repo → silent exit.
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-[ -z "$REPO_ROOT" ] && exit 0
-
-# State directory for "seen" / "nudged" markers.
 STATE_DIR="$HOME/.claude/state/git-nudge"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
-# SHA1 of repo path → marker filename.
-if command -v shasum >/dev/null 2>&1; then
-  REPO_HASH="$(printf '%s' "$REPO_ROOT" | shasum | cut -d' ' -f1)"
-elif command -v sha1sum >/dev/null 2>&1; then
-  REPO_HASH="$(printf '%s' "$REPO_ROOT" | sha1sum | cut -d' ' -f1)"
-else
-  # Last resort: use a sanitized path. Not collision-resistant but works.
-  REPO_HASH="$(printf '%s' "$REPO_ROOT" | tr '/' '_')"
-fi
-SEEN_FILE="$STATE_DIR/$REPO_HASH.seen"
-NUDGED_FILE="$STATE_DIR/$REPO_HASH.nudged"
-
 NOW="$(date +%s)"
-SEEN_THRESHOLD=14400  # 4 hours: re-warn about stale state if not seen for this long
-RECENT_COMMIT_WINDOW=60  # seconds: a commit within this window triggers push reminder
+SEEN_THRESHOLD=14400  # 4 hours
+RECENT_COMMIT_WINDOW=60  # seconds
 
-# Determine if this is a "first sighting" of the repo (within SEEN_THRESHOLD).
-FIRST_SIGHTING=0
-if [ ! -f "$SEEN_FILE" ]; then
-  FIRST_SIGHTING=1
-else
-  # Cross-platform mtime: BSD stat (-f %m) on macOS, GNU stat (-c %Y) on Linux.
-  SEEN_MTIME="$(stat -f %m "$SEEN_FILE" 2>/dev/null || stat -c %Y "$SEEN_FILE" 2>/dev/null || echo "$NOW")"
-  SEEN_AGE=$((NOW - SEEN_MTIME))
-  [ "$SEEN_AGE" -gt "$SEEN_THRESHOLD" ] && FIRST_SIGHTING=1
-fi
+# ----------------------------------------------------------------------
+# check_repo_state <repo_root> <label_prefix>
+#
+# Inspects the repo at <repo_root> and emits warnings to stdout for any
+# of cases (1)-(3) above. <label_prefix> is prepended to the repo path
+# in output (empty for cwd, "[git -C] " for follow targets).
+# Returns 0 always; never fatal.
+# ----------------------------------------------------------------------
+check_repo_state() {
+  local REPO_ROOT="$1"
+  local LABEL_PREFIX="$2"
 
-# Refresh the seen marker so subsequent calls (in this session or the next
-# few hours) don't re-warn. Note: we touch BEFORE fetch so a slow/failing
-# fetch in case (3) doesn't cause repeated retries on every Bash call.
-touch "$SEEN_FILE" 2>/dev/null || true
+  [ -z "$REPO_ROOT" ] && return 0
+  [ -d "$REPO_ROOT/.git" ] || [ -f "$REPO_ROOT/.git" ] || return 0
 
-# On first sighting, do a one-time `git fetch` (with a short timeout) so the
-# upstream tracking refs are fresh. This is what catches "behind remote"
-# state for the BEHIND check below. Subsequent calls within the 4h window
-# skip fetch entirely to keep PostToolUse fast (~0.2s instead of ~1.2s).
-if [ "$FIRST_SIGHTING" -eq 1 ]; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 5 git fetch --quiet 2>/dev/null || true
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 5 git fetch --quiet 2>/dev/null || true
+  # Per-repo state markers (sha1 of repo path → filename).
+  local REPO_HASH
+  if command -v shasum >/dev/null 2>&1; then
+    REPO_HASH="$(printf '%s' "$REPO_ROOT" | shasum | cut -d' ' -f1)"
+  elif command -v sha1sum >/dev/null 2>&1; then
+    REPO_HASH="$(printf '%s' "$REPO_ROOT" | sha1sum | cut -d' ' -f1)"
   else
-    git fetch --quiet 2>/dev/null || true
+    REPO_HASH="$(printf '%s' "$REPO_ROOT" | tr '/' '_')"
   fi
-fi
+  local SEEN_FILE="$STATE_DIR/$REPO_HASH.seen"
+  local NUDGED_FILE="$STATE_DIR/$REPO_HASH.nudged"
 
-# Gather repo state.
-UPSTREAM="$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '')"
-DIRTY_COUNT="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-AHEAD=0
-BEHIND=0
-if [ -n "$UPSTREAM" ]; then
-  AHEAD="$(git rev-list --count "$UPSTREAM..HEAD" 2>/dev/null || echo 0)"
-  BEHIND="$(git rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)"
-fi
-
-HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
-HEAD_TS="$(git log -1 --format=%ct HEAD 2>/dev/null || echo 0)"
-HEAD_AGE=999999
-[ "$HEAD_TS" -gt 0 ] && HEAD_AGE=$((NOW - HEAD_TS))
-
-# Per-HEAD-sha suppression: if we already nudged for this exact commit, don't repeat.
-ALREADY_NUDGED_SHA=""
-[ -f "$NUDGED_FILE" ] && ALREADY_NUDGED_SHA="$(cat "$NUDGED_FILE" 2>/dev/null || echo '')"
-
-# Decision logic.
-RECENT_COMMIT_NUDGE=0
-FIRST_SIGHTING_NUDGE=0
-
-if [ "$AHEAD" -gt 0 ] && [ "$HEAD_AGE" -le "$RECENT_COMMIT_WINDOW" ] \
-   && [ "$ALREADY_NUDGED_SHA" != "$HEAD_SHA" ]; then
-  RECENT_COMMIT_NUDGE=1
-fi
-
-if [ "$FIRST_SIGHTING" -eq 1 ]; then
-  if [ "$DIRTY_COUNT" -gt 0 ] || [ "$AHEAD" -gt 0 ] || [ "$BEHIND" -gt 0 ]; then
-    FIRST_SIGHTING_NUDGE=1
-  fi
-fi
-
-# Emit. Recent-commit nudge takes precedence (it's the more actionable case).
-if [ "$RECENT_COMMIT_NUDGE" -eq 1 ]; then
-  printf '[git-nudge] %s\n' "$REPO_ROOT"
-  printf '  - You just committed (%ss ago); HEAD is %s commit(s) ahead of %s.\n' \
-    "$HEAD_AGE" "$AHEAD" "$UPSTREAM"
-  if [ "$BEHIND" -gt 0 ]; then
-    # Diverged: a plain `git push` will be rejected as non-fast-forward.
-    # Tell Claude to pull --rebase first (which is the correct fix).
-    printf '  - DIVERGED: also %s commit(s) BEHIND %s.\n' "$BEHIND" "$UPSTREAM"
-    printf '  - Run `git pull --rebase` first, then `git push`. A plain push\n'
-    printf '    will be rejected as non-fast-forward.\n'
+  # Determine first-sighting status (within SEEN_THRESHOLD).
+  local FIRST_SIGHTING=0
+  if [ ! -f "$SEEN_FILE" ]; then
+    FIRST_SIGHTING=1
   else
-    printf '  - Per CONVENTIONS §4: コミット後は常に push. Run `git push` now\n'
-    printf '    unless you are intentionally stacking commits.\n'
+    local SEEN_MTIME
+    SEEN_MTIME="$(stat -f %m "$SEEN_FILE" 2>/dev/null || stat -c %Y "$SEEN_FILE" 2>/dev/null || echo "$NOW")"
+    local SEEN_AGE=$((NOW - SEEN_MTIME))
+    [ "$SEEN_AGE" -gt "$SEEN_THRESHOLD" ] && FIRST_SIGHTING=1
   fi
-  echo "$HEAD_SHA" > "$NUDGED_FILE" 2>/dev/null || true
-  exit 0
+  touch "$SEEN_FILE" 2>/dev/null || true
+
+  # On first sighting, do a one-time `git fetch` (with short timeout).
+  if [ "$FIRST_SIGHTING" -eq 1 ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5 git -C "$REPO_ROOT" fetch --quiet 2>/dev/null || true
+    elif command -v gtimeout >/dev/null 2>&1; then
+      gtimeout 5 git -C "$REPO_ROOT" fetch --quiet 2>/dev/null || true
+    else
+      git -C "$REPO_ROOT" fetch --quiet 2>/dev/null || true
+    fi
+  fi
+
+  # Gather repo state.
+  local UPSTREAM
+  UPSTREAM="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '')"
+  local DIRTY_COUNT
+  DIRTY_COUNT="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  local AHEAD=0 BEHIND=0
+  if [ -n "$UPSTREAM" ]; then
+    AHEAD="$(git -C "$REPO_ROOT" rev-list --count "$UPSTREAM..HEAD" 2>/dev/null || echo 0)"
+    BEHIND="$(git -C "$REPO_ROOT" rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)"
+  fi
+
+  # Fix A (2026-04-07): detect forced-update / orphan-tree.
+  local FORCED_UPDATE=0
+  local ORPHAN_TREE=0
+  if [ -n "$UPSTREAM" ]; then
+    local REMOTE_REFLOG_LATEST
+    REMOTE_REFLOG_LATEST="$(git -C "$REPO_ROOT" reflog -1 "$UPSTREAM" 2>/dev/null || echo '')"
+    if printf '%s' "$REMOTE_REFLOG_LATEST" | grep -q 'forced-update' 2>/dev/null; then
+      FORCED_UPDATE=1
+    fi
+    if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
+      if ! git -C "$REPO_ROOT" merge-base HEAD "$UPSTREAM" >/dev/null 2>&1; then
+        ORPHAN_TREE=1
+      fi
+    fi
+  fi
+
+  local HEAD_SHA HEAD_TS HEAD_AGE
+  HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo '')"
+  HEAD_TS="$(git -C "$REPO_ROOT" log -1 --format=%ct HEAD 2>/dev/null || echo 0)"
+  HEAD_AGE=999999
+  [ "$HEAD_TS" -gt 0 ] && HEAD_AGE=$((NOW - HEAD_TS))
+
+  local ALREADY_NUDGED_SHA=""
+  [ -f "$NUDGED_FILE" ] && ALREADY_NUDGED_SHA="$(cat "$NUDGED_FILE" 2>/dev/null || echo '')"
+
+  # Decision logic — case (1) [forced-update] takes top priority.
+  local FORCED_UPDATE_NUDGE=0
+  local RECENT_COMMIT_NUDGE=0
+  local FIRST_SIGHTING_NUDGE=0
+
+  if [ "$FORCED_UPDATE" -eq 1 ] || [ "$ORPHAN_TREE" -eq 1 ]; then
+    if [ "$ALREADY_NUDGED_SHA" != "${HEAD_SHA}-fu" ]; then
+      FORCED_UPDATE_NUDGE=1
+    fi
+  fi
+
+  if [ "$AHEAD" -gt 0 ] && [ "$HEAD_AGE" -le "$RECENT_COMMIT_WINDOW" ] \
+     && [ "$ALREADY_NUDGED_SHA" != "$HEAD_SHA" ]; then
+    RECENT_COMMIT_NUDGE=1
+  fi
+
+  if [ "$FIRST_SIGHTING" -eq 1 ]; then
+    if [ "$DIRTY_COUNT" -gt 0 ] || [ "$AHEAD" -gt 0 ] || [ "$BEHIND" -gt 0 ]; then
+      FIRST_SIGHTING_NUDGE=1
+    fi
+  fi
+
+  # ---- Emit ----
+  # Case (1): forced-update / orphan-tree (highest priority).
+  if [ "$FORCED_UPDATE_NUDGE" -eq 1 ]; then
+    printf '[git-nudge] %s%s\n' "$LABEL_PREFIX" "$REPO_ROOT"
+    if [ "$ORPHAN_TREE" -eq 1 ]; then
+      printf '  - ORPHAN TREE: HEAD has NO common ancestor with %s.\n' "$UPSTREAM"
+      printf '    Someone re-init from scratch and force-pushed. Local HEAD is\n'
+      printf '    a completely independent history.\n'
+    fi
+    if [ "$FORCED_UPDATE" -eq 1 ]; then
+      printf '  - %s reflog shows `forced-update` (force-push from elsewhere)\n' "$UPSTREAM"
+    fi
+    printf '  - Per push-workflow.md "divergence の解釈規律":\n'
+    printf '    DO NOT assume "push 忘れ". Run these BEFORE concluding:\n'
+    printf '      1. git -C "%s" reflog refs/remotes/%s\n' "$REPO_ROOT" "$UPSTREAM"
+    printf '      2. git -C "%s" rev-list --max-parents=0 --all\n' "$REPO_ROOT"
+    printf '      3. git -C "%s" merge-base HEAD @{u}\n' "$REPO_ROOT"
+    printf '      4. Check related repos (odakin-prefs, claude-config) for\n'
+    printf '         pivot decisions in the same time window\n'
+    printf '    Your local %s commit(s) at HEAD may be ORPHANED, not unpushed.\n' "$AHEAD"
+    echo "${HEAD_SHA}-fu" > "$NUDGED_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  # Case (2): just-committed-not-pushed.
+  if [ "$RECENT_COMMIT_NUDGE" -eq 1 ]; then
+    printf '[git-nudge] %s%s\n' "$LABEL_PREFIX" "$REPO_ROOT"
+    printf '  - You just committed (%ss ago); HEAD is %s commit(s) ahead of %s.\n' \
+      "$HEAD_AGE" "$AHEAD" "$UPSTREAM"
+    if [ "$BEHIND" -gt 0 ]; then
+      printf '  - DIVERGED: also %s commit(s) BEHIND %s.\n' "$BEHIND" "$UPSTREAM"
+      printf '  - Run `git pull --rebase` first, then `git push`. A plain push\n'
+      printf '    will be rejected as non-fast-forward.\n'
+    else
+      printf '  - Per CONVENTIONS §4: コミット後は常に push. Run `git push` now\n'
+      printf '    unless you are intentionally stacking commits.\n'
+    fi
+    echo "$HEAD_SHA" > "$NUDGED_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  # Case (3): first-sighting of stale state.
+  if [ "$FIRST_SIGHTING_NUDGE" -eq 1 ]; then
+    printf '[git-nudge] %s%s (first time touching this repo within ~4h)\n' "$LABEL_PREFIX" "$REPO_ROOT"
+    if [ "$DIRTY_COUNT" -gt 0 ]; then
+      printf '  - %s uncommitted change(s) inherited from earlier work\n' "$DIRTY_COUNT"
+    fi
+    if [ "$AHEAD" -gt 0 ]; then
+      printf '  - AHEAD by %s commit(s) — investigate and push if appropriate\n' "$AHEAD"
+    fi
+    if [ "$BEHIND" -gt 0 ]; then
+      printf '  - BEHIND by %s commit(s) — pull before working\n' "$BEHIND"
+    fi
+    printf '  - Investigate this state before starting work; do not silently overwrite or commit on top.\n'
+    return 0
+  fi
+
+  return 0
+}
+
+# ----------------------------------------------------------------------
+# main
+# ----------------------------------------------------------------------
+
+# Read the bash command from the Claude Code hook protocol stdin JSON.
+# Failures (no stdin, no jq, malformed JSON) → BASH_CMD stays empty.
+BASH_CMD=""
+if command -v jq >/dev/null 2>&1 && [ ! -t 0 ]; then
+  STDIN_JSON="$(cat 2>/dev/null || true)"
+  if [ -n "$STDIN_JSON" ]; then
+    BASH_CMD="$(printf '%s' "$STDIN_JSON" | jq -r '.tool_input.command // empty' 2>/dev/null || echo '')"
+  fi
 fi
 
-if [ "$FIRST_SIGHTING_NUDGE" -eq 1 ]; then
-  printf '[git-nudge] %s (first time touching this repo within ~4h)\n' "$REPO_ROOT"
-  if [ "$DIRTY_COUNT" -gt 0 ]; then
-    printf '  - %s uncommitted change(s) inherited from earlier work\n' "$DIRTY_COUNT"
+# Track repos already inspected so we don't double-warn for cwd + git -C
+# pointing at the same place.
+CHECKED_REPOS=""
+
+# Check 1: cwd, if it's inside a git work tree.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  CWD_REPO="$(git rev-parse --show-toplevel 2>/dev/null || echo '')"
+  if [ -n "$CWD_REPO" ]; then
+    check_repo_state "$CWD_REPO" ""
+    CHECKED_REPOS="|$CWD_REPO|"
   fi
-  if [ "$AHEAD" -gt 0 ]; then
-    printf '  - AHEAD by %s commit(s) — investigate and push if appropriate\n' "$AHEAD"
+fi
+
+# Check 2 (Fix B, 2026-04-07): literal `git -C <path>` and
+# `git --git-dir=<path>` targets in the bash command. Variable
+# substitutions ($var, ${var}, "$var") are NOT resolved — those will
+# fall back to cwd-based detection on later calls.
+if [ -n "$BASH_CMD" ]; then
+  # Match unquoted literal paths (no whitespace, no shell metachars).
+  PATHS_UNQUOTED="$(printf '%s\n' "$BASH_CMD" \
+    | grep -oE 'git +(-C +|--git-dir=)[A-Za-z0-9._/~-]+' 2>/dev/null \
+    | sed -E 's/^git +(-C +|--git-dir=)//' || true)"
+  # Match double-quoted literal paths (no $ inside, so excludes "$d").
+  PATHS_QUOTED="$(printf '%s\n' "$BASH_CMD" \
+    | grep -oE 'git +(-C +|--git-dir=)"[^"$]+"' 2>/dev/null \
+    | sed -E 's/^git +(-C +|--git-dir=)"//; s/"$//' || true)"
+
+  ALL_PATHS="$(printf '%s\n%s\n' "$PATHS_UNQUOTED" "$PATHS_QUOTED" | grep -v '^$' || true)"
+
+  # Diagnostic: if `git -C` was seen but no literal could be extracted,
+  # tell Claude the safety net is partial for this call. Variable-substituted
+  # paths land here (e.g. `git -C "$d"` inside a loop).
+  if [ -z "$ALL_PATHS" ] && printf '%s' "$BASH_CMD" | grep -qE 'git +(-C |--git-dir=)' 2>/dev/null; then
+    printf '[git-nudge:hint] command uses `git -C` with a non-literal path\n'
+    printf '  - state of target repo(s) NOT checked by this hook\n'
+    printf '  - prefer `cd <repo> && git ...` for full divergence/push warnings\n'
   fi
-  if [ "$BEHIND" -gt 0 ]; then
-    printf '  - BEHIND by %s commit(s) — pull before working\n' "$BEHIND"
+
+  if [ -n "$ALL_PATHS" ]; then
+    while IFS= read -r path; do
+      [ -z "$path" ] && continue
+      # Resolve to absolute path.
+      if [ -d "$path" ]; then
+        ABS_PATH="$(cd "$path" 2>/dev/null && pwd)" || continue
+      else
+        continue
+      fi
+      # Verify it's a git repo and get the work tree root.
+      git -C "$ABS_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+      REPO_ROOT="$(git -C "$ABS_PATH" rev-parse --show-toplevel 2>/dev/null || echo '')"
+      [ -z "$REPO_ROOT" ] && continue
+      # Skip if already checked (cwd or earlier `git -C` target).
+      case "$CHECKED_REPOS" in
+        *"|$REPO_ROOT|"*) continue ;;
+      esac
+      check_repo_state "$REPO_ROOT" "[git -C] "
+      CHECKED_REPOS="${CHECKED_REPOS}${REPO_ROOT}|"
+    done <<< "$ALL_PATHS"
   fi
-  printf '  - Investigate this state before starting work; do not silently overwrite or commit on top.\n'
-  exit 0
 fi
 
 exit 0
