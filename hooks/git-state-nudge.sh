@@ -2,7 +2,13 @@
 # git-state-nudge.sh
 #
 # PostToolUse hook (Bash matcher): nudge Claude when the repo has state
-# that needs attention. Two distinct cases:
+# that needs attention. This hook is the SOLE git-state monitor — it
+# subsumes the former SessionStart hook (`session-git-check.sh`) by
+# performing a one-time `git fetch` on first-sighting of a repo, so
+# remote-divergence detection still happens but without the noise of a
+# notification on every session startup.
+#
+# Three distinct cases handled:
 #
 #   (1) "Just committed but not pushed" — HEAD ahead of upstream AND last
 #       commit within the last 60 seconds. Enforces CONVENTIONS §4
@@ -10,25 +16,29 @@
 #       commit, when there is no excuse to defer.
 #
 #   (2) "First sighting of a stale repo (within the last 4 hours)" —
-#       first time Claude touches this repo within SEEN_THRESHOLD, AND
+#       first time the hook sees this repo within SEEN_THRESHOLD, AND
 #       repo has dirty tree / ahead / behind. Catches the case where the
 #       session base directory is not a git repo (e.g. ~/Claude) and
-#       Claude cd's into a sub-repo that already had unresolved state at
-#       session start — a gap not covered by the SessionStart-only
-#       `session-git-check.sh`. The 4-hour window is a deliberate
-#       cross-session choice to avoid spamming when the user opens
-#       multiple short sessions in quick succession; it is NOT a strict
-#       per-session check.
+#       Claude cd's into a sub-repo that already had unresolved state.
+#       The 4-hour window is a deliberate cross-session choice to avoid
+#       spamming when the user opens multiple short sessions in quick
+#       succession.
+#
+#   (3) "Behind remote on first-sighting" — same first-sighting trigger
+#       as (2), but the BEHIND check uses a fresh `git fetch` (with a
+#       short timeout) so the user is warned about remote progress
+#       BEFORE making any changes. This is the divergence-prevention
+#       function that the old SessionStart hook handled.
 #
 # Silent when:
 #   - CWD is not a git repo
 #   - Repo is clean and in sync
 #   - Already nudged for the same HEAD sha (no duplicate warnings)
-#   - Repo has been seen recently (within 4h) and HEAD has not advanced
+#   - Repo has been seen recently (within 4h) AND HEAD has not advanced
 #
 # Design notes:
-#   - This hook is intentionally fast (no `git fetch`, no network).
-#     Remote-divergence detection is the SessionStart hook's job.
+#   - First-sighting branch does ONE `git fetch` (5s timeout). Subsequent
+#     calls within the 4h window skip fetch entirely → fast (~0.2s).
 #   - State is kept in $HOME/.claude/state/git-nudge/ as small marker
 #     files. Cross-session state is acceptable here — the goal is to
 #     avoid re-nudging within minutes, not to enforce per-session
@@ -77,8 +87,23 @@ else
 fi
 
 # Refresh the seen marker so subsequent calls (in this session or the next
-# few hours) don't re-warn.
+# few hours) don't re-warn. Note: we touch BEFORE fetch so a slow/failing
+# fetch in case (3) doesn't cause repeated retries on every Bash call.
 touch "$SEEN_FILE" 2>/dev/null || true
+
+# On first sighting, do a one-time `git fetch` (with a short timeout) so the
+# upstream tracking refs are fresh. This is what catches "behind remote"
+# state for the BEHIND check below. Subsequent calls within the 4h window
+# skip fetch entirely to keep PostToolUse fast (~0.2s instead of ~1.2s).
+if [ "$FIRST_SIGHTING" -eq 1 ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 git fetch --quiet 2>/dev/null || true
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 5 git fetch --quiet 2>/dev/null || true
+  else
+    git fetch --quiet 2>/dev/null || true
+  fi
+fi
 
 # Gather repo state.
 UPSTREAM="$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '')"

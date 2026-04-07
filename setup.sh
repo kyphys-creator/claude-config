@@ -118,14 +118,12 @@ HOOK_ENTRIES='[
   }
 ]'
 
-# SessionStart hooks: run once when the session begins. Used for git sync check.
-SESSION_START_ENTRIES='[
-  {
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/session-git-check.sh"}]
-  }
-]'
-
 # PostToolUse hooks: run after each tool call. Used for git state nudges.
+# (Note: a former SessionStart hook `session-git-check.sh` was removed in
+# favour of letting `git-state-nudge.sh` do a one-time `git fetch` on
+# first-sighting. The reason: the SessionStart UI notification fired on
+# every session, which became noise. The PostToolUse hook is only loud
+# when something actually needs attention.)
 POST_TOOL_USE_ENTRIES='[
   {
     "matcher": "Bash",
@@ -189,9 +187,8 @@ install_hooks() {
         echo "  Creating settings.json with hooks config."
         mkdir -p "$(dirname "$SETTINGS")"
         jq -n --argjson pre "$HOOK_ENTRIES" \
-              --argjson start "$SESSION_START_ENTRIES" \
               --argjson post "$POST_TOOL_USE_ENTRIES" \
-            '{hooks: {PreToolUse: $pre, SessionStart: $start, PostToolUse: $post}}' > "$SETTINGS"
+            '{hooks: {PreToolUse: $pre, PostToolUse: $post}}' > "$SETTINGS"
         echo "  Created: $SETTINGS"
         return 0
     fi
@@ -201,9 +198,8 @@ install_hooks() {
     if ! jq -e '.hooks' "$SETTINGS" > /dev/null 2>&1; then
         echo "  Adding hooks config to settings.json ..."
         jq --argjson pre "$HOOK_ENTRIES" \
-           --argjson start "$SESSION_START_ENTRIES" \
            --argjson post "$POST_TOOL_USE_ENTRIES" \
-            '. + {hooks: {PreToolUse: $pre, SessionStart: $start, PostToolUse: $post}}' \
+            '. + {hooks: {PreToolUse: $pre, PostToolUse: $post}}' \
             "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
         echo "  Done."
     else
@@ -229,25 +225,16 @@ install_hooks() {
             done
         fi
 
-        # SessionStart 処理
-        if ! jq -e '.hooks.SessionStart' "$SETTINGS" > /dev/null 2>&1; then
-            echo "  Adding SessionStart hooks ..."
-            jq --argjson entries "$SESSION_START_ENTRIES" \
-                '.hooks.SessionStart = $entries' \
-                "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-        else
-            for HOOK_CMD in "session-git-check.sh"; do
-                if ! jq -e --arg cmd "$HOOK_CMD" \
-                    '.hooks.SessionStart[] | select(.hooks[]?.command | contains($cmd))' \
-                    "$SETTINGS" > /dev/null 2>&1; then
-                    echo "  Adding missing SessionStart hook: $HOOK_CMD"
-                    ENTRY=$(echo "$SESSION_START_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
-                        '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
-                    jq --argjson entry "$ENTRY" \
-                        '.hooks.SessionStart += [$entry]' \
-                        "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-                fi
-            done
+        # Cleanup: remove obsolete SessionStart session-git-check hook if present
+        # (it was retired in favour of git-state-nudge's first-sighting fetch).
+        if jq -e '.hooks.SessionStart' "$SETTINGS" > /dev/null 2>&1; then
+            if jq -e '.hooks.SessionStart[] | select(.hooks[]?.command | contains("session-git-check.sh"))' \
+               "$SETTINGS" > /dev/null 2>&1; then
+                echo "  Removing obsolete SessionStart hook (session-git-check.sh)..."
+                jq '.hooks.SessionStart |= map(select(.hooks[]?.command | contains("session-git-check.sh") | not))
+                    | if .hooks.SessionStart == [] then del(.hooks.SessionStart) else . end' \
+                    "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+            fi
         fi
 
         # PostToolUse 処理
