@@ -12,11 +12,11 @@
 #
 #   (1) "Orphan tree on origin" — HEAD has NO common ancestor with @{u}.
 #       This is the unambiguous signature of a re-init force-push from
-#       elsewhere (the failure mode that fooled Claude on 2026-04-07,
-#       see odakin-prefs/push-workflow.md "twcu-seminar stale clone 誤読
-#       事件"). The nudge tells Claude that AHEAD commits are likely
-#       ORPHANED, not unpushed, and points to the "divergence の解釈規律"
-#       4-query checklist.
+#       elsewhere (the failure mode that fooled Claude on 2026-04-07 —
+#       see "divergence の解釈規律" and "過去の失敗事例" sections in
+#       odakin-prefs/push-workflow.md). The nudge tells Claude that
+#       AHEAD commits are likely ORPHANED, not unpushed, and points to
+#       the 4-query checklist there.
 #       NOTE: an earlier version also detected `forced-update` in the
 #       origin/<branch> reflog, but that was too eager — the reflog entry
 #       persists for ~90 days even after `git reset --hard` resolves the
