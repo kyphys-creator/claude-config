@@ -50,11 +50,14 @@ ln -s ~/Claude/claude-config/scripts/pre-commit-bib .git/hooks/pre-commit
 ```
 
 ## .gitattributes（改行コード正規化）
-**LaTeX リポには必ず `.gitattributes` を置く。** 特に以下のケースで重要:
-- Dropbox 配下で運用するリポ（Dropbox が同期中に改行コードを書き換えることがある）
+
+以下のケースでは LaTeX リポに `.gitattributes` を置くことを推奨:
+- Dropbox / iCloud 等のクラウド同期配下で運用するリポ（同期中に改行コードが書き換わることがある）
 - Windows 共同編集者がいる共有リポ（CRLF 混入で git が全行 diff と見なすのを防ぐ）
 
-内容（`time-energy-head-on/.gitattributes` 準拠）:
+どちらにも該当しないリポ（Linux/Mac のみ、個人運用）では不要。
+
+推奨内容:
 ```
 # Normalize line endings to LF in the repository
 * text=auto eol=lf
