@@ -9,6 +9,9 @@
 #   3.  Claude Code パーミッション設定（安全なツールを自動許可）
 #   4.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
 #   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
+#   5a. 個人層 (.claude-personal-layer マーカー) を検出し ~/Claude/CLAUDE.md を symlink
+#   5a2. 個人層に dropbox-collabs.yaml があれば dropbox-refs symlinks を作成
+#        + 個人層 .git/hooks/post-merge を設置（git pull で自動再生成）
 #   5b. git-crypt 暗号化リポを自動 unlock（鍵があれば）
 #   6.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
 #   6b. JHEP.bst を texmf-local にインストール（全リポからグローバル利用）
@@ -596,6 +599,47 @@ elif [ -f "$DEFAULT_ROOT_TEMPLATE" ]; then
     else
         cp "$DEFAULT_ROOT_TEMPLATE" "$HOME_CLAUDE"
         echo "  Installed default $HOME_CLAUDE"
+    fi
+fi
+
+# --- 5a2. Set up Dropbox refs symlinks (per personal-layer registry) ---
+# 個人層に dropbox-collabs.yaml があれば、setup-dropbox-refs.sh を呼んで
+# <base>/<repo>/dropbox-refs symlink を作る。さらに個人層 .git/hooks/post-merge
+# に同じ呼び出しを install して、git pull で YAML を更新したら自動再生成される
+# ようにする。
+# 詳細規約: conventions/dropbox-refs.md
+DROPBOX_REFS_SCRIPT="$SCRIPT_DIR/scripts/setup-dropbox-refs.sh"
+if [ -n "$LAYER" ] && [ -f "$LAYER/dropbox-collabs.yaml" ] && [ -x "$DROPBOX_REFS_SCRIPT" ]; then
+    echo ""
+    echo "=== Step 5a2: Dropbox refs (per personal-layer registry) ==="
+    "$DROPBOX_REFS_SCRIPT" "$LAYER/dropbox-collabs.yaml" "$CLAUDE_DIR" || \
+        echo "  WARNING: setup-dropbox-refs.sh failed (see above)"
+
+    # Install / update post-merge hook in personal layer so subsequent
+    # `git pull` of the personal layer re-runs the symlink setup.
+    LAYER_GIT_HOOKS="$LAYER/.git/hooks"
+    if [ -d "$LAYER_GIT_HOOKS" ]; then
+        LAYER_POST_MERGE="$LAYER_GIT_HOOKS/post-merge"
+        # Tag the hook so we can detect / update our managed block.
+        HOOK_TAG="# managed-by: claude-config setup-dropbox-refs"
+        if [ -f "$LAYER_POST_MERGE" ] && grep -qF "$HOOK_TAG" "$LAYER_POST_MERGE" 2>/dev/null; then
+            : # already installed, leave alone (idempotent)
+        elif [ -f "$LAYER_POST_MERGE" ]; then
+            echo "  WARNING: $LAYER_POST_MERGE already exists and is not managed by claude-config."
+            echo "           Append the following lines manually:"
+            echo "             $HOOK_TAG"
+            echo "             \"$DROPBOX_REFS_SCRIPT\" \"$LAYER/dropbox-collabs.yaml\" \"$CLAUDE_DIR\" || true"
+        else
+            cat > "$LAYER_POST_MERGE" <<HOOK_EOF
+#!/usr/bin/env bash
+$HOOK_TAG
+# Re-create per-repo dropbox-refs symlinks after personal-layer git pull.
+# (re)installed by claude-config/setup.sh — re-running setup.sh updates this.
+"$DROPBOX_REFS_SCRIPT" "$LAYER/dropbox-collabs.yaml" "$CLAUDE_DIR" || true
+HOOK_EOF
+            chmod +x "$LAYER_POST_MERGE"
+            echo "  Installed: $LAYER_POST_MERGE"
+        fi
     fi
 fi
 
