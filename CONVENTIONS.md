@@ -90,7 +90,7 @@ git の状態管理は 2 本の hook で機械的に支援する:
 
 **(b) Bash 実行ごとの状態 nudge (推奨).** `PostToolUse` hook `claude-config/hooks/git-state-nudge.sh` が Bash 実行のたびに、現在の CWD が git リポなら以下 2 ケースを検査して警告を注入する。clean な repo は常に silent。
 - **直近 60 秒以内の commit が未 push** → §4 「コミット後は常に push」を機械的に思い出させる。意図的に stack している場合は無視してよい。1 つの commit につき 1 回だけ警告（同じ HEAD sha では再警告しない）
-- **このセッションで初めて触る repo が dirty / ahead / behind** → セッション base dir が repo でなく、サブ repo に `cd` した際の "stale state inheritance" を検出。SessionStart hook の盲点を埋める
+- **直近 4 時間以内に触っていない repo に入った時、それが dirty / ahead / behind** → セッション base dir が repo でなく、サブ repo に `cd` した際の "stale state inheritance" を検出。SessionStart hook の盲点を埋める。4 時間 window は cross-session で marker file に永続化されるため、短時間の連続セッションで spam しない設計（厳密な per-session 検出ではない点に注意）
 
 (a) は remote との不一致を、(b) は local の commit 後忘れと "未確認の継承状態" を、それぞれ別レイヤーで担当する。網羅的に網羅したい場合は両方が install されていること（`./setup.sh` 1 回で両方適用）。
 

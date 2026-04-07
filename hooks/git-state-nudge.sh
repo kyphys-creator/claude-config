@@ -9,12 +9,16 @@
 #       "コミット後は常に push" by surfacing a reminder right after the
 #       commit, when there is no excuse to defer.
 #
-#   (2) "First sighting of a stale repo this session" — first time Claude
-#       touches this repo (or first time in 4 hours), AND repo has dirty
-#       tree / ahead / behind. Catches the case where the session base
-#       directory is not a git repo (e.g. ~/Claude) and Claude cd's into
-#       a sub-repo that already had unresolved state at session start —
-#       a gap not covered by the SessionStart-only `session-git-check.sh`.
+#   (2) "First sighting of a stale repo (within the last 4 hours)" —
+#       first time Claude touches this repo within SEEN_THRESHOLD, AND
+#       repo has dirty tree / ahead / behind. Catches the case where the
+#       session base directory is not a git repo (e.g. ~/Claude) and
+#       Claude cd's into a sub-repo that already had unresolved state at
+#       session start — a gap not covered by the SessionStart-only
+#       `session-git-check.sh`. The 4-hour window is a deliberate
+#       cross-session choice to avoid spamming when the user opens
+#       multiple short sessions in quick succession; it is NOT a strict
+#       per-session check.
 #
 # Silent when:
 #   - CWD is not a git repo
@@ -72,7 +76,8 @@ else
   [ "$SEEN_AGE" -gt "$SEEN_THRESHOLD" ] && FIRST_SIGHTING=1
 fi
 
-# Refresh the seen marker so subsequent calls in this session don't re-warn.
+# Refresh the seen marker so subsequent calls (in this session or the next
+# few hours) don't re-warn.
 touch "$SEEN_FILE" 2>/dev/null || true
 
 # Gather repo state.
@@ -121,9 +126,9 @@ if [ "$RECENT_COMMIT_NUDGE" -eq 1 ]; then
 fi
 
 if [ "$FIRST_SIGHTING_NUDGE" -eq 1 ]; then
-  printf '[git-nudge] %s (first time touching this repo this session)\n' "$REPO_ROOT"
+  printf '[git-nudge] %s (first time touching this repo within ~4h)\n' "$REPO_ROOT"
   if [ "$DIRTY_COUNT" -gt 0 ]; then
-    printf '  - %s uncommitted change(s) inherited from before the session\n' "$DIRTY_COUNT"
+    printf '  - %s uncommitted change(s) inherited from earlier work\n' "$DIRTY_COUNT"
   fi
   if [ "$AHEAD" -gt 0 ]; then
     printf '  - AHEAD by %s commit(s) — investigate and push if appropriate\n' "$AHEAD"
