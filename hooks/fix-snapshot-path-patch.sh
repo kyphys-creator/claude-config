@@ -10,6 +10,8 @@
 sleep 1
 
 # 必須 PATH エントリ（存在チェックして追加）
+# Intel Mac (/usr/local) と Apple Silicon (/opt/homebrew) の両方を列挙。
+# 存在チェックで該当しない方は自動的にスキップされる。
 REQUIRED_PATHS=(
   "/Library/TeX/texbin"
   "/opt/homebrew/opt/python@3.12/libexec/bin"
@@ -18,6 +20,8 @@ REQUIRED_PATHS=(
   "$HOME/.npm-global/bin"
   "/opt/homebrew/bin"
   "/opt/homebrew/sbin"
+  "/usr/local/bin"
+  "/usr/local/sbin"
 )
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
