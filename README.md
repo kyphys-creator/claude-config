@@ -35,6 +35,8 @@ cd claude-config && ./setup.sh
 5. Configures Claude Code permissions — auto-allows safe tools (Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch)
 6. Installs a git `post-merge` hook for auto-sync on `git pull`
 7. Clones all your GitHub repos (skips existing)
+   - *(optional)* Detects a personal layer (a sibling directory with a `.claude-personal-layer` marker file) and links `<base>/CLAUDE.md` to it. See [`docs/personal-layer.md`](docs/personal-layer.md)
+   - *(optional)* If the personal layer contains `dropbox-collabs.yaml`, runs `scripts/setup-dropbox-refs.sh` to create `<base>/<repo>/dropbox-refs` symlinks pointing into your Dropbox install, and installs a `post-merge` hook in the personal layer so subsequent `git pull` regenerates them. See [`conventions/dropbox-refs.md`](conventions/dropbox-refs.md)
 8. Installs pre-commit hooks for LaTeX repos (Unicode → LaTeX auto-fix in `.tex`/`.bib`)
 9. *(optional)* Unlocks git-crypt encrypted repos (only if `~/.secrets/git-crypt.key` exists)
 10. *(optional)* Installs Hammerspoon config for Claude for Mac Cmd+Q quit prevention (only if Hammerspoon is installed)
@@ -69,6 +71,7 @@ On Windows (MSYS/Cygwin), symlinks are replaced with file copies, and the `post-
 │   ├── hooks/                  # Claude Code hooks
 │   │   ├── memory-guard.sh             # Edit/Write guard
 │   │   ├── memory-guard-bash.sh        # Bash guard (warning only)
+│   │   ├── git-state-nudge.sh          # PostToolUse(Bash): unpushed commit nudge + first-sighting fetch
 │   │   └── fix-snapshot-path-patch.sh  # PATH snapshot fix (called by launchd)
 │   ├── scripts/                # Git hooks + helpers
 │   │   ├── fix-bib-unicode.py      # Unicode → LaTeX conversion
