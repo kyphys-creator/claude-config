@@ -10,30 +10,36 @@
 #
 # Cases handled (per repo, in priority order):
 #
-#   (1) "Forced-update / orphan-tree on origin" — refs/remotes/origin/<branch>
-#       reflog shows `forced-update` (= someone elsewhere force-pushed),
-#       OR HEAD has NO common ancestor with @{u} (= origin was re-init'd
-#       from scratch). This is the failure mode that fooled Claude on
-#       2026-04-07 ("twcu-seminar stale clone 誤読 事件" — see
-#       odakin-prefs/push-workflow.md). The nudge tells Claude that
-#       AHEAD commits are likely ORPHANED, not unpushed, and to follow
-#       the "divergence の解釈規律" 4-query checklist.
+#   (1) "Orphan tree on origin" — HEAD has NO common ancestor with @{u}.
+#       This is the unambiguous signature of a re-init force-push from
+#       elsewhere (the failure mode that fooled Claude on 2026-04-07,
+#       see odakin-prefs/push-workflow.md "twcu-seminar stale clone 誤読
+#       事件"). The nudge tells Claude that AHEAD commits are likely
+#       ORPHANED, not unpushed, and points to the "divergence の解釈規律"
+#       4-query checklist.
+#       NOTE: an earlier version also detected `forced-update` in the
+#       origin/<branch> reflog, but that was too eager — the reflog entry
+#       persists for ~90 days even after `git reset --hard` resolves the
+#       issue, causing perpetual re-warning. The merge-base check is
+#       dynamic and auto-clears.
 #
 #   (2) "Just committed but not pushed" — HEAD ahead of upstream AND
 #       last commit within the last 60 seconds. Enforces CONVENTIONS §4
 #       "コミット後は常に push" by surfacing a reminder right after the
 #       commit, when there is no excuse to defer.
 #
-#   (3) "First sighting of a stale repo (within the last 4 hours)" —
-#       first time the hook sees this repo within SEEN_THRESHOLD, AND
-#       repo has dirty tree / ahead / behind. Catches the case where the
-#       session base directory is not a git repo (e.g. ~/Claude) and
-#       Claude cd's into a sub-repo that already had unresolved state.
+#   (3) "First sighting of an out-of-sync repo (within the last 4 hours)"
+#       — first time the hook sees this repo within SEEN_THRESHOLD, AND
+#       AHEAD or BEHIND > 0. Catches the case where the session base
+#       directory is not a git repo (e.g. ~/Claude) and Claude cd's into
+#       a sub-repo that already had unresolved divergence.
+#       NOTE: dirty-only first-sighting was deliberately removed for
+#       noise reduction — most WIP is intentional and Claude runs
+#       `git status` anyway. Only AHEAD/BEHIND warrant the warning.
 #       The 4-hour window is a deliberate cross-session choice to avoid
 #       spamming when the user opens multiple short sessions in quick
-#       succession.
-#       On first sighting, a one-time `git fetch` (5s timeout) is run
-#       so the BEHIND check sees fresh remote state.
+#       succession. On first sighting, a one-time `git fetch` (5s
+#       timeout) is run so the BEHIND check sees fresh remote state.
 #
 # Multi-repo follow (Fix B, 2026-04-07):
 #   The hook reads the bash command from the Claude Code hook protocol
@@ -137,19 +143,20 @@ check_repo_state() {
     BEHIND="$(git -C "$REPO_ROOT" rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)"
   fi
 
-  # Fix A (2026-04-07): detect forced-update / orphan-tree.
-  local FORCED_UPDATE=0
+  # Fix A (2026-04-07, refined): detect orphan-tree only.
+  # An earlier version also grep'd `git reflog -1 origin/main` for the
+  # string `forced-update`, but that was too eager: the reflog entry is
+  # historical and persists for ~90 days. After resolving the divergence
+  # by `git reset --hard`, the warning kept firing. The `merge-base`
+  # check below is dynamic — it auto-clears when state is resolved.
+  # Generic ahead/behind divergence (e.g. rebase force-push that does
+  # share a merge-base) is caught by case (3) first-sighting, with the
+  # interpretation discipline in push-workflow.md telling Claude to run
+  # the 4 queries before assuming "push 忘れ".
   local ORPHAN_TREE=0
-  if [ -n "$UPSTREAM" ]; then
-    local REMOTE_REFLOG_LATEST
-    REMOTE_REFLOG_LATEST="$(git -C "$REPO_ROOT" reflog -1 "$UPSTREAM" 2>/dev/null || echo '')"
-    if printf '%s' "$REMOTE_REFLOG_LATEST" | grep -q 'forced-update' 2>/dev/null; then
-      FORCED_UPDATE=1
-    fi
-    if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
-      if ! git -C "$REPO_ROOT" merge-base HEAD "$UPSTREAM" >/dev/null 2>&1; then
-        ORPHAN_TREE=1
-      fi
+  if [ -n "$UPSTREAM" ] && [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
+    if ! git -C "$REPO_ROOT" merge-base HEAD "$UPSTREAM" >/dev/null 2>&1; then
+      ORPHAN_TREE=1
     fi
   fi
 
@@ -162,15 +169,13 @@ check_repo_state() {
   local ALREADY_NUDGED_SHA=""
   [ -f "$NUDGED_FILE" ] && ALREADY_NUDGED_SHA="$(cat "$NUDGED_FILE" 2>/dev/null || echo '')"
 
-  # Decision logic — case (1) [forced-update] takes top priority.
-  local FORCED_UPDATE_NUDGE=0
+  # Decision logic — case (1) [orphan-tree] takes top priority.
+  local ORPHAN_NUDGE=0
   local RECENT_COMMIT_NUDGE=0
   local FIRST_SIGHTING_NUDGE=0
 
-  if [ "$FORCED_UPDATE" -eq 1 ] || [ "$ORPHAN_TREE" -eq 1 ]; then
-    if [ "$ALREADY_NUDGED_SHA" != "${HEAD_SHA}-fu" ]; then
-      FORCED_UPDATE_NUDGE=1
-    fi
+  if [ "$ORPHAN_TREE" -eq 1 ] && [ "$ALREADY_NUDGED_SHA" != "${HEAD_SHA}-orphan" ]; then
+    ORPHAN_NUDGE=1
   fi
 
   if [ "$AHEAD" -gt 0 ] && [ "$HEAD_AGE" -le "$RECENT_COMMIT_WINDOW" ] \
@@ -178,33 +183,24 @@ check_repo_state() {
     RECENT_COMMIT_NUDGE=1
   fi
 
+  # Refined case (3): drop the DIRTY_COUNT clause (too noisy — most WIP
+  # is intentional and Claude runs `git status` anyway). Only fire on
+  # AHEAD/BEHIND, which actually warrant attention.
   if [ "$FIRST_SIGHTING" -eq 1 ]; then
-    if [ "$DIRTY_COUNT" -gt 0 ] || [ "$AHEAD" -gt 0 ] || [ "$BEHIND" -gt 0 ]; then
+    if [ "$AHEAD" -gt 0 ] || [ "$BEHIND" -gt 0 ]; then
       FIRST_SIGHTING_NUDGE=1
     fi
   fi
 
   # ---- Emit ----
-  # Case (1): forced-update / orphan-tree (highest priority).
-  if [ "$FORCED_UPDATE_NUDGE" -eq 1 ]; then
+  # Case (1): orphan-tree (highest priority). Concise — full
+  # 4-query checklist lives in odakin-prefs/push-workflow.md.
+  if [ "$ORPHAN_NUDGE" -eq 1 ]; then
     printf '[git-nudge] %s%s\n' "$LABEL_PREFIX" "$REPO_ROOT"
-    if [ "$ORPHAN_TREE" -eq 1 ]; then
-      printf '  - ORPHAN TREE: HEAD has NO common ancestor with %s.\n' "$UPSTREAM"
-      printf '    Someone re-init from scratch and force-pushed. Local HEAD is\n'
-      printf '    a completely independent history.\n'
-    fi
-    if [ "$FORCED_UPDATE" -eq 1 ]; then
-      printf '  - %s reflog shows `forced-update` (force-push from elsewhere)\n' "$UPSTREAM"
-    fi
-    printf '  - Per push-workflow.md "divergence の解釈規律":\n'
-    printf '    DO NOT assume "push 忘れ". Run these BEFORE concluding:\n'
-    printf '      1. git -C "%s" reflog refs/remotes/%s\n' "$REPO_ROOT" "$UPSTREAM"
-    printf '      2. git -C "%s" rev-list --max-parents=0 --all\n' "$REPO_ROOT"
-    printf '      3. git -C "%s" merge-base HEAD @{u}\n' "$REPO_ROOT"
-    printf '      4. Check related repos (odakin-prefs, claude-config) for\n'
-    printf '         pivot decisions in the same time window\n'
-    printf '    Your local %s commit(s) at HEAD may be ORPHANED, not unpushed.\n' "$AHEAD"
-    echo "${HEAD_SHA}-fu" > "$NUDGED_FILE" 2>/dev/null || true
+    printf '  - ORPHAN TREE: HEAD has NO common ancestor with %s\n' "$UPSTREAM"
+    printf '  - Per push-workflow.md "divergence の解釈規律": run the 4 queries\n'
+    printf '    BEFORE concluding "push 忘れ". Your %s AHEAD commit(s) may be ORPHANED.\n' "$AHEAD"
+    echo "${HEAD_SHA}-orphan" > "$NUDGED_FILE" 2>/dev/null || true
     return 0
   fi
 
@@ -287,18 +283,24 @@ if [ -n "$BASH_CMD" ]; then
 
   ALL_PATHS="$(printf '%s\n%s\n' "$PATHS_UNQUOTED" "$PATHS_QUOTED" | grep -v '^$' || true)"
 
-  # Diagnostic: if `git -C` was seen but no literal could be extracted,
-  # tell Claude the safety net is partial for this call. Variable-substituted
-  # paths land here (e.g. `git -C "$d"` inside a loop).
-  if [ -z "$ALL_PATHS" ] && printf '%s' "$BASH_CMD" | grep -qE 'git +(-C |--git-dir=)' 2>/dev/null; then
-    printf '[git-nudge:hint] command uses `git -C` with a non-literal path\n'
-    printf '  - state of target repo(s) NOT checked by this hook\n'
-    printf '  - prefer `cd <repo> && git ...` for full divergence/push warnings\n'
-  fi
+  # NOTE: an earlier version emitted a `[git-nudge:hint]` message when
+  # `git -C` was seen but no literal path could be extracted (e.g.
+  # `git -C "$d"` in a loop). It was deliberately removed as noise:
+  # the hint fires on every variable-substituted git -C call but never
+  # corresponds to an actual problem — it's just teaching, and the user
+  # only needs to be taught once. Variable-path operations are now
+  # silently uncovered by the hook; the user can `cd <repo> && git ...`
+  # if they want safety-net warnings.
 
   if [ -n "$ALL_PATHS" ]; then
     while IFS= read -r path; do
       [ -z "$path" ] && continue
+      # Tilde expansion (~/foo → $HOME/foo). Only handles leading "~/"
+      # since ~user/ is rarely used in `git -C` arguments.
+      case "$path" in
+        "~/"*) path="${HOME}/${path:2}" ;;
+        "~")   path="${HOME}" ;;
+      esac
       # Resolve to absolute path.
       if [ -d "$path" ]; then
         ABS_PATH="$(cd "$path" 2>/dev/null && pwd)" || continue
