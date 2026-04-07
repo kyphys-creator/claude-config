@@ -118,6 +118,13 @@ HOOK_ENTRIES='[
   }
 ]'
 
+# SessionStart hooks: run once when the session begins. Used for git sync check.
+SESSION_START_ENTRIES='[
+  {
+    "hooks": [{"type": "command", "command": "~/.claude/hooks/session-git-check.sh"}]
+  }
+]'
+
 install_hooks() {
     if [ ! -d "$HOOKS_SRC" ]; then
         echo "  No hooks directory found. Skipping."
@@ -173,49 +180,64 @@ install_hooks() {
     if [ ! -f "$SETTINGS" ]; then
         echo "  Creating settings.json with hooks config."
         mkdir -p "$(dirname "$SETTINGS")"
-        jq -n --argjson entries "$HOOK_ENTRIES" \
-            '{hooks: {PreToolUse: $entries}}' > "$SETTINGS"
+        jq -n --argjson pre "$HOOK_ENTRIES" --argjson start "$SESSION_START_ENTRIES" \
+            '{hooks: {PreToolUse: $pre, SessionStart: $start}}' > "$SETTINGS"
         echo "  Created: $SETTINGS"
         return 0
     fi
 
     # 既存 settings.json にマージ
     # hooks キーがない → 追加
-    # hooks キーがある → memory-guard エントリの有無を個別チェック
     if ! jq -e '.hooks' "$SETTINGS" > /dev/null 2>&1; then
         echo "  Adding hooks config to settings.json ..."
-        jq --argjson entries "$HOOK_ENTRIES" \
-            '. + {hooks: {PreToolUse: $entries}}' \
-            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-        echo "  Done."
-    elif ! jq -e '.hooks.PreToolUse' "$SETTINGS" > /dev/null 2>&1; then
-        echo "  Adding PreToolUse hooks ..."
-        jq --argjson entries "$HOOK_ENTRIES" \
-            '.hooks.PreToolUse = $entries' \
+        jq --argjson pre "$HOOK_ENTRIES" --argjson start "$SESSION_START_ENTRIES" \
+            '. + {hooks: {PreToolUse: $pre, SessionStart: $start}}' \
             "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
         echo "  Done."
     else
-        # PreToolUse が存在する場合、各 hook が含まれているか個別確認
-        UPDATED=false
-        for HOOK_CMD in "memory-guard.sh" "memory-guard-bash.sh"; do
-            if ! jq -e --arg cmd "$HOOK_CMD" \
-                '.hooks.PreToolUse[] | select(.hooks[]?.command | contains($cmd))' \
-                "$SETTINGS" > /dev/null 2>&1; then
-                echo "  Adding missing hook: $HOOK_CMD"
-                # 対応するエントリを HOOK_ENTRIES から抽出して追加
-                ENTRY=$(echo "$HOOK_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
-                    '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
-                jq --argjson entry "$ENTRY" \
-                    '.hooks.PreToolUse += [$entry]' \
-                    "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-                UPDATED=true
-            fi
-        done
-        if [ "$UPDATED" = false ]; then
-            echo "  All hooks already configured in settings.json."
+        # PreToolUse 処理
+        if ! jq -e '.hooks.PreToolUse' "$SETTINGS" > /dev/null 2>&1; then
+            echo "  Adding PreToolUse hooks ..."
+            jq --argjson entries "$HOOK_ENTRIES" \
+                '.hooks.PreToolUse = $entries' \
+                "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
         else
-            echo "  Done."
+            # PreToolUse が存在する場合、各 hook が含まれているか個別確認
+            for HOOK_CMD in "memory-guard.sh" "memory-guard-bash.sh"; do
+                if ! jq -e --arg cmd "$HOOK_CMD" \
+                    '.hooks.PreToolUse[] | select(.hooks[]?.command | contains($cmd))' \
+                    "$SETTINGS" > /dev/null 2>&1; then
+                    echo "  Adding missing PreToolUse hook: $HOOK_CMD"
+                    ENTRY=$(echo "$HOOK_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
+                        '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
+                    jq --argjson entry "$ENTRY" \
+                        '.hooks.PreToolUse += [$entry]' \
+                        "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                fi
+            done
         fi
+
+        # SessionStart 処理
+        if ! jq -e '.hooks.SessionStart' "$SETTINGS" > /dev/null 2>&1; then
+            echo "  Adding SessionStart hooks ..."
+            jq --argjson entries "$SESSION_START_ENTRIES" \
+                '.hooks.SessionStart = $entries' \
+                "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        else
+            for HOOK_CMD in "session-git-check.sh"; do
+                if ! jq -e --arg cmd "$HOOK_CMD" \
+                    '.hooks.SessionStart[] | select(.hooks[]?.command | contains($cmd))' \
+                    "$SETTINGS" > /dev/null 2>&1; then
+                    echo "  Adding missing SessionStart hook: $HOOK_CMD"
+                    ENTRY=$(echo "$SESSION_START_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
+                        '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
+                    jq --argjson entry "$ENTRY" \
+                        '.hooks.SessionStart += [$entry]' \
+                        "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                fi
+            done
+        fi
+        echo "  Hooks check complete."
     fi
 }
 
