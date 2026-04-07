@@ -36,8 +36,15 @@ A personal layer is a **directory** (typically a private git repo, but a local-o
 ├── repos.md                      # your repo list (optional, replaces having it in MEMORY.md)
 ├── shared-project-keys.md        # mapping of shared-project repo names → local key paths (optional)
 ├── user-profile.md               # identity, signatures, account info (optional)
+├── dropbox-collabs.yaml          # Dropbox shared-PDF registry (optional, see conventions/dropbox-refs.md)
 └── ...                           # other personal rule files
 ```
+
+When the personal layer contains `dropbox-collabs.yaml`, `claude-config/setup.sh` automatically:
+1. runs `scripts/setup-dropbox-refs.sh` to create per-repo `dropbox-refs/` symlinks pointing into your Dropbox install
+2. installs a `post-merge` git hook in the personal layer so subsequent `git pull` regenerates the symlinks
+
+See [`conventions/dropbox-refs.md`](../conventions/dropbox-refs.md) for the schema and full details.
 
 The **marker file** `.claude-personal-layer` is the canonical signal that this directory is a personal layer. claude-config's `setup.sh` looks for it under `~/Claude/*/` (or whichever base directory you use) and, if it finds exactly one match, links `~/Claude/CLAUDE.md` to that directory's `CLAUDE.md`.
 

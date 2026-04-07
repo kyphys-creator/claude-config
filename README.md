@@ -64,14 +64,17 @@ On Windows (MSYS/Cygwin), symlinks are replaced with file copies, and the `post-
 │   │   ├── collaborators.md    # collaborator DB conventions
 │   │   ├── scheduled-tasks.md  # Scheduled Tasks: SKILL.md dual structure, sync rules
 │   │   ├── substack.md         # Substack: Markdown → rich text conversion
-│   │   └── shell-env.md        # shell env: PATH snapshot fix, macOS deny rules
+│   │   ├── shell-env.md        # shell env: PATH snapshot fix, macOS deny rules
+│   │   └── dropbox-refs.md     # per-repo dropbox-refs/ symlink to a Dropbox shared PDF folder
 │   ├── hooks/                  # Claude Code hooks
 │   │   ├── memory-guard.sh             # Edit/Write guard
 │   │   ├── memory-guard-bash.sh        # Bash guard (warning only)
 │   │   └── fix-snapshot-path-patch.sh  # PATH snapshot fix (called by launchd)
-│   ├── scripts/                # Git hooks
+│   ├── scripts/                # Git hooks + helpers
 │   │   ├── fix-bib-unicode.py      # Unicode → LaTeX conversion
-│   │   └── pre-commit-bib          # pre-commit hook shell wrapper
+│   │   ├── pre-commit-bib          # pre-commit hook shell wrapper
+│   │   ├── dropbox-root.sh         # cross-OS Dropbox install root resolver
+│   │   └── setup-dropbox-refs.sh   # build dropbox-refs symlinks from a personal-layer YAML
 │   ├── hammerspoon/            # Hammerspoon config (macOS)
 │   │   └── init.lua                # Claude Cmd+Q quit prevention (eventtap)
 │   ├── docs/
@@ -107,6 +110,7 @@ Domain-specific rules, loaded only when relevant:
 - **[scheduled-tasks.md](conventions/scheduled-tasks.md)** — Scheduled Tasks: SKILL.md dual structure, sync rules
 - **[substack.md](conventions/substack.md)** — Substack: Markdown → rich text conversion workflow
 - **[shell-env.md](conventions/shell-env.md)** — Shell environment: PATH snapshot fix for Claude Code desktop, macOS deny rules for dangerous commands
+- **[dropbox-refs.md](conventions/dropbox-refs.md)** — Per-repo `dropbox-refs/` symlink to a Dropbox shared PDF folder, resolved per-machine via a personal-layer YAML registry. Used for collaborations where reference PDFs live in Dropbox at user-dependent absolute paths
 
 ### Hooks: memory-guard
 

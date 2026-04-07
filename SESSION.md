@@ -1,7 +1,32 @@
 # SESSION — claude-config
 
 ## 現在の状態
-**完了**: PATH 二層防御（.zprofile 修正 + REQUIRED_PATHS 方式スナップショットパッチ）
+**完了**: dropbox-refs convention (per-repo symlink to a Dropbox shared PDF folder, resolved per-machine via personal-layer YAML registry)
+
+## 今セッションの変更（2026-04-07）
+
+### dropbox-refs convention 新規追加
+共同研究のリポから「Dropbox 上の共同 PDF 置き場」を symlink で参照するためのパターンを規約化。Dropbox install 場所が OS / user で違う問題と、subpath が user-specific なため共有リポにハードコードできない問題を、(a) Dropbox root resolver + (b) personal-layer の YAML registry の組み合わせで吸収する。
+
+新規ファイル:
+- `scripts/dropbox-root.sh` — `$DROPBOX_ROOT` env → `~/.dropbox/info.json` → 既知の install 場所 fallback chain で Dropbox root を 1 行で返す
+- `scripts/setup-dropbox-refs.sh` — personal layer の `dropbox-collabs.yaml` を読み、各 entry について `<base>/<repo>/dropbox-refs` symlink を idempotent に生成。CREATED / UPDATED / WARN を出力、no-change は silent
+- `conventions/dropbox-refs.md` — 規約 (What / Why / How / Resolution / When (not) to use / Collaborator usage / 制約 / PyYAML 依存)
+
+`setup.sh` 拡張:
+- Step 5a2: 個人層検出後に `dropbox-collabs.yaml` があれば setup-dropbox-refs.sh を呼ぶ + 個人層 `.git/hooks/post-merge` に同スクリプトを install。tagged hook は再 run で常に refresh されるので、layer 移動や script 場所変更後も path が古くならない
+
+ドキュメント更新:
+- `CLAUDE.md` 構造表に conventions/, scripts/ の新ファイル追加 + Step 5a2 を 7. の sub-bullet として追記
+- `README.md` / `README.ja.md` の conventions/ list と structure tree に追加
+- `DESIGN.md` に設計判断記録 (per-repo vs global symlink の選択、YAML over TSV、post-merge 自動化の理由)
+- `docs/personal-layer.md` に dropbox-collabs.yaml を mention
+
+### 4 軸チェック後の修正
+初実装後に深い 4 軸チェックを実行し、以下を修正:
+- **P1 (安全性)**: `dropbox-refs.md` と `setup-dropbox-refs.sh` の YAML 例に collaborator 実名と private リポ名が混入していたのを generic placeholder に置換 (claude-config CLAUDE.md の public-safety 規則違反を解消)
+- **P2 (無矛盾性)**: setup.sh の post-merge install ロジックが「tagged hook は触らない」になっていたのを「tagged hook は常に上書き」に修正。layer 移動や DROPBOX_REFS_SCRIPT 場所変更で hook 内の絶対 path が古くなる問題を防止
+- **P5 (効率性)**: dropbox-refs.md §3.2 に PyYAML 依存 (`pip3 install pyyaml`) を明記
 
 ## 今セッションの変更（2026-04-03）
 

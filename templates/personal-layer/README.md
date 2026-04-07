@@ -23,6 +23,8 @@ See [`docs/personal-layer.md`](../../docs/personal-layer.md) for the conceptual 
    cp ~/Claude/claude-config/templates/personal-layer/repos.md.template ./repos.md
    cp ~/Claude/claude-config/templates/personal-layer/shared-project-keys.md.template ./shared-project-keys.md
    cp ~/Claude/claude-config/templates/personal-layer/user-profile.md.template ./user-profile.md
+   # optional: only if you use Dropbox-shared PDF folders (see conventions/dropbox-refs.md)
+   cp ~/Claude/claude-config/templates/personal-layer/dropbox-collabs.yaml.template ./dropbox-collabs.yaml
    ```
 
 4. Edit each file to fill in your information. The templates are intentionally minimal — add or remove sections to suit your workflow.
