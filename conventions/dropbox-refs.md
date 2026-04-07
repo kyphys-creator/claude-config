@@ -8,6 +8,104 @@
 
 ---
 
+## 0. まず決める: Pattern A (Dropbox-direct) か Pattern B (このファイル)
+
+Dropbox にある PDF を git リポから触りたいとき、採りうる戦略は 2 つ。このファイルが詳述するのは Pattern B。Pattern A のほうが適合するケースも少なくないので、着手前に必ず選択する。
+
+### Pattern A: Dropbox-direct working tree
+
+実 git 作業ツリーを Dropbox 内に置き、`<base>/<repo>/` はそこへの symlink にする。参照 PDF・notebook 等の asset は作業ツリーと**同じディレクトリに同居**させ、`./foo.pdf` や `../sibling/` で素朴な相対 path 参照する。
+
+```
+$DBROOT/<subpath>/<repo>/          ← 実 working tree、.git/ もここ
+├── paper.tex
+├── refs.bib
+├── external_ref_1.pdf             ← gitignored asset
+├── notebook.nb                    ← gitignored asset
+└── .gitignore                     ← 上記 asset を ignore
+
+<base>/<repo>  →  symlink to $DBROOT/<subpath>/<repo>/
+```
+
+### Pattern B: Independent clone + `dropbox-refs/` symlink (このファイルの主題)
+
+実 git 作業ツリーを `<base>/<repo>/` に置き (通常の clone)、Dropbox 上の asset folder は per-machine の gitignored な `./dropbox-refs/` symlink 経由で参照する。詳細は §1 以降。
+
+### どちらを選ぶか
+
+| 条件 | 推奨 | 根拠 |
+|---|---|---|
+| 共同編集者と Dropbox folder を共有し、複数 machine で同時に `.git/` を触る可能性あり | **B** | Dropbox 同期 race が `.git/` object store を壊すリスクが実在 |
+| リポが multi-machine で同時編集される (solo でもラップトップ + デスクトップ併用等) | **B** | 同上 |
+| 共同編集者はいるが git push/pull 経由のみ (Dropbox folder は share しない)、かつ同時編集マシンは実質 1 台 | **A** | Dropbox 同期 race が発生しえない。A のほうが path が単純 |
+| solo 運用で Dropbox が自分の素材置き場 | **A** | 同上 |
+| arXiv cite だけで完結し Dropbox の参照 PDF を触らない | どちらでもない | 普通の `<base>/<repo>` clone で十分 |
+
+**trade-off の本質**: Pattern B は `.git/` を Dropbox の外に出すことで同期 race を根本排除する代わりに、source と asset の場所が分離して `dropbox-refs` symlink という layer が増える。Pattern A は layer が少なく mental model が単純だが、Dropbox 同期が `.git/` を触る前提 — 複数 machine が同じ `.git/` を同時に書くと壊れるので、同時編集の有無が分水嶺。
+
+設計時の思考過程と経緯は `DESIGN.md` 「dropbox-refs convention」セクション参照。
+
+### Pattern A の setup と運用
+
+```bash
+# 1. Dropbox 内に clone (または既存 working tree を受け入れる)
+cd "$DBROOT/<subpath>"
+gh repo clone <owner>/<repo>
+
+# 2. <base>/<repo> を symlink にする
+ln -s "$DBROOT/<subpath>/<repo>" <base>/<repo>
+```
+
+CLAUDE.md には「実 git 作業ツリーは `$DBROOT/<subpath>/<repo>/`、`<base>/<repo>` は symlink」と明記する。`dropbox-collabs.yaml` への entry は **不要** (dropbox-refs を使わないので)。`.gitignore` に `/dropbox-refs` 行を入れる必要も無い。
+
+### Pattern A ↔ B の migration
+
+#### A → B (Dropbox から分離する)
+
+複数 machine 同時編集が必要になった、共同編集者を Dropbox folder に招きたい、といった場合:
+
+```bash
+# 1. <base>/<repo> が Dropbox への symlink なら外す
+rm <base>/<repo>
+# 2. 独立 clone
+cd <base> && gh repo clone <owner>/<repo>
+# 3. Dropbox 側の .git/ を削除 (= asset folder 化)
+rm -rf "$DBROOT/<subpath>/<repo>/.git"
+# 4. personal-layer の dropbox-collabs.yaml に entry 追加
+# 5. claude-config/scripts/setup-dropbox-refs.sh を実行
+# 6. <repo>/.gitignore に /dropbox-refs を追加
+# 7. <repo>/CLAUDE.md に dropbox-refs 案内セクションを追加 (§3.4 テンプレ)
+```
+
+#### B → A (Dropbox 内に戻す)
+
+共同編集が git 経由だけに落ち着いた、duplicate の混乱を避けたい、といった場合:
+
+```bash
+# 1. working tree を clean にしておく (uncommitted なし)
+# 2. .git/ を Dropbox tree にコピー
+cp -R <base>/<repo>/.git "$DBROOT/<subpath>/<repo>/.git"
+# 3. Dropbox tree 側で tracked file を復元 (以前 deleted にしてたもの全部)
+cd "$DBROOT/<subpath>/<repo>" && git checkout -- .
+# 4. 古い <base>/<repo> を削除して symlink に置き換え
+rm -rf <base>/<repo>
+ln -s "$DBROOT/<subpath>/<repo>" <base>/<repo>
+# 5. /dropbox-refs symlink と .gitignore の /dropbox-refs 行を削除
+rm <base>/<repo>/dropbox-refs
+# (.gitignore を編集)
+# 6. personal-layer の dropbox-collabs.yaml から entry を削除
+# 7. CLAUDE.md を Pattern A 用に書き直す
+# 8. commit + push
+```
+
+落とし穴:
+
+- step 3 の `git checkout -- .` を忘れると、以前の移行で Dropbox 側から削除した tracked file (`.gitignore`, `.gitattributes`, `CLAUDE.md` 等) が git status で "deleted" として残る
+- step 5 の `dropbox-refs` 行を残したまま `/dropbox-refs` symlink 自体を削除すると、symlink は不在なのに `.gitignore` だけ古い、という不整合になる
+- step 7 の CLAUDE.md の記述が古いと、次に Claude/自分が来たとき Pattern B だと誤解する
+
+---
+
 ## 1. What
 
 各リポの直下に gitignored な `dropbox-refs/` symlink を置き、そのターゲットを Dropbox 内の subpath にする。スクリプト・notebook・TeX・ノートからは `./dropbox-refs/foo.pdf` という相対 path で参照する。
