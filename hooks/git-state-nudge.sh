@@ -321,4 +321,76 @@ if [ -n "$BASH_CMD" ]; then
   fi
 fi
 
+# ----------------------------------------------------------------------
+# claude-config update notifier (2026-04-07)
+# ----------------------------------------------------------------------
+# Detect when this machine's claude-config clone has advanced past the
+# last HEAD this hook saw, and show what changed + what action (if any)
+# the user should take. Triggered by `git pull` of claude-config: the
+# pull updates the working tree, the symlinked hook source is
+# automatically live, and the next Bash call here notices the HEAD move.
+#
+# Why this lives inside git-state-nudge.sh and not in a separate hook
+# or script: this hook already fires on every Bash call and is
+# auto-updated via the ~/.claude/hooks symlink. Adding a new hook would
+# require setup.sh to install it, which has a chicken-and-egg problem
+# on machines where the new install hasn't run yet. Putting it here
+# means: pull → next Bash call → notification, no extra steps.
+#
+# Silent on:
+#   - claude-config not present
+#   - HEAD unchanged since last check
+#
+# First run (no marker file): emits a one-line welcome with current
+# HEAD, no diff (we don't know what to compare against).
+
+CC_DIR="$HOME/Claude/claude-config"
+if [ -d "$CC_DIR/.git" ]; then
+  CC_HEAD="$(git -C "$CC_DIR" rev-parse HEAD 2>/dev/null || echo '')"
+  CC_MARKER="$STATE_DIR/claude-config.last-head"
+  CC_LAST=""
+  [ -f "$CC_MARKER" ] && CC_LAST="$(cat "$CC_MARKER" 2>/dev/null || echo '')"
+
+  if [ -n "$CC_HEAD" ] && [ "$CC_HEAD" != "$CC_LAST" ]; then
+    # Persist new HEAD before printing, so a hook crash mid-print doesn't
+    # cause repeated re-display on every subsequent Bash call.
+    echo "$CC_HEAD" > "$CC_MARKER" 2>/dev/null || true
+
+    if [ -z "$CC_LAST" ]; then
+      # First run after this notifier was deployed. Just announce.
+      printf '[claude-config] update notifier active (HEAD %s)\n' "${CC_HEAD:0:7}"
+      printf '  - From now on, this hook will tell you what changed when you `git pull`\n'
+      printf '  - Check ~/Claude/claude-config/SESSION.md for recent activity\n'
+    else
+      # Subsequent run: claude-config moved. Show what changed and what to do.
+      printf '[claude-config] HEAD moved %s -> %s — recent commits:\n' \
+        "${CC_LAST:0:7}" "${CC_HEAD:0:7}"
+      git -C "$CC_DIR" log --no-merges --format='  · %h %s' "$CC_LAST..$CC_HEAD" 2>/dev/null \
+        | head -10
+
+      CHANGED="$(git -C "$CC_DIR" diff --name-only "$CC_LAST" "$CC_HEAD" 2>/dev/null || echo '')"
+      ACTION_NEEDED=0
+
+      if printf '%s' "$CHANGED" | grep -qE '^setup\.sh' 2>/dev/null; then
+        printf '  ⚠ setup.sh changed → re-run: `cd ~/Claude/claude-config && ./setup.sh`\n'
+        ACTION_NEEDED=1
+      fi
+      if printf '%s' "$CHANGED" | grep -qE '^hooks/' 2>/dev/null; then
+        printf '  ℹ hooks/ source updated (auto-live via symlink, no restart)\n'
+      fi
+      if printf '%s' "$CHANGED" | grep -qE '^conventions/' 2>/dev/null; then
+        printf '  ℹ conventions/ updated — read git log above for impact\n'
+      fi
+      if printf '%s' "$CHANGED" | grep -qE '^CONVENTIONS\.md$' 2>/dev/null; then
+        printf '  ℹ CONVENTIONS.md updated — read git log above for impact\n'
+      fi
+      # If setup.sh changed, also imply potential settings.json reshape
+      if [ "$ACTION_NEEDED" -eq 1 ]; then
+        printf '  ⚠ After re-running setup.sh, restart Claude Code if settings.json changed\n'
+      fi
+      printf '  - Full details: ~/Claude/claude-config/SESSION.md\n'
+    fi
+  fi
+fi
+
 exit 0
