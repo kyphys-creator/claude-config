@@ -30,6 +30,8 @@ claude-config/
 ├── hooks/
 │   ├── memory-guard.sh             # メモリ書き込みガード — Edit/Write 用（§2 判別強制）
 │   ├── memory-guard-bash.sh        # メモリ書き込みガード — Bash 用（警告のみ）
+│   ├── session-git-check.sh        # SessionStart: git fetch + dirty/ahead/behind/divergence 警告
+│   ├── git-state-nudge.sh          # PostToolUse(Bash): 直近 commit の未 push 検出 + stale repo 入場検出
 │   └── fix-snapshot-path-patch.sh   # PATH スナップショット自動パッチ（REQUIRED_PATHS 方式、launchd WatchPaths から呼ばれる）
 ├── hammerspoon/
 │   └── init.lua                # Hammerspoon 設定（Claude Cmd+Q 誤終了防止）

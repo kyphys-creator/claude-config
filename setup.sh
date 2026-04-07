@@ -125,6 +125,14 @@ SESSION_START_ENTRIES='[
   }
 ]'
 
+# PostToolUse hooks: run after each tool call. Used for git state nudges.
+POST_TOOL_USE_ENTRIES='[
+  {
+    "matcher": "Bash",
+    "hooks": [{"type": "command", "command": "~/.claude/hooks/git-state-nudge.sh"}]
+  }
+]'
+
 install_hooks() {
     if [ ! -d "$HOOKS_SRC" ]; then
         echo "  No hooks directory found. Skipping."
@@ -180,8 +188,10 @@ install_hooks() {
     if [ ! -f "$SETTINGS" ]; then
         echo "  Creating settings.json with hooks config."
         mkdir -p "$(dirname "$SETTINGS")"
-        jq -n --argjson pre "$HOOK_ENTRIES" --argjson start "$SESSION_START_ENTRIES" \
-            '{hooks: {PreToolUse: $pre, SessionStart: $start}}' > "$SETTINGS"
+        jq -n --argjson pre "$HOOK_ENTRIES" \
+              --argjson start "$SESSION_START_ENTRIES" \
+              --argjson post "$POST_TOOL_USE_ENTRIES" \
+            '{hooks: {PreToolUse: $pre, SessionStart: $start, PostToolUse: $post}}' > "$SETTINGS"
         echo "  Created: $SETTINGS"
         return 0
     fi
@@ -190,8 +200,10 @@ install_hooks() {
     # hooks キーがない → 追加
     if ! jq -e '.hooks' "$SETTINGS" > /dev/null 2>&1; then
         echo "  Adding hooks config to settings.json ..."
-        jq --argjson pre "$HOOK_ENTRIES" --argjson start "$SESSION_START_ENTRIES" \
-            '. + {hooks: {PreToolUse: $pre, SessionStart: $start}}' \
+        jq --argjson pre "$HOOK_ENTRIES" \
+           --argjson start "$SESSION_START_ENTRIES" \
+           --argjson post "$POST_TOOL_USE_ENTRIES" \
+            '. + {hooks: {PreToolUse: $pre, SessionStart: $start, PostToolUse: $post}}' \
             "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
         echo "  Done."
     else
@@ -233,6 +245,27 @@ install_hooks() {
                         '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
                     jq --argjson entry "$ENTRY" \
                         '.hooks.SessionStart += [$entry]' \
+                        "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                fi
+            done
+        fi
+
+        # PostToolUse 処理
+        if ! jq -e '.hooks.PostToolUse' "$SETTINGS" > /dev/null 2>&1; then
+            echo "  Adding PostToolUse hooks ..."
+            jq --argjson entries "$POST_TOOL_USE_ENTRIES" \
+                '.hooks.PostToolUse = $entries' \
+                "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        else
+            for HOOK_CMD in "git-state-nudge.sh"; do
+                if ! jq -e --arg cmd "$HOOK_CMD" \
+                    '.hooks.PostToolUse[] | select(.hooks[]?.command | contains($cmd))' \
+                    "$SETTINGS" > /dev/null 2>&1; then
+                    echo "  Adding missing PostToolUse hook: $HOOK_CMD"
+                    ENTRY=$(echo "$POST_TOOL_USE_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
+                        '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
+                    jq --argjson entry "$ENTRY" \
+                        '.hooks.PostToolUse += [$entry]' \
                         "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
                 fi
             done
