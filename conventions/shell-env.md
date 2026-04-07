@@ -34,6 +34,18 @@ Claude Code（デスクトップ版）は起動時にシェルスナップショ
 - Apple Silicon でも同様の状況だと思われる (Anthropic 側の snapshot 生成仕様)
 - shell-env.md の冒頭で「第2層は防御的措置」と書いているが、実態は**主要対策**
 
+### `.zprofile` の Python.framework エントリ
+
+macOS の Python.framework インストーラ (python.org からインストールしたとき) は `~/.zprofile` の冒頭に以下のような PATH 追記行を挿入する:
+
+```zsh
+# Setting PATH for Python 3.9
+PATH="/Library/Frameworks/Python.framework/Versions/3.9/bin:${PATH}"
+export PATH
+```
+
+これは Step 2c の対象外（`brew shellenv` ではないので）。**消すと Python.framework の `python3`/`pip3` が PATH から外れる**ので、残しておくのが正解。Step 2c が消すのはあくまで二重 `brew shellenv` のみ。
+
 ## 解決策: 二層防御
 
 ### 第1層: `.zprofile` の修正（根本対策）

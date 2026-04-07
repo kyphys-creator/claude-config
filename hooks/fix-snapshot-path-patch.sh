@@ -9,20 +9,41 @@
 # スナップショット生成完了を待ってからパッチ
 sleep 1
 
+# 古いスナップショットの cleanup（最新 20 個だけ保持）
+# Claude Code は snapshot を蓄積し続けるので bloat を防ぐ。
+# 注意: ファイルの mtime は patch 実行で更新されてしまうので、
+# ファイル名に埋め込まれた UNIX ms タイムスタンプで判定する。
+# 形式: snapshot-zsh-<unix_ms>-<random>.sh
+SNAPSHOT_DIR="$HOME/.claude/shell-snapshots"
+SNAPSHOT_KEEP=20
+if [ -d "$SNAPSHOT_DIR" ]; then
+  # `-` 区切りの 3 番目フィールド（unix_ms）を数値降順ソートし、KEEP+1 以降を削除
+  ls -1 "$SNAPSHOT_DIR"/snapshot-*.sh 2>/dev/null \
+    | sort -t- -k3 -nr \
+    | tail -n +$((SNAPSHOT_KEEP + 1)) \
+    | xargs rm -f 2>/dev/null
+fi
+
 # 必須 PATH エントリ（存在チェックして追加）
 # Intel Mac (/usr/local) と Apple Silicon (/opt/homebrew) の両方を列挙。
 # 存在チェックで該当しない方は自動的にスキップされる。
+#
+# 順序の意味: 配列の後ろのエントリほど、最終的な PATH の先頭に来る
+# （for ループで順次 prepend するため）。慣例に沿って:
+#   1. システム特殊 (X11, TeX) → 配列の前 = PATH の末尾近く
+#   2. brew (homebrew/local) と Python 系 → 配列の中
+#   3. ユーザー個人 bin (~/.local/bin) → 配列の最後 = PATH の頭
 REQUIRED_PATHS=(
+  "/opt/X11/bin"
   "/Library/TeX/texbin"
   "/opt/homebrew/opt/python@3.12/libexec/bin"
   "$HOME/Library/Python/3.9/bin"
-  "$HOME/.local/bin"
   "$HOME/.npm-global/bin"
-  "/opt/homebrew/bin"
   "/opt/homebrew/sbin"
-  "/usr/local/bin"
   "/usr/local/sbin"
-  "/opt/X11/bin"
+  "/opt/homebrew/bin"
+  "/usr/local/bin"
+  "$HOME/.local/bin"
 )
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
