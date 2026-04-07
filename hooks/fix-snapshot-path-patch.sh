@@ -14,13 +14,17 @@ sleep 1
 # 注意: ファイルの mtime は patch 実行で更新されてしまうので、
 # ファイル名に埋め込まれた UNIX ms タイムスタンプで判定する。
 # 形式: snapshot-zsh-<unix_ms>-<random>.sh
+#
+# subshell で cd してから ls することで basename だけ扱う:
+# フルパスを sort -t- すると親ディレクトリの "shell-snapshots" の '-' で
+# フィールドがずれて -k3 が zsh を指してしまうため。
 SNAPSHOT_DIR="$HOME/.claude/shell-snapshots"
 SNAPSHOT_KEEP=20
 if [ -d "$SNAPSHOT_DIR" ]; then
-  # `-` 区切りの 3 番目フィールド（unix_ms）を数値降順ソートし、KEEP+1 以降を削除
-  ls -1 "$SNAPSHOT_DIR"/snapshot-*.sh 2>/dev/null \
+  (cd "$SNAPSHOT_DIR" && ls -1 snapshot-*.sh 2>/dev/null) \
     | sort -t- -k3 -nr \
     | tail -n +$((SNAPSHOT_KEEP + 1)) \
+    | sed "s|^|$SNAPSHOT_DIR/|" \
     | xargs rm -f 2>/dev/null
 fi
 
