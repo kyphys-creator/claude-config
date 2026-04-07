@@ -1,9 +1,27 @@
 # SESSION — claude-config
 
 ## 現在の状態
-**完了**: dropbox-refs convention (per-repo symlink to a Dropbox shared PDF folder, resolved per-machine via personal-layer YAML registry)
+**完了**: git-state-nudge.sh の orphan-tree 検出 + git -C follow 拡張 + noise 削減 + 安全性 scrub。
 
-## 今セッションの変更（2026-04-07）
+## 今セッションの変更（2026-04-07 夜）
+
+### git-state-nudge.sh 大幅拡張 (3 commit + 1 sanitize)
+
+夕方の cross-machine stale clone 誤読事件 (詳細は odakin-prefs/push-workflow.md 「過去の失敗事例」) を契機に hook を強化:
+
+- **9f0b510 (Fix A v1 + Fix B v1)**: orphan-tree 検出 + literal `git -C <path>` follow + tilde expansion。`check_repo_state` 関数化。stdin JSON parsing 経由で `tool_input.command` を取得。
+- **15aadae (noise 削減)**: 反省 round 1 で 3 つの noise 源を削除:
+  1. forced-update reflog grep (reflog が ~90 日 persist して resolve 後も警告継続)
+  2. case (3) first-sighting の DIRTY-only 発火 (WIP は意図的が大半)
+  3. variable `git -C "$d"` への hint message (loop ごとに鳴る teaching)
+  + orphan warning を 13 → 4 行に短縮 (4 query は push-workflow に集約)
+- **3b45850 (S-1 安全性 scrub)**: hook header の private repo 名 mention (allow-list 外) を generic 表現に置換。9f0b510 commit message には残るが force-push せず受容。
+
+設計判断: morning health check scheduled task と Read/Edit/Write への matcher 拡張も検討したが、前者は時間ベース + 重い + 既存 hook と重複、後者は typical workflow が Bash 主体で marginal value 小、いずれも棄却。
+
+通常日 expected: 完全 silent。発火するのは (1) orphan-tree、(2) 60 秒以内の未 push、(3) 4h 久々に触った AHEAD/BEHIND あり repo、の 3 ケースのみ。
+
+## 今セッションの変更（2026-04-07 朝〜昼）
 
 ### dropbox-refs convention 新規追加
 共同研究のリポから「Dropbox 上の共同 PDF 置き場」を symlink で参照するためのパターンを規約化。Dropbox install 場所が OS / user で違う問題と、subpath が user-specific なため共有リポにハードコードできない問題を、(a) Dropbox root resolver + (b) personal-layer の YAML registry の組み合わせで吸収する。
