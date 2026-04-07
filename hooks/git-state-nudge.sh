@@ -144,8 +144,16 @@ if [ "$RECENT_COMMIT_NUDGE" -eq 1 ]; then
   printf '[git-nudge] %s\n' "$REPO_ROOT"
   printf '  - You just committed (%ss ago); HEAD is %s commit(s) ahead of %s.\n' \
     "$HEAD_AGE" "$AHEAD" "$UPSTREAM"
-  printf '  - Per CONVENTIONS §4: コミット後は常に push. Run `git push` now\n'
-  printf '    unless you are intentionally stacking commits.\n'
+  if [ "$BEHIND" -gt 0 ]; then
+    # Diverged: a plain `git push` will be rejected as non-fast-forward.
+    # Tell Claude to pull --rebase first (which is the correct fix).
+    printf '  - DIVERGED: also %s commit(s) BEHIND %s.\n' "$BEHIND" "$UPSTREAM"
+    printf '  - Run `git pull --rebase` first, then `git push`. A plain push\n'
+    printf '    will be rejected as non-fast-forward.\n'
+  else
+    printf '  - Per CONVENTIONS §4: コミット後は常に push. Run `git push` now\n'
+    printf '    unless you are intentionally stacking commits.\n'
+  fi
   echo "$HEAD_SHA" > "$NUDGED_FILE" 2>/dev/null || true
   exit 0
 fi
