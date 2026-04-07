@@ -468,6 +468,16 @@ if [ -f "$JHEP_SRC" ] && command -v kpsewhich &> /dev/null; then
         fi
     fi
 fi
+
+# --- shell-snapshot patch の即時実行（macOS のみ）---
+# REQUIRED_PATHS が更新された場合、git pull 後すぐに既存スナップショットへ
+# 反映させる。新規スナップショットは launchd WatchPaths が捕捉するが、
+# 既に Claude.app が稼働中の場合は手動 trigger が必要。
+SNAPSHOT_FIX="$HOME/.claude/hooks/fix-snapshot-path-patch.sh"
+if [ "$(uname -s)" = "Darwin" ] && [ -x "$SNAPSHOT_FIX" ]; then
+    "$SNAPSHOT_FIX" >/dev/null 2>&1 && \
+        echo "[claude-config] Re-applied shell-snapshot PATH patches."
+fi
 POST_MERGE_EOF
     chmod +x "$POST_MERGE"
     echo "  Installed: .git/hooks/post-merge"

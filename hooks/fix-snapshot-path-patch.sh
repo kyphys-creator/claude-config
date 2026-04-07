@@ -22,6 +22,7 @@ REQUIRED_PATHS=(
   "/opt/homebrew/sbin"
   "/usr/local/bin"
   "/usr/local/sbin"
+  "/opt/X11/bin"
 )
 
 for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
