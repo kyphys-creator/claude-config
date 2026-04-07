@@ -50,13 +50,13 @@ collaborations:
     description: 自由記述 (optional)
 ```
 
-具体例 (odakin の場合):
+具体例 (架空):
 
 ```yaml
 collaborations:
-  bayes-kai:
-    subpath: Physics/ベイズ会
-    description: ベイズ会論文置き場 (三島拓也との共同研究)
+  combined-results:
+    subpath: Shared/Research/CombinedResults/refs
+    description: 共同研究 PDF 置き場
 ```
 
 `subpath` は **その user の Dropbox install root からの相対 path**。machine / user / OS で違う可能性があるため、personal layer に閉じ込める。共有リポ (claude-config) には書かない。
@@ -64,6 +64,8 @@ collaborations:
 `<repo-name>` は canonical 名。setup スクリプトは `<base-dir>/<repo-name>/dropbox-refs` に symlink を作るので、ローカル checkout のディレクトリ名と一致させる必要がある。
 
 ### 3.2 Setup script
+
+**前提**: Python 3 + PyYAML (`python3 -c "import yaml"` で確認可能)。macOS は Homebrew 経由の Python 3 で `pip3 install pyyaml`、Linux は `pip install pyyaml` または distro パッケージ (`python3-yaml`) で導入。
 
 ```bash
 ~/Claude/claude-config/scripts/setup-dropbox-refs.sh \
@@ -97,16 +99,16 @@ CLAUDE.md セクションのテンプレート:
 ```markdown
 ## 共同 PDF 置き場
 
-参照論文 (PDF) は odakin の Dropbox `<subpath>/` にあり (collaborator
+参照論文 (PDF) は Dropbox の `<subpath>/` にあり (collaborator
 ごとの subpath は personal layer の `dropbox-collabs.yaml` を参照)。
 
-ローカル symlink: `./dropbox-refs/`
-セットアップ: `~/Claude/claude-config/scripts/setup-dropbox-refs.sh
-              ~/Claude/<personal-layer>/dropbox-collabs.yaml`
-詳細規約: `~/Claude/claude-config/conventions/dropbox-refs.md`
+- ローカル symlink: `./dropbox-refs/`
+- セットアップ: `~/Claude/claude-config/scripts/setup-dropbox-refs.sh
+                ~/Claude/<personal-layer>/dropbox-collabs.yaml`
+- 詳細規約: `~/Claude/claude-config/conventions/dropbox-refs.md`
 ```
 
-`<subpath>` は Dropbox 内の場所 (例: `Physics/ベイズ会`) を **collaborator 同士で合意した名前**で書く。これにより、自分用の registry を持っていない collaborator も Dropbox を Finder で navigate して同じ場所にたどり着ける。
+`<subpath>` は **collaborator 同士で合意した Dropbox 内の場所**を書く (例: `Shared/Project/refs`)。これにより、自分用の registry を持っていない collaborator も Dropbox を Finder で navigate して同じ場所にたどり着ける。
 
 ---
 
@@ -135,8 +137,8 @@ CLAUDE.md セクションのテンプレート:
 ## 6. When NOT to use
 
 - 参照論文がすべて arXiv 公開: refs.bib に `eprint` を入れるだけで足りる。共著者は自分で arXiv から取得すれば良い
-- リポ全体を Dropbox に置きたい: forward-scattering 方式 (リポ root 自身を Dropbox の symlink にする) のほうがフィット
-- 共同編集者と共有しない、純粋に個人の参照ライブラリ: per-user キャッシュ (例: `physics-research/refs/pdfs/`) で足りる
+- リポ全体を Dropbox に置きたい: 「リポ root 自身を Dropbox folder への symlink にする」whole-repo Dropbox パターンのほうがフィット
+- 共同編集者と共有しない、純粋に個人の参照ライブラリ: per-user キャッシュ (例: 物理研究系 user の `<repo>/refs/pdfs/` 等) で足りる
 - Dropbox を使っていない user: setup script は personal layer に YAML がなければ何もしないので skip される
 
 ---
@@ -149,11 +151,11 @@ CLAUDE.md セクションのテンプレート:
 2. その中に `dropbox-collabs.yaml` を置く (canonical 名は collaborator 同士で合意、subpath は自分の Dropbox 構造に合わせる)
 3. claude-config を導入し、`./setup.sh` を実行 (もしくは setup-dropbox-refs.sh を直接呼ぶ)
 
-これだけで自分の machine に symlink が生成される。共有リポ側 (例: bayes-kai) には canonical 名 1 つだけが現れるので、collaborator 全員にとって `./dropbox-refs/` という同じ path で参照できる。
+これだけで自分の machine に symlink が生成される。共有リポ側には canonical 名 1 つだけが現れるので、collaborator 全員にとって `./dropbox-refs/` という同じ path で参照できる。
 
 注意点:
 
-- canonical 名は **共有リポのディレクトリ名** に合わせる (`bayes-kai` リポなら canonical 名も `bayes-kai`)
+- canonical 名は **共有リポのディレクトリ名** に合わせる (例: `<base>/foo/` というリポなら canonical 名も `foo`)
 - subpath は user ごとに異なる可能性がある。共有リポの CLAUDE.md には「Dropbox 上で `<subpath>` を探してね」というヒントを書いておくと、registry を持たない collaborator もたどり着ける
 - 共有 Dropbox folder の invite (Dropbox UI 上の操作) は機構の対象外。各 user が手動で accept する必要がある
 

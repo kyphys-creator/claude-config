@@ -617,28 +617,32 @@ if [ -n "$LAYER" ] && [ -f "$LAYER/dropbox-collabs.yaml" ] && [ -x "$DROPBOX_REF
 
     # Install / update post-merge hook in personal layer so subsequent
     # `git pull` of the personal layer re-runs the symlink setup.
+    # Tagged hooks are owned by claude-config and unconditionally rewritten
+    # on every setup.sh run (so absolute paths stay current after layer
+    # moves). Untagged pre-existing hooks are left alone — user must merge
+    # the snippet manually.
     LAYER_GIT_HOOKS="$LAYER/.git/hooks"
     if [ -d "$LAYER_GIT_HOOKS" ]; then
         LAYER_POST_MERGE="$LAYER_GIT_HOOKS/post-merge"
-        # Tag the hook so we can detect / update our managed block.
         HOOK_TAG="# managed-by: claude-config setup-dropbox-refs"
-        if [ -f "$LAYER_POST_MERGE" ] && grep -qF "$HOOK_TAG" "$LAYER_POST_MERGE" 2>/dev/null; then
-            : # already installed, leave alone (idempotent)
-        elif [ -f "$LAYER_POST_MERGE" ]; then
-            echo "  WARNING: $LAYER_POST_MERGE already exists and is not managed by claude-config."
+        if [ -f "$LAYER_POST_MERGE" ] && ! grep -qF "$HOOK_TAG" "$LAYER_POST_MERGE" 2>/dev/null; then
+            echo "  WARNING: $LAYER_POST_MERGE exists and is not managed by claude-config."
             echo "           Append the following lines manually:"
             echo "             $HOOK_TAG"
             echo "             \"$DROPBOX_REFS_SCRIPT\" \"$LAYER/dropbox-collabs.yaml\" \"$CLAUDE_DIR\" || true"
         else
+            ACTION="Installed"
+            [ -f "$LAYER_POST_MERGE" ] && ACTION="Refreshed"
             cat > "$LAYER_POST_MERGE" <<HOOK_EOF
 #!/usr/bin/env bash
 $HOOK_TAG
 # Re-create per-repo dropbox-refs symlinks after personal-layer git pull.
-# (re)installed by claude-config/setup.sh — re-running setup.sh updates this.
+# (re)installed by claude-config/setup.sh — re-running setup.sh refreshes
+# the absolute paths below. Do not edit by hand.
 "$DROPBOX_REFS_SCRIPT" "$LAYER/dropbox-collabs.yaml" "$CLAUDE_DIR" || true
 HOOK_EOF
             chmod +x "$LAYER_POST_MERGE"
-            echo "  Installed: $LAYER_POST_MERGE"
+            echo "  $ACTION: $LAYER_POST_MERGE"
         fi
     fi
 fi

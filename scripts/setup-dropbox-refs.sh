@@ -21,11 +21,11 @@
 # YAML schema (mapping form):
 #
 #   collaborations:
-#     bayes-kai:
-#       subpath: Physics/ベイズ会
+#     <repo-name>:
+#       subpath: <Dropbox-relative path>
 #       description: optional, human-readable
-#     other-collab:
-#       subpath: SomeOther/Path
+#     another-repo:
+#       subpath: Some/Other/Path
 #
 # For each entry, creates:
 #   <base-dir>/<name>/dropbox-refs -> <DBROOT>/<subpath>
