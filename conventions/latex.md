@@ -48,3 +48,19 @@ ln -s ~/Claude/claude-config/scripts/pre-commit-bib .git/hooks/pre-commit
 ```
 *.aux *.bbl *.blg *.log *.out *.toc *.fdb_latexmk *.fls *.synctex.gz *.synctex(busy) *.dvi
 ```
+
+## .gitattributes（改行コード正規化）
+**LaTeX リポには必ず `.gitattributes` を置く。** 特に以下のケースで重要:
+- Dropbox 配下で運用するリポ（Dropbox が同期中に改行コードを書き換えることがある）
+- Windows 共同編集者がいる共有リポ（CRLF 混入で git が全行 diff と見なすのを防ぐ）
+
+内容（`time-energy-head-on/.gitattributes` 準拠）:
+```
+# Normalize line endings to LF in the repository
+* text=auto eol=lf
+
+# Binary files — no conversion
+*.pdf binary
+*.png binary
+*.jpg binary
+```
