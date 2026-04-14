@@ -1,0 +1,26 @@
+# dropbox-collabs.yaml — personal-layer registry of Dropbox-shared collab folders.
+#
+# Schema: each entry maps a canonical "collaboration name" (which must
+# match the local checkout directory of the corresponding repo, e.g.
+# <base>/<repo-name>/) to a Dropbox-relative subpath. claude-config's
+# scripts/setup-dropbox-refs.sh reads this and creates per-repo
+# dropbox-refs/ symlinks: <base>/<repo-name>/dropbox-refs -> $DBROOT/<subpath>.
+#
+# claude-config/setup.sh runs setup-dropbox-refs.sh automatically when
+# this file is present in the personal layer, and installs a post-merge
+# hook in the personal layer's .git/hooks/ so subsequent `git pull`
+# regenerates the symlinks.
+#
+# Convention details: ~/Claude/claude-config/conventions/dropbox-refs.md
+
+collaborations:
+  # Example (replace with your own collaborations):
+  #
+  # combined-results:
+  #   subpath: Shared/Research/CombinedResults/refs
+  #   description: shared reference PDFs for the combined-results paper
+  #
+  # another-paper:
+  #   subpath: Some/Other/Path
+  #   description: |
+  #     Multi-line description if needed.

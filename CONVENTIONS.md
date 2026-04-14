@@ -1,27 +1,25 @@
-# ~/Claude リポジトリ規約
+# リポジトリ規約
 
-最終更新: 2026-03-22
+最終更新: 2026-04-07
+
+> **正本は `~/Claude/claude-config/CONVENTIONS.md`。** `~/Claude/CONVENTIONS.md` は symlink。
+> 編集後は `cd ~/Claude/claude-config && git add -A && git commit && git push`。
+> **規約を追加・修正する前に** [docs/convention-design-principles.md](docs/convention-design-principles.md) を読むこと（配置原則・重複回避・追加判断基準）。
+> ドメイン固有規約は `conventions/` に分離: [shared-repo.md](conventions/shared-repo.md), [latex.md](conventions/latex.md), [mcp.md](conventions/mcp.md), [research-email.md](conventions/research-email.md), [collaborators.md](conventions/collaborators.md), [substack.md](conventions/substack.md), [scheduled-tasks.md](conventions/scheduled-tasks.md), [shell-env.md](conventions/shell-env.md), [dropbox-refs.md](conventions/dropbox-refs.md)
+>
+> **パスの記述規則:** CLAUDE.md・SESSION.md 等でローカルパスを記述する際は `~` で表記（例: `~/Dropbox/...`）。`/Users/odakin/` のようなユーザー固有の絶対パスは共同編集者の環境で壊れるため使わない。
 
 ---
 
 ## 1. リポジトリ作成・同期
 
 ```bash
-# 新規作成
-cd ~/Claude
-gh repo create odakin/<name> --private --description "<English description>" --clone
+gh repo create <username>/<name> --private --description "<English description>" --clone
 cd <name> && git branch -M main
-# 必須ファイル作成（§2参照）→ initial commit + push
 git add . && git commit -m "Initial commit: <概要>" && git push -u origin main
-
-# 未clone リポの同期
-gh repo list odakin --limit 50 --json name  # 一覧取得
-gh repo clone odakin/<name>                  # clone
 ```
 
-- **リポの description（`--description`）は必ず英語で書く。** dev.to 等の embed カードに表示されるため。
-
-リポ一覧の正本は **MEMORY.md の「リポ一覧（正本）」セクション**。新規作成・clone 後は必ず追記。**新しいリポを作る前に、既存リポで対応できないか MEMORY.md のリポ一覧を確認すること。**
+description は英語。リポ一覧の正本は個人層の `repos.md`（未設定なら MEMORY.md）。新規作成前に既存リポを確認。
 
 ---
 
@@ -30,40 +28,47 @@ gh repo clone odakin/<name>                  # clone
 | ファイル | 役割 |
 |---------|------|
 | `CLAUDE.md` | 永続的指示書（構造・実行方法・復帰手順）。構造変更時のみ更新 |
-| `SESSION.md` | 揮発的な現在状態（作業中の内容・残タスク・直近の決定）。進行に応じて更新、定期的に棚卸し |
-| `.gitignore` | ビルド成果物・OS/エディタファイル・機密情報の除外 |
+| `SESSION.md` | 揮発的な現在状態（作業中タスク・直近の決定）。進行に応じて更新 |
+| `DESIGN.md` | **決定した**設計判断とその理由（Why / 代替案 / トレードオフ / defer 判断）。判断が生じたら即記録。**未決定の探索は `EXPLORING.md`（任意）へ** |
+| `.gitignore` | ビルド成果物・OS/エディタファイル・機密情報の除外。共有リポでは全パターン明記 |
 
-原則: CLAUDE.md は「どうやるか」、SESSION.md は「今どこにいるか」。
+CLAUDE.md は「どうやるか」、SESSION.md は「今どこにいるか」、DESIGN.md は「なぜそうしたか」。
 
-### 記録先の判別（メモリ vs SESSION.md vs CLAUDE.md）
+### 任意ファイル
 
-「何か記録しておく」とき、書き先を間違えないこと。
+**`ARCHITECTURE.md`**（または `docs/ARCHITECTURE.md`）— コードの 30,000ft ナラティブ。レイヤ構成・主要概念・データフローを散文で書く。
 
-| 情報の性質 | 書き先 | 例 |
-|---|---|---|
-| ユーザーの性質・好み・フィードバック | メモリ | 「先生と呼ばない」「物理論文は英語校正のみ」 |
-| 外部システムへの参照先 | メモリ | 「バグは Linear の INGEST で管理」 |
-| プロジェクトの現在の作業状態・未完了タスク | 該当リポの SESSION.md | 「3本が投稿許可待ち」「PR #42 がレビュー中」 |
-| 永続的な仕様・構造・手順 | CLAUDE.md | ビルド手順、ディレクトリ構成 |
-| 設計判断とその理由 | DESIGN.md | 「タブではなくトグルにした理由」 |
-| 全プロジェクト共通の規約・原則 | CONVENTIONS.md | 「MCP は操作前に接続先確認」「コミットメッセージ規約」 |
-| `grep` / `git log` で導出可能な **事実** | 書かない | ファイル一覧、最近のコミット |
+- **作る基準:** コードリポで CLAUDE.md の構造説明が表 1 つに収まらず、ファイル名やクラス名から関係性が読み取れない場合（例: 物理/通信/UI が分離、非同期パイプライン、独自の概念モデル）
+- **作らない:** LaTeX 論文・記事・データ運用・薄いスクリプト集など構造説明が CLAUDE.md に収まるリポ。ファイルツリーやクラス一覧だけになるなら不要
+- **前例:** [LorentzArena/docs/ARCHITECTURE.ja.md](https://github.com/sogebu/LorentzArena/blob/main/docs/ARCHITECTURE.ja.md)
 
-「何を」は `git log` に任せてよいが、 **「なぜ」「判断根拠」** は手動で記録すること（§3 参照）。
+**`EXPLORING.md`** — 未決定の思考・代替案・option space の棚卸し
 
-**よくある間違い:** プロジェクトの進行状態をメモリに書く。メモリはその端末のそのプロジェクトでしか読まれない。SESSION.md はリポに入るので全端末で共有される。
+- **作る基準:** DESIGN.md が肥大化してきて（目安 400 行超）、かつ未決定の思考メモが複数同時進行しているとき。小さいリポや「決定しか書くことがない」リポでは不要
+- **書くもの:** 決定前の代替案比較、候補の tradeoff 表、open questions、暫定方向（commit せずに「A が有力、B はこの理由で却下」程度の踏み込み）、pre-decision の設計思考
+- **書かないもの:**
+  - 決定したこと → DESIGN.md
+  - defer 判断と un-defer トリガー → DESIGN.md（defer も決定の一種）
+  - 現在の作業状態・未完了タスク → SESSION.md
+- **lifecycle:** 探索が決定に結晶したら該当セクションを DESIGN.md に promote し、EXPLORING.md から削除する。陳腐化した選択肢も削る。ファイル全体が空になったら削除してよい
+- **DESIGN.md との境界判別:** 迷ったら DESIGN.md に書く。EXPLORING.md は「完全に option space を広げている段階」専用。70% 決まっていて 30% 迷っている状態は DESIGN.md に「暫定決定（再検討トリガー: X）」として書く
+- **根拠:** 決定（安定・長寿命）と探索（不安定・短寿命）を同じファイルに同居させると DESIGN.md の役割契約（「なぜそうしたか」）が弱まり、reader の signal-to-noise が下がる。詳細は `docs/convention-design-principles.md` §6
 
-### 任意ファイル: DESIGN.md
+### 記録先の判別
 
-設計判断が複数あり「なぜこうなっているか」を将来の自分や他者に説明する必要があるプロジェクトで作成する。
-
-| 作る基準 | 例 |
+| 情報の性質 | 書き先 |
 |---|---|
-| 却下した代替案がある | 「タブ方式ではなくトグル方式にした理由」 |
-| 同じ問いが繰り返し出る | 「なぜ○○フィルターを実装しないのか」 |
-| 判断基準をフレームワーク化した | 「3軸評価でデフォルト除外を判定」 |
+| ユーザーの好み・フィードバック・外部サービスへの参照 | メモリ（マシンローカル） |
+| 現在の作業状態・未完了タスク | SESSION.md |
+| 永続的な仕様・構造・手順 | CLAUDE.md |
+| **決定した**設計判断とその理由（defer 含む） | DESIGN.md |
+| 未決定の探索・代替案比較・暫定方向 | EXPLORING.md（任意、なければ DESIGN.md にタグ付きで） |
+| 全プロジェクト共通の規約 | CONVENTIONS.md |
+| grep / git log で導出可能な事実 | 書かない |
 
-CLAUDE.md に書くのは「何をどうするか」（仕様）。DESIGN.md に書くのは「なぜそうするか」（思想）。CLAUDE.md が太りすぎたら DESIGN.md への分離を検討する。
+**よくある間違い:**
+- 進行状態をメモリに書く → SESSION.md に書くべき（リポに入り全端末で共有される）
+- `~/Claude/` 内の別リポへのパスをメモリに書く → メモリは `~/.claude/` 配下でマシンローカル（git 同期されない）。cross-repo ポインタは CLAUDE.md 等の git 側に書く。メモリの reference 型は外部 SaaS (Linear, Grafana 等) への参照用
 
 ---
 
@@ -71,196 +76,68 @@ CLAUDE.md に書くのは「何をどうするか」（仕様）。DESIGN.md に
 
 **人間に言われなくても自動で行う。**
 
-### SESSION.md 更新タイミング
+SESSION.md:
+- **更新タイミング:** タスク完了・重要な判断・ファイル作成/大幅変更・エラー発生時。出力テキストは揮発する。
+- **認識の転換点:** 方針変更・ユーザー決定・前提の修正では **その場で** SESSION.md に書く（後回しにすると autocompact で消失）。決定事項には **What**（具体的手順）・**Why**（代替案と棄却理由）・**How**（実装方法）を含める。
+- **棚卸し（目安80行以内）:** 完了 `[x]` を除去、実装詳細は git log に委任、重複を排除、恒久的決定は CLAUDE.md に移動。
+- **新セッションテスト:** セッション終了前に SESSION.md だけで What/Why/How が復元できるか検証。
 
-- タスク完了時 → `[x]` にし成果物を記録（push 時の棚卸しで除去）
-- 重要な判断時 → 「直近の決定事項」に記録
-- ファイル作成/大幅変更時 → パスと概要を記録
-- エラー・ブロッカー発生時 → 問題と状態を記録
-- 長い作業の区切り → 中間状態を記録（autocompact 対策）
-- 外部公開・デプロイ時 → 日時・コミット・内容を記録
+MEMORY.md（目安150行以内）: 2週間以上未使用プロジェクトを除去、CONVENTIONS 昇格済みフィードバックを除去、解決済み案件を除去。
 
-### SESSION.md 棚卸し（肥大化防止）
+### push の粒度と障害対応
 
-SESSION.md の目的は **autocompact 後の復帰** であり、変更履歴の保存ではない。**目安80行・2,000トークン以内** に収める。
+git の状態管理は 1 本の `PostToolUse` hook で機械的に支援する: `claude-config/hooks/git-state-nudge.sh`。Bash 実行ごとに動作し、現在の CWD が git リポなら以下 3 ケースを検査して警告を session context に注入する。clean / in-sync な repo では完全に silent (Claude Code の hook 実行 notification も出ない)。
 
-**push 前に毎回確認**: SESSION.md が長くなっていたら以下を実行。
+- **直近 60 秒以内の commit が未 push** → §4 「コミット後は常に push」を機械的に思い出させる。意図的に stack している場合は無視してよい。1 つの commit につき 1 回だけ警告（同じ HEAD sha では再警告しない）
+- **直近 4 時間以内に触っていない repo に入った時、それが dirty / ahead** → セッション base dir が repo でなく、サブ repo に `cd` した際の "stale state inheritance" を検出
+- **同上で behind** → first-sighting 時には hook が `git fetch` (5s timeout) を 1 回だけ実行するため、remote の進捗が local より先行していれば警告される。divergence を放置して大きな変更を加えると、後の rebase で衝突しファイル破損のリスクがある
 
-1. **完了タスクを除去** — `[x]` 項目はコミット済みなら削除。成果が重要なら1行サマリーに圧縮
-2. **実装詳細を委任** — コードの実装方法・修正内容はコミットメッセージと git log に任せる。SESSION.md には「何を・なぜ」だけ残す
-3. **他ドキュメントとの重複を排除** — CLAUDE.md・DESIGN.md・README.md 等に書いてある内容は SESSION.md から消し、参照リンクに置き換える
-4. **決定事項を正本に移動** — 恒久的な設計判断は CLAUDE.md や設計ドキュメントに移し、SESSION.md からは消す。SESSION.md に残すのは「まだ正本に反映していない直近の決定」のみ
+4 時間 window は cross-session で marker file (`$HOME/.claude/state/git-nudge/`) に永続化されるため、短時間の連続セッションで spam しない設計（厳密な per-session 検出ではない点に注意）。fetch は first-sighting 時のみで、subsequent calls は network なしで ~0.2s。
 
-**書かないもの**（最初から SESSION.md に入れない）:
+> **設計補足:** 以前は SessionStart hook (`session-git-check.sh`) が session 起動時に独立して fetch + 警告を行っていたが、Claude Code が hook 実行のたびに「セッションを初期化しました / セッションstartupでフックを実行しました」notification を出すため平常時にもノイズになっていた。そこで SessionStart を撤廃し、divergence 検出を `git-state-nudge.sh` の first-sighting 経路に統合した。失う機能は「Bash 実行前の divergence 警告」だけで、初 Bash で同等の警告が出る。
 
-- 完了した作業の経緯・試行錯誤の過程 → git log
-- API レスポンスやコマンド出力の詳細 → コミットメッセージ or コード内コメント
-- 他ドキュメントに正本がある情報の複写
-
-### MEMORY.md 棚卸し（肥大化防止）
-
-MEMORY.md はシステムが **200行で切り捨てる**。**目安150行以内** に収め、成長を管理する。
-
-**棚卸しタイミング**: メモリを新規追加するとき、または会話開始時に MEMORY.md を読んで肥大化に気づいたとき。
-
-1. **「現在の作業プロジェクト」を整理** — 2週間以上触れていないプロジェクトは除去。再開時に再追加すればよい
-2. **CONVENTIONS.md に昇格したフィードバックを除去** — ルールが正本（CONVENTIONS.md）に反映済みならメモリファイルとインデックス行を削除
-3. **解決済みプロジェクトメモリを除去** — 完了・無効化した案件（口座開設完了、提出済み書類等）は削除
-4. **リポ一覧が20行を超えたら分離を検討** — 別ファイルに移し、MEMORY.md には参照リンクと用途別インデックスのみ残す
-5. **メモリファイルの description を最新に保つ** — 内容と description がずれていると、将来の会話で適切に呼び出されない
-
-### CLAUDE.md 更新タイミング
-
-リポ構造変更、実行手順確定、Phase 大幅進行時のみ。
+- **作業単位ごとの push を推奨。** まとまった単位 (1 件の処理完了、1 つの構造変更など) が終わるごとに commit + push すると、後で他の作業者と衝突したときの解決が楽になる。バッチ push する流儀の人は各自の判断で。ただし §4 の「コミット後は常に push」は必須で、その強制は hook が担う。
+- **push 障害は即座に解決する。** rebase コンフリクト・認証エラー等を放置しない。大規模な diverge が判明した場合は、破壊的な `reset --hard` を実行する前に必ず `/tmp` などに現状をバックアップ。
 
 ### push 前チェック
 
-```
-1. SESSION.md 更新 — 実態と一致しているか確認。長ければ棚卸し
-2. CLAUDE.md 更新 — 構造変更があった場合のみ
-3. 4軸レビュー（下記）
-4. commit → push
-```
+1. SESSION.md 更新（長ければ棚卸し） 2. CLAUDE.md 更新（構造変更時のみ） 3. 4軸レビュー → commit → push。軽微な変更では 2-3 スキップ可。
 
-コード1行の修正など明らかに軽微な変更では、ステップ 2-3 はスキップ可。
-
-### 4軸レビュー
-
-**変更を含む全ファイル**を対象に、commit 前に**深く**検討する。表面的なチェックではなく、変更の波及効果を追跡すること。機械的に検証可能なもの（数値の一致、行数、セクション番号）はコマンドで確認する。
-
-| 軸 | 深く検討すること |
+| 軸 | 内容 |
 |---|---|
-| **整合性** | 変更ファイル間で数値・用語・参照先が一致しているか。セクション番号は連番か。同じ値を引用している他ファイルがないか（grep で確認） |
-| **無矛盾性** | 新しい記述が既存のルール・テンプレート・説明文と矛盾していないか。用語の改名があれば全箇所更新されているか |
-| **効率性** | 同じ情報が複数ファイルに重複していないか。SESSION.md は予算（~80行）、MEMORY.md は予算（~150行）内か。不要になった記述が残っていないか |
-| **安全性** | 個人情報・認証情報が公開リポに含まれていないか。削除した情報に正本（git log・他ドキュメント）があるか |
+| **整合性** | 変更ファイル間で数値・用語・参照先が一致しているか |
+| **無矛盾性** | 既存ルール・テンプレートと矛盾していないか |
+| **効率性** | 重複がないか。SESSION.md ~80行、MEMORY.md ~150行以内か |
+| **安全性** | 個人情報・認証情報が公開リポに含まれていないか |
 
-問題が見つかったら push 前に修正する。修正したら再度4軸レビューを実行する（修正自体が新たな不整合を生むことがある）。
+ユーザーが「**3軸チェック**」と言った場合は上表のうち **整合性・無矛盾性・効率性** のみを指す（安全性は除外）。「4軸チェック」は全 4 軸。
 
-### autocompact 復帰フロー
-
-CLAUDE.md 自動読み込み → "How to Resume" → SESSION.md 読む → 作業継続
+**リポでの作業開始手順（全場面共通）:** CLAUDE.md → SESSION.md（要対応を確認）→ 作業開始。autocompact 復帰・scheduled task・SKILL 実行・手動作業すべてに適用。親ディレクトリで作業中にタスクが既存リポの管轄だと判明した場合も同様（MEMORY.md リポ一覧で特定 → そのリポの CLAUDE.md を読む）。「簡単なタスク」も例外ではない。CLAUDE.md 内のポインタ（「正本は X」「詳細は Y 参照」）は必ず辿る
 
 ---
 
-## 4. CLAUDE.md テンプレート
+## 4. Git 規約
 
-```markdown
-# <プロジェクト名>
-
-## 概要
-<1-2文>
-
-## リポジトリ情報
-- パス: `~/Claude/<name>/`
-- ブランチ: `main`
-- リモート: `odakin/<name>` (private)
-
-## 構造
-\`\`\`
-<tree>
-\`\`\`
-
-## 実行環境
-- 言語 / 依存 / 実行コマンド
-
-## How to Resume
-1. SESSION.md を読む → 現在状態と残タスクを把握
-2. 残タスクに従って作業継続
-3. 不明点はユーザーに確認
-
-## 自動更新ルール（必須）
-- タスク完了時 → SESSION.md 更新（完了タスクは push 時に除去）
-- 重要な判断時 → SESSION.md に記録
-- push 前 → SESSION.md 更新・棚卸し → 4軸レビュー → commit
-- 詳細は `~/Claude/CONVENTIONS.md` §3 参照
-```
-
-共有リポでは CONVENTIONS.md §3 の内容を CLAUDE.md 内に直接記述すること。
+- ブランチ `main` 統一。コミットメッセージは英語・動詞始まりを推奨（命令形: `Add X`, `Fix Y`, `Update Z`）。絶対ルールではなく、名詞句始まりや過去形でも意味が通れば許容
+- **コミット後は常に push。** 複数リモートがあれば全リモートに push。`git-state-nudge.sh` hook (§3) が直近 60 秒以内の未 push commit を機械的に検出して警告するため、Claude はこの警告を見たら次の Bash で push を実行すること
+- セッション終了時は未コミット変更があれば commit + push
+- ファイル名にバージョン番号をつけない
 
 ---
 
-## 5. SESSION.md テンプレート
+## 5. 安全規則（絶対厳守）
 
-```markdown
-# <プロジェクト名> Session
-
-## 現在の状態
-**作業中**: <今やっていること>
-
-## 残タスク
-- [ ] <未完了タスク> ← ここから再開
-
-## 決定事項（正本未反映分のみ）
-- <CLAUDE.md等に移したら、ここから消す>
-```
-
-**設計原則**:
-- 「現在の状態」と「残タスク」が最上部。復帰時に最初に読む部分
-- `[x]` 完了タスクは蓄積しない。コミット済みなら削除（git log に残る）
-- 決定事項は CLAUDE.md 等の正本に移したら SESSION.md から消す
-- 時系列の作業履歴は書かない（git log に委任）
-- **目安80行以内**（§3「棚卸し」参照）
-
----
-
-## 6. .gitignore
-
-`~/.gitignore_global` で TeX 中間ファイル・.DS_Store をグローバル除外済み。
-ローカル専用リポはプロジェクト固有のみでOK。**共有リポ** では共同編集者のために全パターンを含める。
-
-標準パターン: 共通（.DS_Store, .claude/, *~, *.swp）、Python（__pycache__/, .venv/）、LaTeX（*.aux, *.bbl 等）、Mathematica（*.mx）、Node（node_modules/）
-
----
-
-## 7. ディレクトリ命名
-
-`src/`（ソース）、`docs/`（参考資料）、`referee/`（レフェリーレポート）、`analyses/`（解析）、`tools/`（ユーティリティ）、`scripts/`（自動化）
-
----
-
-## 8. Git 規約
-
-- ブランチ `main` 統一。コミットメッセージは英語・動詞始まり
-- コミット後は常に push（push 前チェック §3 を挟む）。**複数リモートがあるリポでは全リモートに push する**（`git remote -v` で確認）
-- セッション終了時は未コミット変更があれば必ず commit + push
-- ファイル名にバージョン番号をつけない（git が管理）
-
----
-
-## 9. 安全規則（絶対厳守）
-
-1. 自分が作っていないファイル/ディレクトリの削除前に `ls` で確認しユーザーに提示
+1. 他人のファイル削除前に確認しユーザーに提示
 2. 既存データ削除時はリネーム (`mv old old.bak`) を優先提案
 3. force push 禁止（必要なら `--force-with-lease`）
-4. 機密情報（.env, credentials, 個人情報）はコミットしない
-5. 同じファイルを複数リポに置かない（正本を1つ）
-6. 破壊的操作（リポ削除・ブランチ削除・reset --hard 等）は必ず事前にユーザー確認
-7. 自分（odakin）のリポのみ操作。他ユーザーのリポは絶対に触らない
-8. **LaTeX の式（equation/align 環境内）は原則として変更しない。** 変更が必要な場合は必ず事前にユーザーに確認し、承認を得てから行うこと。英語校正・文法修正など確実に正しい本文修正は可。物理的内容を含む文の追加・書き換えはコメントとして提案し、本文への直接挿入は避ける — ハルシネーションが本文に紛れ込むと著者のチェック負担が極めて大きいため
-9. **Scheduled task の SKILL.md はリポを正本とし、`~/.claude/scheduled-tasks/` からは symlink で参照する。** コピーの二重管理は禁止（同期漏れの原因）。新規タスク登録時: `ln -s ~/Claude/<repo>/skill/SKILL.md ~/.claude/scheduled-tasks/<taskId>/SKILL.md`
+4. 機密情報はコミットしない。同じファイルを複数リポに置かない
+5. 破壊的操作は事前にユーザー確認。自分のリポのみ操作
+   - **OS のプライバシー・セキュリティ設定を変更するコマンドの禁止**。変更はユーザーが手動で行う。macOS 固有の deny ルール詳細は [conventions/shell-env.md](conventions/shell-env.md) 参照
+6. **機密データを含むリポの公開禁止**: 個人情報・金融情報・認証情報を含む private リポは絶対に public にしない。該当リポの CLAUDE.md 冒頭に `⚠️ このリポは private 必須` 警告を入れること。新規リポ作成時に機密データを扱う場合は同様の警告を追加し、暗号化手順がある場合はそれに従う（ない場合は [docs/git-crypt-guide.md](docs/git-crypt-guide.md) を参照）
+7. **MCP 操作前のアカウント確認**: Gmail・Calendar 等の MCP ツールを初めて使う前に `get_profile` 等で接続先アカウントを確認すること。複数アカウントが接続されているのが常態。送信元・操作先の取り違えは不可逆。詳細は [conventions/mcp.md](conventions/mcp.md)
 
 ---
 
-## 10. 網羅性の検証
+## 6. 網羅性の検証
 
-「全部」「全て」を主張する場合、列挙の**前に**機械的な検証基準（grep 件数、テスト総数など）を定め、列挙**後に**照合する。検証基準が定義できない場合は「全部」と主張しない。
-
----
-
-## 11. ユーザー視点での設計判断
-
-UI・コンテンツの変更を検討するとき、開発者の目線（「冗長だから統合」「件数が多いから減らす」）で即答せず、**実際のユーザーが置かれている状況と行動パターン** から判断する。
-
-- 変更提案の前に「誰が・どんな状況で・何を求めてこのページを見るか」を具体的に想像する
-- 「整理」「統合」「削減」は手段であって目的ではない。目的は常に「ユーザーが必要な情報に早く辿り着く」こと
-- 数値（表示件数、問いの数など）は、その数値が **ページ全体の体験** にどう影響するかで判断する
-- 最初の直感で即答しない。反論されたら「なぜ反論されたか」を深く考える。2回目の提案が正しいとも限らない
-
----
-
-## 12. その他
-
-- **画像出力**: ファイル名は内容を反映。生成後は `open` で表示
-- **GFM ルール**: 日本語 bold 対策の詳細は `~/Claude/claude-config/gfm-rules.md` 参照
-- **MCP ツール**: 外部サービス接続型の MCP（Gmail 等）は、検索・操作の前にプロファイル取得で接続先アカウントを確認すること。思い込みで操作しない
+「全部」を主張する場合、列挙の前に機械的な検証基準を定め、列挙後に照合する。

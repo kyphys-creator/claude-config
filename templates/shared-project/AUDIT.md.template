@@ -1,0 +1,63 @@
+# 公開前監査チェックリスト — <project-name>
+
+新しい共同編集者を追加する前に、本リポの内容に**所有者個人の情報・他 private リポへの参照が紛れ込んでいないか**を確認する。
+
+## チェック項目
+
+### 1. 他 private リポへの参照
+
+```bash
+grep -rn '<owner>-prefs\|<other-private-repo-1>\|<other-private-repo-2>' --exclude-dir=.git .
+```
+
+該当する private リポ名をすべて列挙して grep。0 件確認。
+
+### 2. 所有者個人の絶対パス
+
+```bash
+grep -rn "/Users/<owner>" --exclude-dir=.git .
+grep -rn '~/<owner>' --exclude-dir=.git .
+```
+
+0 件確認。`~` 表記でも所有者特有のホーム位置情報は出さない。
+
+### 3. 所有者個人のメール文体・身元情報
+
+CLAUDE.md・SESSION.md・DESIGN.md などを目視でレビュー:
+
+- 所有者個人のメール下書きのスタイルが直接インラインされていないか
+- 所有者個人の連絡先・電話番号・住所が含まれていないか
+- 所有者個人の Google Calendar ID（`<random-id>@group.calendar.google.com`）等が含まれていないか
+
+### 4. 所有者個人のアカウント識別子
+
+```bash
+grep -rE '<owner-personal-email-regex>' --exclude-dir=.git .
+```
+
+業務上必要なチーム共有アカウント（例: 部署用メーリングリスト）は OK だが、所有者個人のアカウントは NG。
+
+### 5. 暗号化対象の整合性
+
+git-crypt を使っている場合:
+
+```bash
+git-crypt status
+```
+
+意図通りのファイルが暗号化対象になっているか確認。
+
+### 6. 履歴 (git log) に過去の漏洩がないか
+
+新リポを切り直したばかりなら不要。既存リポを clean up した場合は `git filter-repo` 等で履歴も浄化したか確認。
+
+## 監査が通ったら
+
+- [ ] 上記 1-6 すべてクリア
+- [ ] CLAUDE.md が collaborator 環境（個人層なし）で読んで意味が通るか目視確認
+- [ ] README.md にこのリポが何のためのリポか分かる説明がある
+- [ ] git-crypt を使う場合、新規 collaborator が鍵を取得する手順が（口頭でもよいので）明確
+- [ ] **このチェックを通したことを SESSION.md に記録**
+- [ ] collaborator を招待
+
+監査の項目は本リポの性質に応じて追加してよい。

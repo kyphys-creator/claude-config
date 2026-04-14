@@ -1,0 +1,48 @@
+# claude-config/gitignore_global
+# Installed by setup.sh → ~/.gitignore_global
+# git config --global core.excludesfile ~/.gitignore_global
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# === Claude Code ===
+# .claude/ の中身は基本 ignore だが、public-repo.marker だけは tracked
+# (leak 防止 hook の visibility 正本)。詳細は
+# claude-config/DESIGN.md §公開リポ leak 防止。
+.claude/*
+!.claude/public-repo.marker
+
+# === LaTeX intermediates (NOT pdf — PDFs are tracked) ===
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.synctex
+*.toc
+*.lof
+*.lot
+*.dvi
+*.nav
+*.snm
+*.vrb
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# === Mathematica ===
+*.mx
+
+# === Node ===
+node_modules/
