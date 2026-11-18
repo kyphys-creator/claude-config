@@ -1,0 +1,410 @@
+# Stable slug index -- AUTO-GENERATED from the doc by scripts/generate-doc-index.py.
+# id/level/title are DERIVED from the markdown (edit the md + re-run, do NOT hand-edit
+# them here). legacy (a section's original §-number = a permanent forwarding address),
+# related, and any other hand field are PRESERVED. See convention-design-principles §14.7 (= #inbound-ref-robustness).
+# Validated by scripts/check-office-automation-index.py (dangling=0 / orphan=0).
+sections:
+  - id: equation-safety
+    level: 2
+    title: "式の安全規則"
+  - id: bare-parenthetical-crossrefs
+    level: 2
+    title: "裸の括弧参照と `\\labelcref`・`\\eqref` の置き場所の検出、保持検査"
+  - id: mathbb-digits
+    level: 2
+    title: "`\\mathbb{数字}` は黙って化ける — 単位行列は `\\mathbbm{1}` (bbm)"
+  - id: uppercase-protect-symbols
+    level: 2
+    title: "`\\MakeUppercase` は記号の小文字も大文字にする — 物理量の文字は `\\NoCaseChange{…}` で守る"
+  - id: italic-wrapper-upright-text
+    level: 2
+    title: "文を `\\textit` で包む macro は、 数式の中の `\\text` (添字の P・単位の GeV) まで斜体にする — macro の中で `\\let\\text\\textup`"
+  - id: cite-set-after-commentout
+    level: 2
+    title: "comment-out 流儀の編集後は live `\\cite` 集合を照合する"
+  - id: commented-out-not-present
+    level: 2
+    title: "comment-out / `\\begin{comment}` した構造的要素を「原稿にある」と主張しない"
+  - id: latexdiff-review-snapshot
+    level: 2
+    title: "latexdiff で差分レビュー PDF を作る"
+  - id: latexdiff-fine-markup
+    level: 2
+    title: "式の中の変わった記号だけに印を付ける差分 (`--math-markup=fine`) の壊れ方と直し方"
+  - id: latexdiff-eqtree
+    level: 2
+    title: "式を latexdiff に渡さず、 構文木で比べる (`latexdiff-eqtree.py`)"
+  - id: latexdiff-views-check
+    level: 2
+    title: "差分 PDF を元の 2 版に読み戻して確かめる (`latexdiff-views-check.py`)"
+  - id: latexdiff-deleted-blank-lines
+    level: 2
+    title: "latexdiff は削除された空行を comment out できない — diff PDF と live で段落の切れ方が違ったら削除空行の残留を疑う (2026-09-08)"
+  - id: latexdiff-move-artifacts
+    level: 2
+    title: "block の MOVE は latexdiff に「削除 + 挿入」 と見える — label 重複の良性 error と無印 token (2026-09-08)"
+  - id: float-drift-after-insert
+    level: 2
+    title: "display を 1 本足したら `[t]` の表が次頁 = References に流れた — float の source 位置を前へ (2026-09-08)"
+  - id: figures-in-body-references-last
+    level: 2
+    title: "本文の図を本文の中に置き、 文献表を付録の後ろに置く — `placeins` の section option と `[tbp]`"
+  - id: landscape-display-page
+    level: 2
+    title: "本文の幅に入らない式 (大きな行列) を、 横置きの 1 頁にして送る"
+  - id: typeset-formula-readback
+    level: 2
+    title: "書き下した式を TeX に写したら、 TeX から読み戻して記号計算と照合する"
+  - id: class-conversion-body-check
+    level: 2
+    title: "原稿の型 (document class) を替えたときに、 本文が変わっていないことを確かめる"
+  - id: table-caption-position
+    level: 2
+    title: "表の caption を上に置くか下に置くかは、 投稿先の雛形を開いて決める"
+  - id: align-split-tag-orphan
+    level: 2
+    title: "長い display の式番号が下の行に回るのは amsmath の標準 — 欠陥として報告しない (2026-09-12、 著者裁定)"
+  - id: align-overfull-row-bisect
+    level: 2
+    title: "display の overfull がどの行かは、 写しで行を短くして切り分ける — log の行番号は display の終わりを指す"
+  - id: display-continuation-phantom
+    level: 2
+    title: "括弧の中で折った式の続きの行は `&\\phantom{…}` で括弧の中身の頭に揃える — 固定の字下げ (`\\quad`・`\\qquad`) にしない"
+  - id: qed-alone-after-display
+    level: 2
+    title: "証明が数式で終わると ■ だけが次の頁に回る — `\\qedhere` は番号つきの式の番号を消す"
+  - id: dots-before-closing-delimiter
+    level: 2
+    title: "amsmath は `\\cdots`・`\\dots` の直後が閉じ括弧か `$` のとき右に `\\,` を足す — 括弧の中に点だけだと左右が揃わない"
+  - id: named-refs-without-cleveref
+    level: 2
+    title: "参照に種類の名前 (定理・図・付録) を自動で付ける — cleveref を使わない形と、 `\\autoref` が和文で詰まる罠"
+  - id: inline-math-unbreakable-group-stretches-japanese
+    level: 2
+    title: "和文の行内数式を `{…}` で包んで折れなくすると、 前の行の字間が開く"
+  - id: ascii-parens-in-japanese
+    level: 2
+    title: "和文の中の括弧は全角で (LuaTeX-ja) — 半角の `( )` は英字の扱いで、 和文との間が開く"
+  - id: reflow-overfull-inline-math
+    level: 2
+    title: "段落を切る・文を分けると、 触っていない行内数式が行末に来てはみ出す — 数式でなく語順で直す"
+  - id: rendered-line-count
+    level: 2
+    title: "組んだ PDF で「何行に収まったか」 を数える — 文字の行を縦の位置でまとめる"
+  - id: tcolorbox-footnotes-to-page
+    level: 2
+    title: "tcolorbox の枠の中の脚注を、 本文と同じ番号で頁の下に出す"
+  - id: footnote-mark-height-shift
+    level: 2
+    title: "脚注の印の形を替えると、 印の高さが行の縦の位置を変える所がある"
+  - id: macro-block-name-clashes
+    level: 2
+    title: "英語の文書の macro の一揃いを和文の文書と tcolorbox の枠に持ち込むときの衝突"
+  - id: lua-ul-highlight-emph
+    level: 2
+    title: "`\\emph` を色の帯 (蛍光ペン) にする — lua-ul の罠と文献表"
+  - id: figure-table-shared-counter
+    level: 2
+    title: "図と表を 1 本の通し番号にする (jsclasses・ltjsbook)"
+  - id: mark-after-heading-number
+    level: 2
+    title: "選んだ見出しの番号の後ろにだけ印を付ける (飛ばしてよい節など) — 見出しと目次の番号の欄に出し、 参照・柱・しおりに漏らさない (jsclasses・ltjsbook)"
+  - id: luatexja-per-command-kanji-weight
+    legacy: "1"
+    level: 2
+    title: "1 つの命令だけ和文の字の太さを替える (luatexja) — 和文の字体を 1 つ足し、 縦組みの宣言も添える"
+  - id: symbol-width-repagination
+    level: 2
+    title: "記号幅の変わる一括置換は、 総頁数が同じまま頁割りだけ動かす — `.aux` の label→頁 で見る (2026-09-12)"
+  - id: variant-comparison-images
+    level: 2
+    title: "記法・体裁の案は、 組版した姿を左右に並べて決める (source の diff では決められない) (2026-09-12)"
+  - id: typeface-candidate
+    level: 2
+    title: "数式の書体 (math alphabet) を替える候補を作る — 今の font を PDF で確かめ、 使う所を全部数え、 行の折れまで見る"
+  - id: stash-roundtrip-build-artifacts
+    level: 2
+    title: "baseline 比較に git stash round-trip を使わない (tracked 生成物と衝突する)"
+  - id: out-of-tree-build-input-shadowing
+    level: 2
+    title: "tree 外 build で source dir を入力 path の先頭に置かない (古い生成物が新しい生成物を隠す)"
+  - id: text-structure-hierarchy
+    level: 2
+    title: "文章の構造化と見出し階層 (`\\paragraph` は `\\subsubsection` より下)"
+  - id: exclude-comments-from-length
+    level: 2
+    title: "長さ・段落構造の判断にコメントアウト行を数えない"
+  - id: source-comment-scope
+    level: 2
+    title: "source の comment に査読の記録を書かない — 置き場は results note"
+  - id: math-mode-protection
+    level: 2
+    title: "地の文に math 文字を裸で書かない (math mode 保護)"
+  - id: preamble-macros-first
+    level: 2
+    title: "プリアンブル定義のマクロを優先する (絶対則)"
+  - id: preamble-macros-scope-examples
+    level: 3
+    title: "対象範囲の例 (= 全部対象、これでも非網羅)"
+  - id: preamble-macros-check-grep
+    level: 3
+    title: "確認用 grep (= 「定義がある macro 名なのか?」 をチェック)"
+  - id: preamble-macros-rationale
+    level: 3
+    title: "理由 (rule の hard 化を支える 4 条)"
+  - id: preamble-macros-repo-fallback
+    level: 3
+    title: "リポ固有 fallback"
+  - id: macro-alias-forcing-function
+    level: 2
+    title: "マクロ alias の forcing function"
+  - id: fixed-framing-macro
+    level: 2
+    title: "新規 macro に fixed framing text を含める前に source-render asymmetry の罠を抑える"
+  - id: prescript-tall-nucleus
+    level: 2
+    title: "左肩の添字 macro は核の高さで浮く — `\\prescript` でなく標準 strut を基準にする (2026-09-13)"
+  - id: index-after-tall-delimiter
+    level: 2
+    title: "背の高い閉じ括弧の後の段違い添字は空 atom に付ける — `\\right]{}^{ab}{}_{\\mu\\nu}` (2026-09-13)"
+  - id: maketitle-handset-author-block
+    level: 2
+    title: "手組み author block と `\\maketitle` を併用したら題扉の余白を詰める"
+  - id: float-above-handset-title
+    level: 2
+    title: "`\\maketitle` を使わず題を手で組んだら、 1 頁目の上に図を置かせない"
+  - id: supplement-in-same-pdf
+    level: 2
+    title: "Supplemental Material は、 まず同じ PDF の文献表の後に置く"
+  - id: companion-paper-split
+    level: 2
+    title: "原稿の一部を別論文 (companion paper) に分ける"
+  - id: compilers
+    level: 2
+    title: "コンパイラ"
+  - id: silent-typesetting-traps
+    level: 2
+    title: "silent に効かない組版指定 — 書いたのに無視される 5 型 (2026-09-12)"
+  - id: declare-paper-size
+    level: 3
+    title: "用紙は documentclass の option に明示する (標準 class の既定は letterpaper)"
+  - id: dvipdfmx-papersize
+    level: 3
+    title: "documentclass の用紙指定は、 papersize special が出ないと PDF の用紙に届かない (dvipdfmx)"
+  - id: tabular-cell-two-lines
+    level: 3
+    title: "表の 1 つの欄だけが長くて表がはみ出すときは、 その欄の中を小さな tabular で 2 行に折る"
+  - id: tabular-cell-trailing-hspace
+    level: 3
+    title: "tabular セル末尾の裸 `\\hspace` は `\\unskip` に消される"
+  - id: filldraw-without-shape
+    level: 3
+    title: "形を書かない `\\filldraw` は何も描かない"
+  - id: tikz-grid-rect-vs-lines
+    level: 3
+    title: "TikZ の grid は「線の位置」と「切り取り矩形」が独立"
+  - id: multirow-vs-raisebox-centering
+    level: 3
+    title: "縦中央に置くのは `\\multirow` だけ、`\\raisebox` は持ち上げるだけ"
+  - id: jsclasses-mag-true-lengths
+    level: 2
+    title: "jsclasses の 10pt 以外は版面ごと拡大する — mm で書いた長さが黙って伸びる (`nomag*`)"
+  - id: back-of-book-notes
+    level: 2
+    title: "巻末に回したノートに、 元の章の番号と頁つきの参照を付ける (小口の色帯つき)"
+  - id: matplotlib-cjk-figure-embedding
+    level: 2
+    title: "matplotlib の CJK 入り図は PNG で取り込む (PDF は platex+dvipdfmx で描画だけ化ける)"
+  - id: tall-inline-math-line-collision
+    level: 2
+    title: "キャプションに背の高い行内数式を書かない (行送りを超えて上の行に食い込む)"
+  - id: wrapfig-no-display-math
+    level: 2
+    title: "wrapfigure の回り込み段落に別行立て数式を入れない (キャプションが本文に重なる)"
+  - id: pdf-line-collision-detection
+    level: 2
+    title: "PDF の行かぶりを機械検出する (PyMuPDF、目視に頼らない)"
+  - id: wrapfigure-page-carryover
+    level: 2
+    title: "wrapfigure が頁末に来ると次頁冒頭が短行で続く"
+  - id: wrapfig-caption-page-overflow-loss
+    level: 2
+    title: "wrapfigure の箱が頁末を越えると越えた分の caption は黙って消える"
+  - id: line-initial-punct-scan
+    level: 2
+    title: "行頭の句読点 (禁則違反) を機械 scan する — bold 境界で prebreakpenalty が不発になる"
+  - id: revtex-short-document
+    level: 2
+    title: "revtex4-2 で 1 頁の文書 (正誤表・短い note) を組むときの崩れ"
+  - id: bibliography-style
+    level: 2
+    title: "Bibliography スタイル"
+  - id: no-biblatex
+    level: 2
+    title: "biblatex は使わない（JHEP.bst と非互換）"
+  - id: japanese-authors-bibtex
+    level: 2
+    title: "日本語著者の BibTeX 処理"
+  - id: bibtex-name-doi-pitfalls
+    level: 2
+    title: "refs.bib の姓と DOI の落とし穴"
+  - id: refs-bib-verification
+    level: 2
+    title: "refs.bib 整備フロー（実物検証によるハルシネーション防止）"
+  - id: jhep-bst-notation
+    level: 2
+    title: "JHEP.bst 記法"
+  - id: jhep-future-citation
+    level: 2
+    title: "JHEP.bst で future citation（in preparation、タイトル未定）を引く"
+  - id: doi-table-from-registry
+    level: 2
+    title: "ノートの文献表は DOI の登録記録から作り、同じ記録で照合し直す"
+  - id: inspire-inbook-handbook-metadata
+    level: 2
+    title: "INSPIRE の `@inbook` (Springer handbook の章) は booktitle・editor が空 — CrossRef の book 記録で補う (2026-09-13)"
+  - id: hyperref-settings
+    level: 2
+    title: "hyperref 設定"
+  - id: pre-commit-hook
+    level: 2
+    title: "pre-commit hook（Unicode→LaTeX 自動修正）"
+  - id: pre-commit-hook-old-design-failure
+    level: 3
+    title: "旧設計の失敗 (2026-05-14)"
+  - id: fix-bib-unicode-codepoint-scope
+    level: 3
+    title: "fix-bib-unicode の codepoint scope (2026-05-15 確認)"
+  - id: vendored-latex-opt-out
+    level: 3
+    title: "vendored / verbatim LaTeX の opt-out (2026-06-09)"
+  - id: pre-commit-hook-design-motivation
+    level: 3
+    title: "設計動機 (2026-06-09)"
+  - id: japanese-horizontal-rule
+    level: 2
+    title: "日本語横罫線 (em-dash 系) の書き方 (2026-05-15、 個人層 LaTeX project 経験で導入)"
+  - id: document-reading
+    level: 2
+    title: "ドキュメント読み取り"
+  - id: grep-arxiv-source
+    level: 3
+    title: "論文を grep/検証する: PDF プログラム抽出より arXiv ソース (2026-06-09)"
+  - id: chat-position-reference
+    level: 2
+    title: "チャット本文での位置参照"
+  - id: latex-in-chat-codeblock
+    level: 2
+    title: "転記用の LaTeX ソースを渡すときは code block で（コピペ保全）"
+  - id: md-math-preview
+    level: 2
+    title: "数式入りの Markdown を人に見せるときは HTML にして browser で開く (右パネルは数式を描かない)"
+  - id: md-tex-source-and-copy
+    level: 2
+    title: "同じノートを Markdown と TeX の両方で持つときは、 片方を正本、 片方を写しにする"
+  - id: built-pdf-phone-sync
+    level: 2
+    title: "組んだ PDF の最新版を同期フォルダの 1 か所へ写す (携帯で常に読めるように)"
+  - id: gitignore
+    level: 2
+    title: ".gitignore"
+  - id: gitattributes-line-endings
+    level: 2
+    title: ".gitattributes（改行コード正規化）"
+  - id: japanese-title-wrap
+    level: 2
+    title: "日本語長 title の文節境界改行 (title_wrap pattern)"
+  - id: title-wrap-how-to-apply
+    level: 3
+    title: "How to apply"
+  - id: title-wrap-when-to-use
+    level: 3
+    title: "When to use"
+  - id: title-wrap-font-override
+    level: 3
+    title: "font override pattern (= long content への対応)"
+  - id: title-wrap-paragraph-break
+    level: 3
+    title: "paragraph break の保持 (= 段落区切り)"
+  - id: title-wrap-why
+    level: 3
+    title: "Why"
+  - id: latex-pdf-audit
+    level: 2
+    title: "LaTeX log と PDF の検査を再利用する"
+  - id: redistribute-old-pdf
+    level: 3
+    title: "昔組んだ PDF を配り直す前に、 未解決の参照が無いかを本文で見る"
+  - id: visual-verification-intensity
+    level: 3
+    title: "成果物の種類で視覚検査の強度を分ける"
+  - id: scratch-build-dir
+    level: 2
+    title: "別 dir で組版するとき、生成物を原稿 dir へ symlink しない"
+  - id: pdf-visual-verification
+    level: 2
+    title: "図・組版を対象とする PDF 視覚検証"
+  - id: pdf-visual-verification-traps
+    level: 3
+    title: "典型 trap (= 2026-05-18 研究ノート編集で連続再発)"
+  - id: pdf-visual-verification-why
+    level: 3
+    title: "Why"
+  - id: fixed-width-box-overflow
+    level: 2
+    title: "固定幅の箱に可変幅テキストを入れない (= 枠線が壊れる)"
+  - id: infographic-design
+    level: 2
+    title: "編集向け infographic / poster / 1 枚 figure の design 規約"
+  - id: infographic-light-theme-print
+    level: 3
+    title: "印刷前提なら light theme + cream paper"
+  - id: infographic-libertinus-font
+    level: 3
+    title: "Libertinus フォントファミリー (= 数式統一の選択肢)"
+  - id: infographic-hiragino-libertinus
+    level: 3
+    title: "macOS Hiragino と Libertinus の組合せ"
+  - id: infographic-math-japanese-align
+    level: 3
+    title: "数式 + 日本語を mix する align 環境"
+  - id: infographic-print-a4
+    level: 3
+    title: "print fidelity を A4 強制したい場合"
+  - id: texshop-lualatex-and-external-builds
+    level: 2
+    title: "TeXShop で LuaLaTeX 前提の source を開く・外部の build と共存させる"
+  - id: write-while-author-has-it-open
+    level: 2
+    title: "著者が editor で開いている原稿に書き込む"
+  - id: texshop-engines
+    level: 2
+    title: "<a id=\"texshop-uplatex-engine\"></a>TeXShop の engine で原稿を組む (latexmk-lualatex / uplatex)"
+  - id: lualatex-compat
+    level: 2
+    title: "LuaLaTeX で組める source にする・保つ"
+  - id: enumerate-vs-enumitem-option-syntax
+    level: 2
+    title: "`enumerate` package の下で `[label=(\\roman*)]` は組めない"
+  - id: latexdiff-ulem-option-clash
+    level: 2
+    title: "latexdiff: 本文が `ulem` を option なしで読むと差分 markup が silent に壊れる (2026-08-21)"
+  - id: abbreviation-first-occurrence
+    level: 2
+    title: "略語は本文で長形が初めて出る箇所で定義する (2026-09-11)"
+  - id: notation-first-use
+    level: 2
+    title: "記法は初めて使う箇所で説明するか、 そこから定義の式を指す (2026-09-13)"
+  - id: author-notes-as-comments
+    level: 2
+    title: "著者への注記は `%` comment + 見える印で置く (pdflatex は日本語の脚注を通さない)"
+  - id: symbol-rename
+    legacy: "1"
+    level: 2
+    title: "1 文字記号の一括改名 (y→x、 r→\\zeta_x の類) の手順 (2026-09)"
+  - id: braket-set-ket
+    level: 2
+    title: "braket.sty の `\\Set{…}` の中で `\\ket` / `\\bra` が壊れる — `\\vert` で再定義する"
+  - id: smash-parbox-into-ruled-box
+    level: 2
+    title: "表の空行を積んだ記入欄に、 枠の大きさを変えずに文章を流し込む"

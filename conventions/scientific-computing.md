@@ -1,0 +1,889 @@
+<!-- doc-meta
+when: 数値解析・科学計算 code を書くとき、閉形式の成立範囲や研究スクリプトの正本・索引を整えるとき + 格子で評価した曲線から可視度・コントラストを報告するとき・報告値と独立実装が食い違ったとき (#sampled-extremum-metrics) + 打ち切りを変えて数値の収束を確かめるとき・値が動かなくなったのを収束と書く前・打ち切りに依る量の極限からの補正を書く前 (#truncation-dependence) + 全体と内訳を別の経路で計算して表に並べるとき・有限差分で微分のノルムを取るとき (#table-parts-sum-check) + 格子で時間発展させた波束からモーメントを足すとき (#grid-evolution-moments) + 非摂動の計算と 1 次の式を結合を小さくして比べるとき (#coupling-to-zero-intercept) + 狭い分布に重みをかけた量を展開するとき (#narrow-reweighting-shift) + 出力の数を記録 (note) に写したとき・写した数を出力と突き合わせるとき (#note-numbers-against-outputs) + 関数を表で引く (逆引きも) とき・切る・入れ替わる成分のある関数を表にするとき (#table-corners-as-nodes) + (点の数) × (求積の点) の配列を作るとき・解析が数十秒走ってから 137 で止まったとき (#chunk-wide-broadcasts)
+category: research-domain
+summary: 数値解析 gotchas (scale-dependent default、複素 null、固定変数、比較精度、基底不変検査の死角、閉形式の関数クラス、研究スクリプト索引等、科学計算リポ共通)
+-->
+# Scientific computing conventions
+
+数値解析を伴うコードで silently 壊れる典型パターンと防止策を集約する。対象: 物理シミュレーション、 Bayesian fit pipeline、 場理論計算、 数値積分・ODE integrator など、 任意の科学計算系リポ (= public 例: [sogebu/LorentzArena](https://github.com/sogebu/LorentzArena))。
+
+---
+
+## <a id="scale-dependent-default"></a>1. Scale-dependent default は unit system 変更で silently 壊れる
+
+### 問題
+
+ある unit system (例: SI 秒、秒²) を想定して書かれた numerical integration / grid / bracket の default が、同じコードを別の unit system (例: GeV、GeV²) で使うと silently 壊れる。型エラーも数値エラーも出ず、grid が粗すぎ or 細かすぎて posterior / integral / fit が歪んだ値を返す。
+
+**誤検出リスク**: 歪んだ返値が先行研究の値に**偶然**近いと、「よし一致した」と誤解釈する可能性がある。これが一番危険。
+
+### 実例 (2026-04-20、 Hierarchical Bayes mean estimation pipeline)
+
+ある Bayesian fit pipeline の `HierarchicalBayesMean` 関数で、 `TauSqMax` (= τ² の積分上端) の default が固定値 `1000` (= 中性子寿命系の s² 単位を想定)。同じコードを単位が桁で違う量 (GeV² 単位) の解析に port した際、 10 万倍オーバーで τ² grid 50 点がほぼ全域で integrand ≈ 0 になり、 HB(α=0) の値が既存の公式値と小数第 3 位まで「一致」したように見えた。実際の正しい値は誤差を超えてずれていた。 詳細 RCA は該当リポの `DESIGN.md` に記載。
+
+### 実例 (2026-05-25、 同 pipeline で MuRange propagation case = sibling defect 約 5 週遅延発見)
+
+同じ `HierarchicalBayesMean` 関数で **別の scale-blind default** `MuRange` (= μ 積分の bracket) の default が固定 `{Min[xs] - 10, Max[xs] + 10}` (= 中性子寿命系の s 単位、 spread ~5 を想定した margin 10)。 無次元の量 (data spread が 0.1 程度) に port した際、 margin 10 が data spread の **100 倍以上過大** → μ grid 400 点で posterior peak を 1-2 点しか拾えず Trapz discretization で HB SE が **数十 % inflated** + NIntegrate::precw 多発。 2026-04-20 の fix から 2026-05-25 の発見まで約 5 週 (35 日)、 この default は残ったままで、 その間に port した先で文書化された値は under-resolved な wrong value だった。
+
+**根本因 (= 2026-04-20 fix の narrow scope)**: 2026-04-20 の §1 fix は flagged された `TauSqMax` のみ scale-adaptive 化したが、 同 file 同 function の **同形式 default (= `MuRange`)** を sweep しなかった。 同 trait family の sibling defect を残置 → 約 5 週後に別 unit system (= 無次元の量) で symptom 顕在化。
+
+### 実例 (2026-06-01、 scale-adaptive default 自体が「非 robust 統計量 + outlier」で破綻 = 3 例目、 §1 framing を 2 方向に拡張)
+
+2026-04-20 fix で `TauSqMax` (= τ² 積分上端) は **scale-adaptive 化されていた** (= `Max[(10·maxσ)², (5·data spread)²]`) のに、 ある heterogeneous dataset (= 同 unit 内、 数十点、 σ の range が 2 桁近く、 他より 1 桁以上大きい σ の outlier 1 点を含む) でまた silently 破綻。 `10·maxσ` から決まる `TauSqMax` が真の τ² integrand peak の **数万倍**に膨張、 各 μ 点の τ² 積分の peak-finder coarse grid (= **linear** 50 点) の spacing が真の peak 幅を大きく踏み越え、 quad が peak を盲目積分で取り逃して `res≈0 → density = -∞ → 0` に truncate → posterior の片側が完全欠落 (= 共著者が分布の片側の不自然な途切れに気付いて発見、 修正前は wrong な単峰として report されていた)。
+
+この 3 例目は §1 の従来 framing (= 「unit system 変更で破綻」) を **2 方向に拡張**する:
+
+1. **trigger は unit 変更ではなく単一 outlier**: 同一 unit system 内でも、 scale-adaptive default が `Max[]` / `Min[]` 系の **非 robust 統計量**を使っていると、 たった 1 点の outlier がそれを膨張させて破綻する。 **「scale-adaptive 化すれば安全」 (= 2026-04-20 防止策) は、 中身が非 robust 統計量だと不十分**。
+2. **根治は default の robust 化ではなく downstream consumer の scale-free 化**: bound を robust 化 (= `Max` → median 等) しても `(5·data spread)²` 項が依然 peak の数千倍残り不十分。 真の根治は **bound を消費する側 (= 積分 peak-finder grid) を geometric (log) 間隔にする**こと — そうすれば bound が何桁であれ任意 scale の peak を解像でき、 bound の exact 値に依存しなくなる。 **consumer の scale-invariance が bound の fragility を無効化する** (= この grid-only fix は bound 非変更ゆえ既存の別 unit 検証値を byte-exact で保つ、 という追加利点もある)。 詳細 RCA は該当リポの `DESIGN.md`。
+
+### 防止策
+
+**code 側**:
+- Numerical hyperparameter (integration upper bound, grid bracket, bin size, step size 等) の default を**定数で書かない**。`xs`, `sigmas`, data range から計算する scale-adaptive な式にする
+- どうしても定数を置くなら、関数先頭で data scale を assert して範囲外なら fail loudly にする
+- **sibling sweep at fix time** (= 2026-05-25 RCA 追加、 関連: [`debugging-discipline.md` sibling-audit-on-violation](debugging-discipline.md#sibling-audit-on-violation) の fix-time sibling sweep): scale-blind default を 1 件 fix する際、 **同 file / 同 function / 同 関数族**を grep で sweep して `Max[xs] - 10` 系 (= 中性子寿命用) や `1000` 系 (= s² 想定) の literal を全 enumerate、 同 fix を全 sibling に同時適用する。 「flagged された 1 件を fix」 で止めると残存 sibling が将来 silently symptom を出す (= 上 2026-05-25 case)
+- **scale-adaptive default が非 robust 統計量を使うと outlier で破綻** (= 2026-06-01 RCA 追加): `Max[σ]` / `Min[]` ベースの adaptive 式は 1 点の outlier がそれを数桁膨張させて破綻しうる (= scale-adaptive 化は「定数を避ける」 の必要条件だが十分条件ではない)。 対処の優先順位: (1) **bound を消費する grid / integrator を scale-free にする** (= geometric/log 間隔、 適応分割) — bound の exact 値に依存しなくなり最も根治的 (+ bound 非変更ゆえ既存検証値を保てる)、 (2) それが無理なら bound 自体に robust 統計量 (median / percentile) を使う、 (3) どちらも無理なら data scale assert で fail loudly。 ただし robust 統計量だけでは `(5·data spread)²` のような second term が残ると不十分なことがある (= 上 2026-06-01 case) ので (1) を先に検討
+
+**discipline 側**:
+
+新しい物理量 / 新しい unit system にコードを port するとき、**同じ量を 2 つ以上の独立経路で計算して値が一致することを verify する**。経路は例えば:
+
+- `run_<quantity>_check.wl` (simple single eval at α=0)
+- `run_<quantity>_alpha_scan.wl` の α=0 point
+
+同じ data、同じ likelihood、同じ α=0 の周辺化なので μ/SE は一致すべき。不一致 = grid / range / default が data scale に合っていない。修正するまで downstream の解析 (density plot、ロバスト性比較等) を信じない。
+
+**check.wl と alpha_scan.wl の MuRange convention** (= 2026-05-25 追加): 同 quantity の 2 script が **異なる integration grid** を使うと SE が drift する (= 上 MuRange propagation case)。 narrow posterior (= spread の小さい tight 分布) では integration grid resolution が Trapz error を dominate、 default muRange は不十分。 解決策: check.wl の HB call にも alpha_scan.wl と同じ explicit `MuRange` + `GridPoints` (= 600 以上) を pass する (= 2 script が同 grid で同 SE を produce する設計)。 「check は quick simple eval、 alpha_scan は accurate scan」 という責務分離は **数値 accuracy には適用できない** (= 同じ HB call は同じ value を返すべき)。
+
+### Anti-pattern
+
+- 「3 手法走らせたら答えが近かった、OK」→ 3 手法全部が同じ default を共有しているなら、同じバグを 3 回引き当てているだけ。独立経路にならない
+- 「先行研究と一致したから合ってる」→ 偶然の一致を排除できない。**同じコード**の別経路で再現することが必要
+
+---
+
+## <a id="explicit-integrator-instability"></a>2. Explicit integrator は dτ 安定境界を超えると silently 発散、 implicit Euler / 解析解で根治
+
+### 問題
+
+**explicit** integrator は ODE の linearization 固有値で安定境界を持つ。 friction-like 項 `du/dτ = -k u` の explicit Euler は
+
+```
+u_new = u_old + (-k u_old) Δ = u_old (1 - k Δ)
+```
+
+の係数 `(1 - kΔ)` が `|· | < 1` のときのみ stable。 `Δ > 2/k` で sign flip + amplitude amplification、 1 step で `u_new = -O(kΔ) × u_old` の桁外れ値、 続く積分で全 state が runaway。 型エラー無し、 `NaN` 無し、 silently 数値発散して realistic な物理範囲を外れた値に飛ぶ。
+
+caller 側で大 dτ が発生する経路は実環境で必ず存在する:
+- ブラウザ tab の background suspend からの wake (= 数時間〜数日 dτ)
+- main thread lag spike (= GC pause、 debugger break、 OS schedule pre-emption、 数秒 dτ)
+- 物理 sim のテストで意図的に大 dτ を渡す (= 終状態だけ確認したい場合)
+
+**重要**: 物理的には連続時間の friction `du/dτ = -ku` は **常に安定** (= 解 `u(τ) = u₀ exp(-kτ)` で 0 に指数減衰)、 発散は **explicit Euler という数値計算法の選択による artifact** であり friction という現象の性質ではない。 つまり 「dτ > 2/k で発散」 は 「explicit Euler の限界」 であり、 別の integrator (= implicit Euler / 解析解) を選べば任意 dτ で安定。
+
+### 実例 (LorentzArena Bug 14、 2026-05-06)
+
+スマホ Brave で 12.5h background suspend → wake 直後の gameLoop が `dτ = 45000 sec` 1 tick で fire。 friction `k = 0.5` で `1 - kΔ = -22499`、 friction terminal velocity `γ_max = 1.886` で bounded のはずの `pos.t` が 1 tick で **20.37M sec (= 235 日相当)** に runaway。 詳細: [LorentzArena Bug 14 plan](https://github.com/sogebu/LorentzArena/blob/main/2%2B1/plans/2026-05-06-bug14-global-active-time.md) §2.1。
+
+### 防止策の階層 (= 上から順に preferred、 fundamental → workaround)
+
+**(A) Implicit Euler** (= 推奨、 root level fix):
+
+```typescript
+// 連続時間 du/dτ = a - k × u を semi-implicit Euler で解く:
+// newU = u + (a - k × newU) × Δ
+// → newU (1 + kΔ) = u + a × Δ
+// → newU = (u + a × Δ) / (1 + kΔ)
+const newU = (u + a * dTau) / (1 + k * dTau);
+```
+
+- closed-form 1 step、 O(1) 計算
+- **任意 dτ で unconditionally 安定** (= 分母 ≥ 1、 オーバーフロー無し)
+- `Δ → ∞` で `newU → 0` (= friction 無し thrust の場合) または `newU → a/k` (= terminal balance、 物理正解と一致)
+- 線形 ODE は通常 closed-form で解ける、 非線形でも Newton iteration で対応可
+
+LorentzArena では `evolvePhaseSpace` の `frictionCoefficient` 引数経由で friction を semi-implicit に積分 (= [`physics/mechanics.ts`](https://github.com/sogebu/LorentzArena/blob/main/2%2B1/src/physics/mechanics.ts)、 thrust は explicit / friction だけ implicit、 Lorentz boost effect は γ で吸収)。
+
+**(B) Analytic** (= 系が単純なら最高精度):
+
+friction-only `du/dτ = -ku` の厳密解 `u(τ) = u₀ × exp(-kτ)`。 thrust が定数なら `u(τ) = u_inf + (u₀ - u_inf) × exp(-kτ)` (= `u_inf = a/k` terminal balance)。 任意 dτ で exact、 浮動小数点誤差のみ。
+
+但し pos / x 等の積分が closed-form でない (= elliptic 等) 場合は 数値積分が必要、 そのとき implicit Euler の方が pragmatic に。
+
+**(C) Substep with explicit Euler** (= workaround、 implicit / analytic が難しい場合の fallback):
+
+```typescript
+// Stable bound: |1 - kΔ| < 1 ⟺ Δ < 2/k. Use 20-40x safety factor.
+const MAX_STABLE_SUB_DTAU = (2 / k) / 40;
+const N = Math.max(1, Math.ceil(dTau / MAX_STABLE_SUB_DTAU));
+const subDTau = dTau / N;
+let state = initial;
+for (let i = 0; i < N; i++) {
+  const force = computeForce(state.u);  // u-dependent force per substep
+  state = explicitIntegrator(state, force, subDTau);
+}
+```
+
+- explicit Euler を温存して dτ を分割する **数値 workaround**
+- per-substep で u-dependent な力を再計算 (= constant force のみなら 1-step で OK)
+- 通常 dτ で N=1 (no overhead)、 異常 dτ で N=線形 (= 1h dτ で N=36000 ≈ 2ms、 24h で N=864000 ≈ 50ms)
+- N に **cap を設けず素直に integrate** (= cap は scientific correctness を犠牲、 線形コストは安価)
+
+**(C) を選ぶ trigger**: implicit Euler の数式 derivation が複雑 (= 強い非線形性 / 多自由度 coupling)、 または既存 integrator の signature 変更コストが高い。 (A) / (B) が closed-form で書ける線形系なら (C) は採らない。
+
+**選択基準まとめ**:
+
+| 系の性質 | 推奨 |
+|---|---|
+| 線形 ODE (= friction、 spring、 damped oscillator 等) | **(A) implicit Euler** (= closed-form solve、 unconditionally stable) |
+| 厳密解が elementary functions で書ける | **(B) analytic** (= exact、 数値誤差 floating-point のみ) |
+| 強い非線形 / 多自由度 coupling で implicit が intractable | **(C) substep + explicit** |
+
+LorentzArena Bug 14 では当初 (C) substep を採用したが、 user 「原理的におかしくない?」 push back を契機に (A) implicit Euler に refactor (= friction が線形項なので closed-form solve 可能、 substep は workaround だった)。 詳細経緯: [LorentzArena 5/6 plan §6.5](https://github.com/sogebu/LorentzArena/blob/main/2%2B1/plans/2026-05-06-bug14-global-active-time.md) + [`debugging-discipline.md` fix-verification-3-axis](debugging-discipline.md#fix-verification-3-axis) V1/V3 reflection。
+
+**discipline 側**: physics simulation で「caller がいつでも well-bounded な dτ を渡す」 と仮定しない。 lag spike / browser suspend / debugger break で dτ が秒〜時間オーダーになる経路は実環境で必ず発生する。 integrator は **caller-agnostic に任意 dτ で stable** であるべき、 そのための first-line tool は implicit Euler、 substep は fallback。
+
+### Anti-pattern (= 絆創膏 path)
+
+- **「dτ を caller 側で cap」**: 安定境界の上限 truncate は L2 timing 層の絆創膏。 cap を超えた経路で爆発、 cap 値の tuning が増える、 lag spike で legitimate な大 dτ を truncate して挙動が change する。 cap は「数値解析の正攻法」 ではなく「症状を覆い隠す」
+- **「visibilitychange listener で reset」**: L3 architecture 層の絆創膏。 listener が漏れた経路 / fire しない browser で爆発、 listener が乱立して責務が分散
+- **「`performance.now()` に切替で dτ 自体を小さくする」**: clock semantic の側面変更で逃げる。 browser-specific な suspend-freeze 挙動 (= mobile はする / desktop はしない) に依存、 spec 不保証、 別経路で爆発する
+- **「explicit Euler を温存したまま substep で吸収」**: (C) は valid な fallback だが、 線形系では (A) implicit Euler の方が cleaner で `MAX_STABLE_SUB_DTAU` 等の safety margin constant が不要。 まず (A) を考える、 (C) は (A)/(B) が intractable な場合のみ。
+- **「3 手法 (cap + listener + clock 切替) を全部やる、 defense-in-depth」**: 全部 L1-L3 の症状経路 patches、 真の安定性 (= integrator 自身が任意 dτ で正解を出す) は治っていない。 次の経路で再発する
+
+### 関連
+
+- LorentzArena Bug 14 完全治療 plan: [`plans/2026-05-06-bug14-global-active-time.md`](https://github.com/sogebu/LorentzArena/blob/main/2%2B1/plans/2026-05-06-bug14-global-active-time.md) §2.1 + §6.1-6.5 (= 却下した代替案 + implicit Euler refactor 経緯)
+- 数値解析教科書: Numerical Recipes §16.6 「Stiff Sets and Multistep Methods」、 implicit method / BDF / step size adaptation 等の古典的扱い
+- 関連メタ規律: [`debugging-discipline.md` fix-verification-3-axis](debugging-discipline.md#fix-verification-3-axis) (= V1 numeric trace で代替 algorithm を網羅したか check、 V3 algorithm enumeration の domain-specific 適用が本 §)
+
+---
+
+## <a id="nintegrate-workingprecision"></a>3. NIntegrate WorkingPrecision propagation: 入力配列の precision を inherit させないと `NIntegrate::precw` 大量発火
+
+### 問題
+
+Mathematica の `NIntegrate[expr, {v, breakpts}, WorkingPrecision -> wp]` は integrand `expr` の precision が `wp` 以上であることを期待する。 ところが integrand が依存する pre-NIntegrate 配列 (= integration grid を locate するための `vGrid`、 breakpoint list、 default 上端 `vMax` 等) が **MachinePrecision で計算されていた** 場合、 integrand 評価結果は wp に boost されず MachinePrecision (~16 digits) で返る → NIntegrate が
+
+```
+NIntegrate::precw: The precision of the argument function (E ...) is less than WorkingPrecision (80.).
+```
+
+を毎 mu grid 点で発火 (= 数百回)。 result 値は MachinePrecision 範囲では正しいが、 wp=80 の意図とは異なる。
+
+### 典型 source (= literal float literal)
+
+```mathematica
+(* これらは MachinePrecision を返す *)
+tauSqMax = N[Max[(10. Max[ss])^2, ...]]    (* 10. が MachinePrecision *)
+vGrid = N[Subdivide[0., tauSqMax, 50]]     (* 0. が MachinePrecision *)
+breakpts = N @ Select[{0, vPeak/10, ...}, 0 <= # <= tauSqMax &]  (* N が default で MachinePrecision *)
+```
+
+これらが NIntegrate の integrand 経由に渡ると、 上 warning が大量発生。
+
+### 解決策: 全 pre-NIntegrate 配列を wp に SetPrecision
+
+```mathematica
+(* wp != MachinePrecision の場合のみ精度 boost *)
+tauSqMax = Max[(10 Max[ss])^2, ...];   (* 10 = exact Integer、 ss が wp なら結果は wp *)
+tauSqMax = If[wp === MachinePrecision, N[tauSqMax], SetPrecision[tauSqMax, wp]];
+vGrid = Subdivide[0, tauSqMax, 50];     (* 0 = exact Integer *)
+vGrid = If[wp === MachinePrecision, N[vGrid], SetPrecision[vGrid, wp]];
+breakpts = Sort @ DeleteDuplicates @ Select[{...}, 0 <= # <= tauSqMax &];
+breakpts = If[wp === MachinePrecision, N[breakpts], SetPrecision[breakpts, wp]];
+```
+
+literal は `10.` ではなく `10` (= exact Integer) を使い、 wp != MachinePrecision なら最後に `SetPrecision[..., wp]`。 これで integrand 全体が wp で評価され NIntegrate が文句を言わない。
+
+### benign warning の限定 Quiet (= 残 precw への対処)
+
+posterior peak から離れた extreme mu (= muGrid の端点) では、 integrand exponent が **huge negative** (例 -1500) になり offset subtraction (`integrand - offset` で `offset = max(integrand)`) で cancellation 起こる。 `Exp[-1500 + 1500 + ε]` の ε が MachinePrecision に落ちて NIntegrate::precw が依然発火する。 これは結果が ~Exp[-large] ≈ 0 で mu posterior への寄与が negligible のため **benign** — Quiet で限定 suppress 可:
+
+```mathematica
+res = Quiet[
+  NIntegrate[..., WorkingPrecision -> wp, ...],
+  {NIntegrate::precw}   (* この warning だけ suppress、 他 warning は通常通り出る *)
+];
+```
+
+Quiet の第 2 引数で **特定の message symbol だけ** を suppress (= 全 warning を握り潰す `Quiet[expr]` は anti-pattern)。 source 直読で benign と確認した warning のみ Quiet 対象に。
+
+### Anti-pattern
+
+- **全 `Quiet[expr]`** (= 第 2 引数なし): 既知 benign 以外の warning も握り潰す。 silent な numerical error の見落としに直結
+- **literal `10.` `5.` `0.` を pre-NIntegrate 配列に使う**: MachinePrecision 強制で wp=80 が無意味化、 warning 大量発火
+- **`NIntegrate::precw` を「benign だから無視」 と source 確認なしで dismiss**: 真に benign か (= extreme point での cancellation) か実際は数値結果汚染 (= integrand 中の関数が wp 失う) かは source 直読が必要
+
+### 実例 (2026-05-25、 Hierarchical Bayes mean estimation pipeline 拡張)
+
+§1 と同 pipeline で、 `HierarchicalBayesMean` の `MuRange` scale-adaptive 化に伴い `tauSqMax` / `vGrid` / `breakpts` の precision を `wp` に inherit させる修正を実施。 同時に extreme mu (= muRange 端点) での残 precw を `Quiet[..., {NIntegrate::precw}]` で限定 suppress (= 結果が negligible な mu 点での benign cancellation を source 直読で確認後)。 詳細 RCA は該当リポの `DESIGN.md §10 LESSON propagation` 参照。
+
+### 関連
+
+- 上 §1 (= scale-blind default): 同 commit / 同 pipeline での 2 つの修正、 root cause family が「scale-adaptive default + precision propagation」 で対をなす
+- [`wolfram-scripting.md`](wolfram-scripting.md): Mathematica の tool semantics gotcha 集 (= 本 § は数値 silent failure 側、 wolfram-scripting.md は tool semantics 側で scope 分離)
+
+---
+
+## <a id="porting-metric-divergence"></a>4. 言語移植 verification: 副次 metric vs main metric の divergence は edge-of-stability boundary として documented で済む
+
+### 問題
+
+同一アルゴリズムを言語 A → 言語 B に移植した時、 implementation の **数値結果** が両者で一致するか? の verification で、 **複数 metric** (= main result + 副次 metric) を取って初めて divergence の **意味** が判明する。
+
+**典型 case** (= 適応 quadrature を含む Bayes posterior の言語間移植、 source / target ともに高水準数値ライブラリ):
+- main metric = mu posterior (= per-μ 適応 quadrature + trapezoidal integral)
+- 副次 metric = ハイパーパラメータ posterior moments (= analytic μ-marginalization → 1D quadrature)
+- main metric が一部 parameter 領域 (= 極端な hyperparameter 値) で divergent (= 異 implementation 間で μ Δ が SE の数倍 order に達する)
+- **同 parameter 領域で副次 metric は byte exact 一致** (= 同 grid + 同 formula + 同 trapezoidal、 implementations 間で formula identical)
+
+→ divergence は **共通 formula** (= analytic μ-marginal) の implementation 差ではなく、 **adaptive quadrature 戦略差** (= subdivision 選択や局所最適到達点の差) 由来。 既知の edge-of-stability behavior と整合。
+
+### 含意 (= 移植 verify の design pattern)
+
+副次 metric を併せて取ると、 divergence の **localizability** が向上:
+- 全 metric divergent → 形式 / algorithm の根本差 = bug 候補
+- 副次 byte exact + main divergent → adaptive 戦略 / 局所最適 差 = boundary-of-stability documented 化で済む (= bug ではない、 implementation 戦略の選択)
+- main exact + 副次 divergent → 副次 computation pipeline (= grid resolution / normalization) の差 = 別 issue
+
+### 実例 narrative
+
+該当リポの DESIGN.md (= 「α ≤ X で実用」 boundary 注記) で documented:
+- ある dataset で Python (scipy.integrate.quad) ≡ Mathematica (NIntegrate) が高 hyperparameter 領域で main metric (μ/SE) 不一致
+- ただし副次 metric (= analytic μ-marginal path) は byte exact
+- → 「X 以下で実用」 boundary は **scale-dependent + implementation-dependent**、 該当領域の値を引用する場合は implementation 名 明記推奨
+
+### How to apply
+
+- 移植 verify で **2 つ以上の独立 metric** を取る (= 同 algorithm の異なる aspect を probe)
+- main metric divergent でも副次 byte exact なら implementation 戦略差として documented で良し、 強制的に一致させる必要なし (= adaptive quad は inherent に不一致リスクあり)
+- documented する際は「副次 metric は byte exact = 共通 formula identical」 を明記 (= reader が 「これは bug か?」 と疑う余地を消す)
+- main divergent + 副次 divergent なら **bug 候補**、 source 直読 / regression test 追加で原因特定
+
+### 関連
+
+- DESIGN.md §10 LESSON (= scale-blind default、 本 file §1) の言語移植 verify domain への拡張
+- 副次 metric を取らないと「両 implementations が正しい / どちらかが bug」 の判定不能、 sweep mode で「✓ pass」 と書く前に副次取得義務 (= `debugging-discipline.md` sibling sweep の言語移植 verify domain への応用)
+
+---
+
+## <a id="archive-cutover-precondition"></a>5. archive / cutover の precondition: smoke (= exit 0) ではなく sample assertion (= 1 件以上 byte exact verify)
+
+### 問題
+
+migration / refactor で 旧 implementation を archive / removal する **不可逆 cutover** を実行する前に「新 implementation がちゃんと動く」 と判定するゲートを通すが、 「ちゃんと動く」 の定義が **`exit 0` のみ** (= smoke) だと:
+- script は走るが output が wrong number でも検出されない
+- regression test が無い領域は完全 unknown
+- 「全 script 走った ✓」 = cell 埋め assertion (= sweep の goal alignment 違反、 「安価な操作で expensive 操作を bypass」)
+
+### honest precondition (= 3 layer の verify を pass してから cutover)
+
+**Layer 1**: smoke (= 全 entry point が `exit 0`)
+- 必要だが不十分、 false sense of done を生む
+
+**Layer 2**: sample output assertion (= 各 entry point の output から **1 件以上** documented value と byte-or-percent exact verify)
+- 「該当 documented value どれか 1 つを assert」 で良い、 全 documented value を assert するのは scope 巨大
+- script-level regression test (= pytest 等) として fixed-time に embed すると future drift も catch
+
+**Layer 3**: cross-implementation diff (= 旧 implementation も別途実行、 stdout / output file で 3-way diff)
+- 「旧 vs 新 が独立に同 documented value を produce する」 verify
+- 旧 implementation が依然動く環境 (= 旧 binary / 旧 language runtime) が必要
+
+### 実例 narrative
+
+ある言語移植プロジェクトの archive cutover (= 旧 source file を archive sub-dir に移動) の precondition として:
+- Layer 1: N script × 主要 datasets 全 `exit 0` (= 数十回 invocation 確認)
+- Layer 2: regression test 数十件 pass (= 全 dataset × method の documented numeric byte-or-percent exact)
+- Layer 3: 旧 implementation を archive 後 path から再実行、 sample documented value が新 implementation と byte exact 再現
+- 3 layer 全 pass を確認してから不可逆操作 (= git mv) 実行
+
+### How to apply
+
+- 不可逆 cutover (= file removal / archive move / branch deletion / data migration) の前に **3 layer の verify** を明示的に通す
+- 「smoke のみ pass」 で cutover すると後で「あの数値 wrong だった」 が発覚した時 rollback コスト高 (= archive されたら 旧 implementation 探しに行く必要、 documented value drift の origin tracing 困難)
+- 「ちゃんと動く」 をユーザーから言われた時 / 自分で判断する時、 「**3 layer どこまで pass か?**」 を chat 本文で明示 (= silent assumption 防止)
+- regression test 体制が無い領域 (= 新規 migration の初期段階) では Layer 2 ↔ Layer 3 を組み合わせる (= 旧 implementation で sample run + 新 implementation で同 case run + diff、 = manual byte-or-percent exact verify)
+
+### 関連
+
+- `debugging-discipline.md` の sibling sweep + fix verification (= 同 trait の異 framing)
+- sweep の goal alignment (= error 発見であって report 生産ではない) の cutover domain 応用
+
+---
+
+## <a id="sympy-verify-transcript"></a>6. Visual source (= 写真 / scan / PDF) からの数式 transcript の hallucination は sympy symbolic verify で expose する
+
+### 問題
+
+板書写真 / 手書きノート scan / PDF 図中の式 を LLM (= Claude / GPT) が visual reading で transcript し、 そのまま LaTeX / Markdown / notes に書き起こすと、 **小さな係数・記号・添字の hallucination が紛れ込む確率が高い**。 typical pattern:
+
+- 「{x/σ + ∂_x} φ_0 = 0」 を「{x/σ + σ ∂_x} φ_0 = 0」 と σ を勝手に補う (= 「次元的に整合する係数を補完しよう」 という generative bias)
+- 行列の (i,j) 成分を入れ替える
+- 符号 (= +/-) を読み間違える、 dagger / bar / hat 記号を落とす
+- 添字の上下を入れ替える (= covariant / contravariant 混在)
+- 板書中の **斜め筆記** (= ²) や **薄い chalk** (= 上付き dot) を見落とす
+
+これらは「visual reading の不確実性」 が origin で、 transcript 単独では検出不可能 (= source と transcript の比較しか方法がない)。 LLM 自身も「自信を持って書いた」 感覚で transcript するため、 self-review (= 同 LLM が読み直す) でも素通りする。
+
+### 防止策: 数式 transcript の後、 必ず sympy / numpy / wolframscript で 1 path symbolic verify
+
+transcript した式が「方程式」 / 「恒等式」 / 「expectation value」 等の **algebra で検証可能な claim** を含む場合、 commit 後 sweep の一環として sympy / numpy で symbolic verify を 1 path 試行する。 例:
+
+```python
+import sympy as sp
+x, sigma, N = sp.symbols('x sigma N', positive=True, real=True)
+phi0 = N * sp.exp(-x**2 / (2*sigma))
+lhs = (x/sigma) * phi0 + sp.diff(phi0, x)  # ← transcript の eq の左辺
+print(sp.simplify(lhs))  # 期待: 0
+```
+
+`sp.simplify` が 0 を返せば transcript が algebraic に整合、 0 でなければ hallucination 候補。 数 sec で expose できる。
+
+numeric verify は補完手段 (= sympy が解けない場合):
+```python
+import math
+sigma = 1.7  # arbitrary positive
+N2 = 1 / math.sqrt(math.pi * sigma)
+integral_xsq = (math.sqrt(math.pi) / 2) * sigma**1.5
+expectation = N2 * integral_xsq
+assert abs(expectation - sigma/2) < 1e-9, "MISMATCH"
+```
+
+### How to apply
+
+1. 数式を含む transcript を commit したら、 sweep の中で「algebra で検証可能な claim」 を列挙
+2. sympy 1-liner で symbolic verify、 0 / true / 期待値 一致 を expose
+3. mismatch を発見したら **fixup commit** で source を読み直して訂正 (= 「源 transcript の re-read」 + 「sympy verify pass」 の組で確定)
+4. 「fix できた」 を symbolic な 0 / true return で expose、 chat 上「✓ pass」 と書くだけで終わらせない (= [`debugging-discipline.md` fix-verification-3-axis](debugging-discipline.md#fix-verification-3-axis) と整合)
+
+### 反例 (= verify が無効な場面)
+
+- transcript が **数式でない pure prose** (= 物理的解釈・歴史的経緯・図解 caption): sympy verify NA、 source と 1 文ずつ照合する手作業 path に戻る
+- transcript の式が **解析的に閉じない** (= 数値計算でしか比較できない場合): numeric verify で補完、 但し initial value 依存があれば全 case sweep 不可
+- **新規 derivation の transcript** (= 「板書ではこう導出した」 を再現する場合): sympy で derivation step 全 chain を verify するのは scope 大、 代わりに「最終結果が source と一致するか」 のみ verify
+
+### 関連事故
+
+- **2026-05-26 ある講義運営 repo の QM §4**: 板書写真から transcript した「{x/σ + ∂_x} φ_0 = 0」 を「{x/σ + σ ∂_x} φ_0 = 0」 と σ を勝手に補って notes.md / SESSION.md に書き、 commit `1e7d097`。 直後の 4 軸 sweep (= 多 commit 連打圧力 sweep) で sympy で `sp.simplify({x/σ + σ ∂_x} φ_0)` を試行 → (x/σ - x) φ_0 ≠ 0 (σ=1 以外) と expose、 fixup commit `603366b` で訂正。 sympy verify 無しに「transcript した」 で確定していたら、 後の自分 / 学生に誤式を留学させる risk。
+
+### 関連
+
+- [`debugging-discipline.md` fix-verification-3-axis](debugging-discipline.md#fix-verification-3-axis) — 「conceptually clean」 主張の verify 義務 (= 同 trait の異 framing、 transcript domain への応用)
+- sweep の goal alignment (= error 発見であって report 生産ではない) の数式 transcript domain 応用
+
+---
+
+## <a id="verify-independent-derivation"></a>7. 検証は source からの独立導出 — 一致合わせは検証でない; 公表式の係数も数値 verify
+
+### 問題
+
+disputed な量 (vertex 係数・規格化・符号) を「相手の結果に一致するよう自分の parameter を tune して『一致した』」 とするのは **検証ではない (= circular)**。 相手が正しいと仮定して fit しただけで、 どちらが正しいかを決めていない。 検証は **source (= 作用 / 定義 / 第一原理) からの独立導出** でのみ成立する。 さらに、 source とした **公表論文の式自体に係数 misprint** があり得る (= peer-reviewed / co-authored でも)。 literal-copy した式を信頼の base にすると誤りを継承する。
+
+### 実例 (= 場の理論の vertex 係数が disputed なケース、 2026-06)
+
+- ある vertex の係数が co-author 間で disputed。 初手で「相手の値に一致するよう自分の parameter を tune」 して相手の値を得た = **循環論法** (user 指摘で発覚)。
+- 正しい検証 = 作用からの汎関数微分 (= finite-difference、 inverse は行列 inverse で厳密) で独立導出 → 自分の元の値が正しいと確定。 **4 経路独立確認** (手導出 / finite-diff / 記号 CAS / 先行文献の正しい恒等式) で cross-check。
+- 相手の値の source = 公表論文 (peer-reviewed) の恒等式の **係数 misprint** (= 反対称化の階乗因子の欠落)。 同じ系列の先行論文には正しく載っていた → 公表式でも独立に数値 verify (= 恒等式に成分代入して LHS=RHS check) すべきだった (= peer-reviewed でも misprint はある)。 〔詳細 narrative は当該 private research project の RETRACTIONS.md に記録〕
+
+### 防止策
+
+1. **disputed な量は必ず source から独立導出**。 「相手の数値に合う parameter」 を探す行為が出たら fit であって検証でないと自覚 (= sweep の §「cell 埋めか error expose か」 の verification domain 版)。
+2. **source の異なる複数経路で cross-check** (= 手導出 / 数値 / 記号 CAS / 別文献)。 1 経路一致は弱い。
+3. **公表式・引用式の係数も数値 verify** (= 恒等式は成分代入、 closed form は sympy)。 「published だから正しい」 は不成立。 §6 (transcript hallucination) の sibling = source 自体の error。
+4. literal-copy した式を「source of truth」 化しない。
+5. <a id="residual-order-check"></a>**独立経路の数値が閉形式と小さくずれたら、 許容幅を広げずにずれの次数を測る** — 検算の側が落とした近似の径数 (例: 格子の刻み、 包絡の中で一定と見なした量の変化) だけを 10 分の 1 にし、 比べる量 (閉形式の引数) は固定して走らせ直す。 ずれが予想の次数どおり (1 次なら 10 分の 1) に減れば検算の側の近似の人工物で、 閉形式と数値は一致している。 減らなければ導出か実装の誤り。 2 回の結果と比を検算の出力に残す (次に読む人が許容幅の由来を辿れる)。 実測: 2 次元の力ずくの検算が閉形式と 10⁻³〜10⁻² でずれ、 許容幅を広げる代わりにこの確かめを入れて、 比 10.0 で人工物と分かった。
+6. <a id="shared-reduction-blind-spot"></a>**閉じた形を数値で照合するときは、 数値の側を簡略化する前の入力 (元の 2 次形式・相関の全項) から組む** — 閉じた形と数値の積分が同じ簡略 (相関の項を落とした Gauss、 揃えた外線の速度) から始まると、 両者の一致はその簡略の誤りを見ない。 わざと誤った形 (foil) も同じ簡略の中で作ると検出できない (実測: 一般の配置から出した実効の幅の式で相関の項が 1 つ落ちていたが、 照合の数値積分も最初から同じ簡略の Gauss だったので機械精度で一致した。 元の入力から組み直した別の検証者が、 その差を見つけた)。 簡略が意図した模型の選択なら、 結果の側に「その模型の中で」 と断る
+7. <a id="foil-sampling-aliasing"></a>**位相を標本の点で比べる検査は、 点の間隔を位相の周期と共鳴させず、 foil は違いの出る向きに当てる** — 数値の位相と式の位相の差を何点かで見るとき、 点の間隔が比べる位相の周期 (2π/周波数) のほぼ整数倍だと、 その周波数の項を落とした foil・符号を逆にした foil も 2π の整数倍だけ違うので、 どの点でも合って見える (実測: 最初の版は時刻の刻みが周期のほぼ整数倍で、 位相の因子を落とした foil が落ちなかった)。 点を周期と通約しない値に散らし、 さらに周期より十分細かい経路に沿って `np.unwrap` した差の動き (最大と最小の差) を見る。 foil の違いが 1 つの変数にしか出ないとき (エネルギーの取り違えは時刻の向き、 運動量の取り違えは距離の向き) は、 その向きの経路で試す。 違いの出ない向きで foil が落ちないのは検査の失敗ではない。 foil と正しい形が同じ値になる配置 (取り違える 2 つの量が等しい点) では、 その foil を試せないと出力に書いて飛ばす
+
+### Anti-pattern
+
+- 相手の結果に一致する parameter を見つけて「検証完了」 と報告 (= circular)
+- 独立経路の数値が閉形式と合わないとき、 合うまで許容幅を広げて「一致」 と書く (= ずれの次数を見ていない。 上の 5)
+- 公表論文の式を成分 verify せず信頼の base にし、 misprint を継承
+
+### 関連
+
+- §6 — transcript hallucination の sympy verify (= 本 § は「source 自体の error」 への拡張)
+- [`debugging-discipline.md` fix-verification-3-axis](debugging-discipline.md#fix-verification-3-axis) — 「conceptually clean」 主張の verify 義務 (= 同 trait)
+- [作用の等価性・多項式性](../../ai-collaboration/conventions/physics-verification-cycle.md#action-equivalence-and-polynomiality) — Euler微分、任意lapse、動く補助場制約、非等方sliceを分ける作用版の独立導出
+- 同 trait family = 「安価な操作 (= 一致合わせ / memory recall / literal-copy) で expensive 操作 (= 独立導出 / 数値 verify) を bypass する」。 review / sweep / context 構築 domain にも同型に現れる
+
+## <a id="first-principles-crosscheck"></a>8. 数値結果は第一原理 (次元解析・対称性・Ward 恒等式・既知極限) で cross-check; 自前の数値がバグり得る
+
+### 問題
+
+自前の数値計算 (script) は **バグり得る**。 数値が第一原理 (次元解析・対称性・ゲージ/Ward 恒等式・既知の極限・文献値) と矛盾したとき、 **数値を信じて第一原理を曲げる** のは誤り。 第一原理は不変だが数値はバグる。 §7 が「相手 (外部) の結果に合わせる circular」 を戒めたのに対し、 本 § は「**自分の数値が正しいと仮定して第一原理を上書きする**」 inverse の trap。
+
+### 実例 (2026-06、 場の理論の 1-loop 2 点関数発散部の一般質量 m 形)
+
+- 1-loop 2 点関数の 1/ε 極の係数を一般質量 m で求めた。 **次元解析**: 4D 2 点関数の 1/ε 極は質量次元 4 の同次 (= m⁴, m²q², q⁴ のみ; 純 m² や定数項は counterterm 構造上あり得ない — Λ~m⁴ / R~m²q² / C²~q⁴)。 ところが script は質量非依存テンソルの係数を **混合次元** (= m⁴−4m²+2) で返した。 私は **script の数値を次元解析より優先**し混合次元形を成果物に記載 → user「次元解析からして質量の色んな冪が足されてるのは明らかに誤り」 で発覚。
+- 真因 = 1-loop の補助関数 2 つが single-propagator dim-reg 積分を **m=1 値に hard-code** (= I_{0,1}, I_{1,1} を −1, +1 固定; 正しくは I_{0,1}=−m², I_{1,1}=m⁴)。 **m=1 で偶然一致するため m=1 検証では露見しなかった**。 修正後は同次 dim-4 に。 別の主積分 (= bubble) は常に正しく、 バグは特殊値で縮退する 1 関数に局在。
+
+### 防止策
+
+1. **数値出力を第一原理で必ず cross-check**: (a) 次元解析 (= 同次性)、 (b) 対称性 (= Bose / 離散対称)、 (c) ゲージ/Ward 恒等式 (= 数値結果が満たすべき identity)、 (d) 既知極限 (= 質量ゼロ・運動量ゼロ・共形点)、 (e) 文献値。
+2. **数値が第一原理と矛盾したら数値を疑え** (= 数値はバグり得るが第一原理は不変)。 「数値が出たから正しい」 は「cell 埋め」 trait の数値 domain 形態。
+3. **verify は疑わしい機構を共有しない独立な方法で**: バグった関数を使った再計算は同じバグを継承する。 独立経路 (= 別定義・別積分法・解析的手計算・第一原理) で。 実例では問題の寄与を頂点 Feynman 則から独立に再構成して確認。
+4. **特殊値 (m=1 等) だけで検証しない** (= バグが特殊値で縮退して隠れる)。 一般値 (= 一般 m, 一般運動量) で sweep。
+5. **verify 方法それ自体もバグり得る (= 隠れた仮定)**: reconstruction / back-solve が既検証 (= established) record と矛盾したら、 即「record が誤り」 と結論せず、 まず reconstruction の隠れた仮定を疑い ground truth (= 実コード・実データ) で確認。 防止策 3「独立な方法で verify」 の**独立性も暗黙の仮定に依存すれば誤る** (= 例: 係数を m 非依存と仮定した back-solve が m 依存の真値を見逃す)。 ground truth は reconstruction でなく source 自身。
+6. **既知極限で照合するときは、 極限の前に何を固定するかを書く** (振幅・率・面積・規格化のどれか)。 幅を 0 にするだけの profile は $\delta$ 関数でなく 0 に収束する (規格化の因子をつけてはじめて $\delta$)。 変数変換で退化するパラメータ (係数が 0 になる組) では新しい変数が特異になるが元の積分は正則なので、 退化点は特殊値の照合とは別に、 元の式に戻して扱う。
+
+### Anti-pattern
+
+- 自前の数値が次元解析・対称性・WI と矛盾するのに、 数値を信じて第一原理形を「混合次元」 等に歪める
+- 特殊値 (m=1) のみで検証し、 一般値での縮退バグを見逃す
+- バグった関数を使った再計算を「独立検証」 と称する
+- 自分の verify reconstruction が既検証 record と矛盾 → reconstruction の隠れた仮定を疑わず record を即 falsify
+
+### 関連
+
+- §7 — source からの独立導出 (= 本 § は「自分の数値を第一原理より優先する」 inverse trap、 §7 は「相手の数値に合わせる circular」)
+- §6 — transcript hallucination の sympy verify (= 同 trait family)
+- 同 trait family = 「安価な操作 (= 数値の盲信) で expensive 操作 (= 第一原理 cross-check) を bypass」。 個人層の RCA と詳細物理 narrative は owner の private layer に記録されている (= collaborator は access 不要)
+
+## <a id="calibrate-magnitude-sign"></a>9. Ratio/構造 check は overall scale を fix しない; 既知量で calibrate し、 magnitude と sign を分ける
+
+### 問題
+
+Ward 恒等式・対称性・内部無矛盾性・projector 代数 等の check は全て **ratio / 構造** で、 結果の **overall normalization (絶対 scale)** を constrain しない。 これらが全て pass しても、 全 coefficient が共通因子で間違っている可能性は残る。 「全 check pass」 を「結果は absolute に正しい」 と読むと、 この死角を見落とす。 外部の既知量と比較するときも、 magnitude と sign を一緒に「match」 と言うと符号規約の罠に落ちる。
+
+### 防止策
+
+1. **overall scale は『同じ機構で既知量を計算』 して calibrate**: 自分の loop / 数値機構 (= 積分 measure・trace・pole 抽出・単位) で、 textbook 値が分かっている量を計算し、 一致を確認。 例: 場の理論の loop 機構なら QED vacuum polarization (= 1 Dirac fermion で発散 |Π|=4/3、 units 1/(16π²ε)、 transverse も同時 check)。 これが ratio check では届かない絶対 scale の唯一の anchor。
+2. **外部比較は magnitude と sign を分けて述べ、 sign は写像で閉じる**: 絶対値は防止策 1 で calibrate できるが、 符号は規約 (= Euclidean vs Minkowski、 self-energy の overall sign 定義 等) で変わりうる。 「match」 と一括りにせず magnitude と sign を分けて記す。 ただし **「sign は規約依存」 と書いて閉じない** — 両側の定義を並べて写像を計算し、 一致を示すまで sign は unverified のまま carrier に載せる (正本 = [`paper-audit.md#convention-difference-closure`](paper-audit.md#convention-difference-closure) Rule 1–2)。 書き方の例: 「magnitude 一致 (calibrate 済) / sign 未検証 (carrier: <TODO / 検査名>)」。
+3. **doc の数値 claim には実 check を紐付ける**: 「~を 1e-16 で満たす」 等と書いたら、 それを実際に検証する script が存在するか確認。 無ければ claim は未検証 — check を足す (= 「cell 埋めでなく error expose」 の claim-vs-check 版)。
+4. **calibration は『その既知量が exercise した構造的特徴』 の scale しか fix しない** (= calibration の scope 限界): 防止策 1 の QED calibration (= 単一添字 γ^μ 頂点) は、 target が持つ richer な構造 (= 多添字の縮約 / index-mixing) を cover しない。 単純構造の calibration pass を「pipeline 全体が absolute に正しい」 と一般化すると、 target の未 calibrate な構造を **crude な射影のまま信じる**死角になる (= §8 防止策 4「特殊値縮退」 の構造版 = **特殊構造縮退**)。 汚染されうる量は crude な index-trace/sum でなく、 **汚染構造が恒等的に消える clean probe** (= 関心量に直交する添字・配置を選ぶ) で直接抽出して cross-check する (= calibration が validation した「構造的特徴」 が target の構造を網羅しているかを問う、 一般則は [`convention-design-principles.md §8.8`](../docs/convention-design-principles.md#proxy-blind-spot) list-audit implicit-scope の数値 calibration 版)。
+
+### <a id="basis-invariant-check-blind-spot"></a>基底不変な検査は固定ラベルの規約を検証しない
+
+数値行列の列を基底ベクトルとしたとき、ユニタリ行列による列の混合は完全性関係を保つ。したがってスピン和・projector・trace が一致しても、固定したスピンラベルや位相まで一致した証拠にはならない。基底の対応が主張に必要なら、各列の変換則と固定ラベルの双線形も独立に検査する。反例 fixture として列の交換・位相変更を入れ、完全性は通るがラベル照合は落ちることを確認する。
+
+Fock 空間の演算子と、その展開係数である数値スピノルも区別する。各量の添字の範囲・行列の shape・どの空間に作用するかを先に宣言する。数値列を横に並べる操作に転置を足したり、スピンラベルを Dirac 成分添字として扱ったりしてはならない。具体的な荷電共役行列・基底・規格化は各 project の規約と回帰検査が所有する。
+
+### 実例 (2026-06、 場の理論の 1-loop 2 点関数)
+
+- 内部 check (2 種の Ward 恒等式 / projector 代数 / massless 極限) は全て ratio で overall normalization を constrain せず。 外部 conformal-anomaly 照合 (= form factor vs central charge c) が初の絶対 anchor だったが、 それ自体「自分の値が標準単位」 前提に**循環依存**していた。 → QED vacuum polarization を同機構で計算し |Π|=4/3 (textbook 一致) で scale を独立 calibrate、 magnitude match が solid 化。
+- 一方 QED は +4/3 (textbook −4/3) で **符号が規約依存** と判明 → 「magnitude 一致 + sign 規約依存」 と分けて記載 (= 当初 sign 込みで一括 match を主張していたのを訂正)。 ⚠️ 分けて書いた点は正しいが、 この「規約依存」 は写像を計算していない = [`paper-audit.md#convention-difference-closure`](paper-audit.md#convention-difference-closure) の基準では sign は unverified で、 閉じた記録として読まない (防止策 2 は 2026-09-14 にこの基準へ合わせた)。
+- projector 代数を「note は 1e-16 で満たすと主張」 していたが regression が未検証だった → 検証 script を追加 (= 防止策 3)。
+
+### Anti-pattern
+
+- 全 ratio/構造 check pass を「結果は absolute に正しい」 と読み、 overall scale の死角を見落とす
+- 外部既知量との「match」 を magnitude と sign 一括で主張 (= 符号規約の罠)
+- sign の食い違いを「規約依存」 の語で閉じる (= 写像の計算も carrier も無い、 [`paper-audit.md#convention-difference-closure`](paper-audit.md#convention-difference-closure))
+- 単純構造の calibration (例: 単一添字頂点) pass を「pipeline 全体が airtight」 と一般化し、 target の未 calibrate な構造 (= 多添字 mixing 等) を crude 射影のまま信じる (= calibration の scope を validation した構造に限定して読まない)
+- doc に「verified」 と書くが実 check の script が無い
+
+### 関連
+
+- §8 — 数値は第一原理で cross-check (= 本 § は「第一原理 check も ratio なら scale を fix しない」 の補完、 絶対 scale には別 anchor 要)
+- §7 — source からの独立導出
+- 同 trait family = 「verify したつもり」 の死角 (= scale / sign / claim-vs-check の 3 つ)。 個人層 reflex は owner の private layer に記録 (= collaborator access 不要)、 詳細物理 narrative は当該 private research project の DESIGN.md §5.5
+
+## 次に追加される予定 (placeholder)
+
+- 浮動小数点精度起因の silent failure パターン
+- 単位系変換ミス (cgs ↔ SI ↔ 自然単位系)
+- 境界条件・初期条件の scale-dependence
+
+## <a id="figure-vector-extraction"></a>5. 論文 PDF 図のベクトル path から曲線データを復元して数値照合する (2026-08-21)
+
+> **抽出の次**: 再現できなかった時に「式が誤り / code が誤り / caption が不一致 / 別の数値体系」 のどれかを決める分類 = [`paper-audit.md#figure-irreproducible-taxonomy`](paper-audit.md#figure-irreproducible-taxonomy)。
+
+### 問題
+共著者が描いた図 (code なし) が本文の式から再現できるかを検証したい。 目視比較は「だいたい合う」 で止まり、 z 依存の有無・極の位置といった定量的不整合を見落とす。
+
+### 方法
+matplotlib / Mathematica 出力の PDF はベクトルなので、 PyMuPDF で path を抜いて data 座標に戻せる:
+```python
+import fitz, numpy as np
+p = fitz.open('fig.pdf')[0]
+words = p.get_text('words')          # 目盛りラベルの位置 → 軸の線形/対数写像を決める
+for d in p.get_drawings():           # 曲線 = items が多い path; color/dashes で凡例と対応付け
+    pts = [(it[1].x, it[1].y) for it in d['items'] if it[0] in 'lc']
+```
+軸写像は目盛り word の bbox 中心から最小二乗で決める。 得た (x, y) を本文の式で計算した曲線と**最大偏差**で比較する (rms は tail の 0 に引きずられて過小評価になる)。
+
+**軸の量は図の軸ラベルで読む**: キャプション・本文が引く数値の量と、 図の軸の量 (単位・pivot・規格化) が違うことがある。 他の論文の図を改作した図は、 元の図の軸を引き継ぐことが多い (実測: $r$–$n_s$ の図で、 縦軸のラベルは $r_{0.002}$、 キャプションが引く上限値は $r_{0.05}$)。 目盛りの word と一緒に軸ラベルの word も `get_text('words')` で読み (縦書きのラベルも 1 語で出る)、 抜いた点列の記録に軸の量を書く。 別々の 2 枚の図から抜いた点列が一致したら、 両方の軸が同じ量だという証拠として扱い、 片方だけを別の量と読んでいないかを見直す。
+その一致から、 軸の量がどちらかは決まらない (元の図とその写しなら、 抽出の写像が正しいことしか言えない)。 軸ラベルが文字でなく図形で読めない図や、 ラベルの量を data の側からも確かめたいときは、 同じ data (同じ chain) を既知の量で描いた別の図を探し、 量の写像 (例 = $r$ の pivot なら $r_{0.05}=r_{0.002}\,25^{(1-n_s)+n_t}$) を当てた残差が線幅に収まるかを、 写像なしの残差と並べて見る (実測: 写像なしでは線幅を大きく超え、 写像を当てると線幅の内に収まり、 tensor の傾きの約束 $n_t=0$ と $-r/8$ の違いまで残差で分かれた)。
+
+<a id="vector-path-sign-and-precision"></a>**符号と保存精度** (実測): 絶対値を描いた対数の曲線から符号は読めない。 成分の path と和の path を比べると、 和が干渉の符号を持っているかを確かめられる。 path の座標は単精度で保存されていることがあるので、 零点の近くの大きな相対差は、 線幅・保存座標の丸めと高精度の計算で切り分けてから式の差と読む。 PDF 上の距離の誤差と物理量の相対誤差を混ぜない。
+
+### 得られる判定
+- 同一曲線の重なり (= 図中で別 label の 2 本が vector level で一致) → 作図 code にその parameter が入っていない
+- 極・終点の位置 → 規格化定数の逆算 → 本文の定義との比 (z 依存・振幅依存) を検査
+- 候補式 × 規約 (θ = 2Δωt か Δωt か等) の総当たり fit で作図時の式を同定 — **横軸の変数と式の変数の因子 2 を最初に固定する** (取り違えると全候補が外れ、 1 周無駄にする)
+
+### 実例 (2026-08-21、 該当 private paper repo)
+ある確率の図 4 本のうち label の異なる 2 本ずつが完全一致 → 定義上その parameter に依存するはずなので、 code はその parameter を変えていないと確定。 候補式の総当たり fit で 1 本は小さい最大偏差で再現 (使われた式と積分変数を同定)、 もう 1 本は再現不能と確定し、 図を本文の式からの再計算版に差し替える判断材料になった。
+
+**先に著者 repo を探す (2026-09 追補)**: 観測論文は `contour_lines/` `chains/` を GitHub で公開していることがある (例: $r$–$n_s$ の 2025 総合)。 点列があれば図の抽出は cross-check に降格し (2026-09 実測: 95% 外周が抽出と点列で $10^{-4}$ 一致)、 引用条件 (README の cite 要請) を caption で満たす。 chain があれば信用水準そのものを計算できる ([`paper-audit.md#box-test-vs-joint-posterior`](paper-audit.md#box-test-vs-joint-posterior))。
+
+### <a id="svg-contour-self-calibration"></a>変種 (2026-09): `pdftocairo -svg` 経由 + 同図内の公開等高線で自己較正
+
+観測論文の図から chain 非公開の等高線 (例: Planck 2018 + BK18 の 95%) を起こす場合の recipe (盲検 reviewer 側の実測、 別実装で受領側と一致):
+
+- `pdftocairo -svg -f N -l N paper.pdf page.svg` → path を色 (`stroke=` / `fill=`) で選ぶ。 pdftocairo は stroke path に `transform="matrix(0.975,…)"` を付け、 fill は `<g>` の入れ子で座標系が違う — **transform を合成しないと 2–3% ずれる** (bbox が食い違うことで気付ける)。
+- 較正は目盛り読みより、 **同じ図に公開 data の等高線があればその bbox で affine を決め、 2 本目で残差を出す** (実測: 公開 68% 等高線で $10^{-4}$、 stroke 版 95% で $n_s\in[0.9604,0.9757]$, $r_{\max}=0.0411$ を再現)。 塗り領域は axes の clip で切れるので、 端が軸境界に一致したら「そこで切れている」 と読み、 その側の判定はしない。
+- 道具 = ai-collaboration [`scripts/svg-contour-extract.py`](../../ai-collaboration/scripts/svg-contour-extract.py) (`--list` → `--calib-bbox` → `--extract` / `--contains` / 固定 $y$ の隙間)。 精度の上限は線幅 ≈ 0.001 ([`paper-audit.md#box-test-vs-joint-posterior`](paper-audit.md#box-test-vs-joint-posterior) (5))、 「どれだけ外か」 は [#contour-distance-axis](#contour-distance-axis) の物理軸で。
+
+## <a id="evolve-constraints-algebraically"></a>10. 拘束量は独立変数として積分しない — drift → 符号反転 → 反減衰爆発 (2026-09)
+
+**Pattern**: 拘束 (constraint) で決まる量 (宇宙論の H = √(ρ/3M²)、 エネルギー、 正定値であるべき量) を独立の ODE 変数として積分すると、 拘束からの数値 drift が蓄積する。 量が小さくなる regime で drift が符号を反転させると、 **散逸項が反転して反減衰**になり、 解は指数的に爆発する (= silent ではなく派手に壊れるが、 出力だけ見ると「別の物理」 に見える)。
+
+起源事例 (2026-09、 private paper repo): インフレーション後の場の振動を (χ, χ̇, H) の 3 変数系で積分 — H を Ḣ = −χ̇²/2 で独立進化させたところ、 振動位相の誤差蓄積で小さくなった H が実効的に負へ drift し、 摩擦項 −3Hχ̇ が反摩擦化してエネルギーが 3 e-folds で 10²² 倍に「増加」。 診断の入口は物理不変量の監視だった (⟨w⟩ = +0.89 と ρ 増加 = 単一場では不可能)。
+
+**Fix**: 拘束量は代数的に評価する — H = √((½χ̇² + V)/3) を右辺で毎回計算する定式化にすると、 ρ̇ = −3Hχ̇² ≤ 0 (単調減少) が**構造的に保証**され、 爆発経路が design-out される。 一般則: 「保存則・拘束・正定値性は積分で維持するのでなく、 定式化に焼き込む」。
+
+**同じ代入で座標の特異点も消える**: 2 階の運動方程式の右辺に、 境界で 0 になる因子の逆数 (例 = 計量の成分 A の 1/A、 地平面で発散) が拘束と組んで現れるなら、 拘束 (例 = エネルギーの第一積分) を代入すると 1/A が約分されて右辺が境界の両側で正則になる (実測: 動径方向の測地線の右辺が、 代入の後は r の冪だけになった)。 約分しないと、 境界の近くで拘束からの数値のずれが 1/A 倍に増幅される。 代入した形を f64 の参照実装と表示層の両方に入れ、 元の形との一致を拘束面の上で selftest する。
+
+**Validation layer** (同事例で有効だった 3 点セット): ① 不変量の bool 監視 (ρ 単調減少) ② 恒等式の全桁照合 (ρ 比 = e^{−3ΔN(1+w̄)}、 w̄ は計算値) ③ 独立の高次手法との spot-check (mode 方程式の直接積分 vs 2 次摂動公式、 4 桁一致)。 §8 (第一原理 cross-check) の具体形。
+
+## <a id="namespace-override-verification"></a>11. 別 script の関数を差し替える wrapper は、 差し替えが効いたことを sentinel で検証する (2026-09)
+
+**Pattern**: 正本 script の 1 関数 (例: 崩壊率の規格化) だけ差し替えて表を再計算する wrapper で、 `runpy.run_path()` の戻り値 dict に代入して差し替えたつもりになる。 `run_path` は module globals の**コピー**を返すので、 正本の関数群が参照する globals は変わらず、 **差し替えは silent no-op**。 wrapper 自身は正常終了し、 出力は旧規格化のまま。 実害 (2026-09、 private paper repo) = 論文の表が旧規格化の値のまま 1 版流通。 wrapper が自前で計算していた列だけ正しかったので、 表を見ても気づかなかった。
+
+**Fix**: `g = {"__name__": "not_main"}; exec(open(f).read(), g); g["func"] = new_func` — exec に渡した dict が module globals そのものになるので差し替えが効く (importlib は macOS system python の stale .pyc 問題で別途避ける)。
+
+**Validation**: 差し替えた関数に sentinel (print / 戻り値に印) を入れ、 **再計算の出力に sentinel が現れること**を 1 回確認してから表を採用する。 最も安価なのは「変わるはずの数字が実際に変わったか」 の diff (動くはずの量が動いていなければ差し替えは効いていない)。 「override したから新しい値」 は検証でない ([#verify-independent-derivation](#verify-independent-derivation) の道具版)。
+
+## <a id="declared-self-consistency-audit"></a>「self consistent に解いた」 と書く前に、 loop の全変数が code で戻っているか列挙する (2026-09)
+
+**Pattern**: 「$V_0$ は $A_s$ から、 $m$ は $V_0$ から、 rate は $m$ から、 $N_*$ は rate から」 という自己整合の連鎖を本文で謳いながら、 code は $m$ を定数に固定していた ($V_0\to m$ の 1 本だけ戻していない)。 影響は小さかった (観測量の変化は検出精度より桁で小さい) が、 本文の主張が code より強い状態が数版続いた。 別 AI session の独立反復で検出 (2026-09、 private paper repo)。
+
+**Fix**: 「self consistent」 の文を書く時点で fixed point に入る量を列挙し (入力 → 導出 → 戻し先)、 code の loop 内で各量が再計算されている行を指す。 固定するなら本文にそう書く (「$m$ は固定値」)。 検証は「戻すはずの量を戻したら数字が動く」 の diff ([#namespace-override-verification](#namespace-override-verification) と同型)。
+
+## <a id="floquet-exact-background"></a>Floquet 指数は厳密な周期解の上で取る — 調和近似の背景は偽の不安定性を作る (2026-09)
+
+**Pattern**: 振動する背景 $\chi(t)$ の上で mode の Floquet 指数を出す時、 背景を $\chi=\Phi\cos mt$ で代用すると、 厳密には marginal な mode (例: 運動項の conformal factor から来る $k=0$ mode、 厳密解 $H_c\propto e^{-\gamma\chi/2}$ で有界) に有限の指数が出る。 質量項が背景の運動方程式を使って導かれている場合、 その相殺は**真の解の上でしか成り立たない**。
+
+**Fix**: 背景は非調和ポテンシャルの周期解を数値で取り ($\chi(0)=\Phi$、 $\dot\chi=0$ から $\dot\chi=0$ への戻りを event で捕まえて周期 $T$ を得る、 event の direction は戻り側の符号)、 monodromy を 1 周期で取る。 検算 = 解析的に marginal と分かる mode の指数が 0 になること (同事例: 調和背景で有限だった $k=0$ の指数が厳密背景で 0 になり、 最速成長の $k$ も移動した)。 道具 = ai-collaboration [`scripts/floquet-monodromy.py`](../../ai-collaboration/scripts/floquet-monodromy.py) (`conformal` = 厳密背景 + 正確な質量項、 `--linearised` で偽成長を再現; selftest が $k=0$ marginal と Mathieu $\mu=q/2$ を固定)。
+
+## <a id="first-step-skips-initial-heuristic"></a>SciPy `solve_ivp` の初期 step 推定 overflow は `first_step` で消す (2026-09)
+
+**Pattern**: `solve_ivp(..., atol=1e-300)` で初期値の一成分が $10^{-290}$ のような極小値だと、 初期 step 推定 (`d1 = norm(f0/scale)`) が overflow / invalid の warning を出す。 結果は正しいが、 warning-clean でないと再現者が「何かおかしい」 で止まる。
+
+**Fix**: `first_step=<小さな値>` を渡す (推定を skip、 適応刻みはそのまま)。 出力が文字単位で同一であることを diff で確認してから採用する (同事例: 表の不変行 5 本が IDENTICAL)。
+
+## <a id="contour-distance-axis"></a>等高線への「距離」 は物理的に意味のある軸に沿って測る (2026-09)
+
+**Pattern**: 模型の軌跡と 95% 等高線の関係を $(\Delta n_s,\,c\,\Delta r)$ の scaled Euclid 距離で報告すると、 縁に接するように見えて実際は固定 $r$ で等高線の外だった (scaled 距離のほうは線幅程度)。 scaled 距離は等高線の傾き方向に最短を取るので、 読者が問う「同じ $r$ でどれだけ外か」 とは別の量。 盲検 reviewer との数値不一致で発覚 (2026-09)。
+
+**Fix**: 点内判定は多角形で厳密に、 「どれだけ外か」 は物理軸 1 本 (固定 $r$ での $n_s$ の隙間) で報告する。 別実装と数値が合わない時は、 まず距離の定義を突き合わせる。
+
+## <a id="spectator-check-over-the-roll"></a>dilaton 型結合の spectator 判定は pivot でなく roll 全体で — 正準場は Weyl 因子で伸びる (2026-09)
+
+**Pattern**: 場 $\phi$ が inflaton $\chi$ に $e^{-\gamma\chi/M_P}(\partial\phi)^2$ 型 (dilaton / conformal 因子) で結合するとき、 正準場 $\tilde\phi=e^{-\gamma\chi/2M_P}\phi$ の有効質量は $m^2=-(\gamma/2M_P)\Box\chi-(\gamma^2/4M_P^2)(\partial\chi)^2$ で、 slow roll の pivot では $\gamma H^2$ の小さな割合だが、 $\chi$ が転がるほど大きくなり (末期は $O(\gamma)\,H_\text{end}^2$)、 零モードは roll 全体で **Weyl 因子 $e^{\gamma\Delta\chi/2M_P}$** だけ伸びる (excursion $\Delta\chi$ が数 $M_P$ あれば、 $\gamma=O(1)$ で数十倍)。 pivot の値だけ見て「軽い spectator、 揺らぎは数倍」 と書くと $\gamma=O(1)$ で誤る (起源事例 2026-09、 private paper repo: 表の benchmark の 1 つが spectator でなかったことを盲検が指摘、 著者側 script で零モードを積分すると Weyl 因子と一致)。
+
+**Check**: (a) 有効質量を pivot と末期の両方で書く。 (b) 零モードを horizon exit から末期まで積分するか、 Weyl 因子で見積もる (道具 = ai-collaboration [`scripts/dilaton-spectator-growth.py`](../../ai-collaboration/scripts/dilaton-spectator-growth.py): 厳密背景 + 零モード積分 + Weyl 因子 + 末期の質量 + λ の符号別の落ち着き先、 `--selftest` = 成長 ≈ Weyl 因子)。 (c) 伸びた先の場の値を、 自己結合の符号 (running 込み) ごとに極小 / runaway で分類し、 末期の励起の質量を daughter 崩壊の運動学と比べる。 (d) 「spectator」 と呼べる結合の範囲を符号込みで明記する (質量項の conformal 因子は奇なので負側は別の上限: [`paper-audit.md#odd-coupling-sign-before-pricing`](paper-audit.md#odd-coupling-sign-before-pricing))。
+
+## <a id="onset-is-eps-H-one"></a>「振動開始」 は $\epsilon_H=1$ の厳密背景で定義する — $\epsilon_V=1$ の外挿は $\rho_\text{end}$ を 2 倍過大に見積もる (2026-09)
+
+**Pattern**: inflation の終点を $\epsilon_V=1$ (potential の slow-roll parameter) で取り、 そこで $\rho_\text{end}=\tfrac32V$ とすると、 実際の終点 ($\epsilon_H=\dot\chi^2/2H^2M_P^2=1$) はさらに転がった先で、 $\rho_\text{end}$ と $H_\text{end}$ が O(1) の因子で過大になる (plateau 型 potential の実測で $\rho_\text{end}$ が約 2 倍)。 この「onset」 の数値は Mathieu の $q$、 KLS 条件、 共鳴の完了 e-fold 数にそのまま伝播し、 共鳴の境界を有意に動かす。
+
+**Fix**: 背景を厳密に積分して $\epsilon_H=1$ を event で取り、 $x_\text{end}$・$\rho_\text{end}$・$H_\text{end}$・振幅をそこで定義する。 $\epsilon_V=1$ は初期条件の目安にしか使わない。 「onset」 という語を使うなら定義を 1 文で書く (最初の零点通過なら $H$ はさらに半分以下)。
+
+**reviewer 側の追補 (同事例、 2026-09-08)**: 数値の幅 = 同じ plateau 型 potential で、 $\epsilon_V=1$ / $\epsilon_H=1$ / 最初の零点通過の 3 定義は $H$ と振幅をそれぞれ数十 % ずつ変え、 $q=g\Phi$ は定義次第で数倍変わる。 線形成長を「真空から」 数える計算は**真空を置く時刻**にも依存する (末期の tachyonic 相を含めて sub-horizon mode から積分すると e-fold 数が大きく増え、 完了閾値の結合が有意に下がる)。 (c) 真空を置く時刻を引数にした計算を 1 回は走らせ、 閾値は幅で書く。 道具 = ai-collaboration [`scripts/expanding-mode-growth.py`](../../ai-collaboration/scripts/expanding-mode-growth.py) (`--start end|eps_V=1|x=<v>`、 sub-horizon 条件 `--kmin`)、 $N_*$ 側の同じ chain (fixed point・厳密背景の 2 次 HFF・固定 $r$ の分離幅) = [`scripts/nstar-fixed-point.py`](../../ai-collaboration/scripts/nstar-fixed-point.py)。 $N_*$ への影響は $\tfrac14\ln\rho_\text{end}$ の 0.1 e-fold で無視できるが、 共鳴側の数字には効く。
+
+## <a id="rate-diverges-as-amplitude-vanishes"></a>振幅が 0 に近づくほど崩壊率が上がる流体は有限時間で尽きる — event の根でなく $\Gamma/H\gg1$ で打ち切る (2026-10)
+
+**Pattern**: 振動する凝縮を流体 $(\rho,w)$ で書き、 崩壊率が $\rho$ の負冪で増えるとき ($\Gamma\propto\rho^{-n}$、 $n>0$。 例 = 振幅が小さいほど振動数が上がる非調和なポテンシャルで、 率が振動数の冪に比例する崩壊)、 $\rho\to0$ で $\Gamma$ が発散して凝縮は有限時間で尽き、 $\ln\rho$ が $-\infty$ に落ちる。 LSODA に event (残りの割合が閾値を切る点) を置いた実測では、 その手前で `f(a) and f(b) must have different signs` を出して止まった (event の根探しが bracket を取れない)。 打ち切りを緩く取ると ($\Gamma/H=10^3$ 程度) 凝縮が数 % 残り、 その移し方で e-fold 数が動く (実測)。
+
+**Fix**: 陰的解法 (`Radau` / `BDF`) で解き、 打ち切りを 2 つ置く = 残りの割合が十分小さい (例 $10^{-10}$) か $\Gamma/H\gg1$ (実測では $10^5$ で残りが無視できた)。 打ち切った時点の残りは瞬時に移し、 移した量を出力して guard をかける (残りが 1 % を超えたら落とす)。 一様な崩壊の閉じた形があれば、 流体の解との差を selftest に入れる。
+
+## <a id="completion-by-occupied-mode-energy"></a>共鳴の完了をエネルギーで判定するときは、 育った mode 自身の運動量と振動数で数える (2026-10)
+
+**Pattern**: 揺らぎのエネルギー密度を $\rho_\text{fluct}\approx(\text{成分数})\,(k/a)^3\,\omega_k\,n_k/2\pi^2$ で見積もって背景のエネルギーと比べ、 「完了」 を判定するとき、 $\omega_k$ の代わりに背景 (凝縮) の振動数を使うと、 振動数が膨張とともに上がる背景 (非調和なポテンシャル) では $\rho_\text{fluct}$ が過大になり、 完了していない結合で完了と出る (実測)。
+
+**Fix**: 占有された mode 自身の物理運動量 $k/a$ と振動数で数える。 固定の閾値 (例 = 占有数が $(M_\text{P}/\omega)^2$ に届く e-fold 数) と並べて報告し、 2 つの判定が合わない点では判定の定義を先に疑う。
+
+## <a id="model-background-by-late-law"></a>比べるための模型の背景は、 静止から放す時刻でなく後期の法則で指定する (2026-10)
+
+**Pattern**: 膨張する宇宙で振動する場の背景を 「ある $\omega/H$ の時点で振幅を与えて静止から放す」 で作ると、 最初の数周期で振幅が断熱値からずれ、 後期の断熱則 $\omega/H=C\,(a/a_0)^\alpha$ の係数 $C$ が放した時点の $\omega/H$ と大きく違う。 厳密な背景 (インフレーションの終わりから続けて解いたもの) と比べる模型の族を放す時点の $\omega/H$ で並べると、 比べたい後期の法則が族の中で揃わない (実測)。
+
+**Fix**: 模型の背景は後期の不変量 ($C$、 または $(\omega/H)\,\Phi$ のような断熱不変量) で指定し、 それを満たす放す振幅を根探しで決める (bracket は物理的な振幅の範囲に狭める)。 厳密な背景の側も最初の周期の値と後期の値を両方出す (厳密な背景でも 2 つは数 % 違う)。
+
+## <a id="mathieu-q-own-normalization"></a>Mathieu の $q$ は自分の式の規格で第 1 調和から取る — 駆動の振幅 $/\omega^2$ を $q$ と呼ばない (2026-10)
+
+**Pattern**: 非正弦の駆動 (矩形波など) の共鳴の強さを、 駆動の振幅を $\omega^2$ で割った数で 「$q$」 と書くと、 Mathieu 方程式の規格 ($\ddot x+[A-2q\cos2t]\,x=0$ の $2q$、 時間の単位の取り方) と第 1 調和の係数 (矩形波なら $4/\pi$) の分だけずれ、 共鳴の幅や成長率の見積もりが O(1) の因子で変わる (実測)。
+
+**Fix**: 駆動を Fourier 展開して第 1 調和を取り、 その論文・note が使っている Mathieu の式の規格 (係数 2 の有無、 $t$ を $\omega t/2$ で測るか) に合わせて $q$ を書く。 高調波も効くなら $q$ 1 つで代表させず、 区分的に厳密に解く (区間ごとに定数の質量項なら解析解を貼り合わせる)。
+
+## <a id="small-sdp-without-solver"></a>小さな SDP を solver 無しで回す — SLSQP + explicit dual certificate の sandwich (2026-09)
+
+**Pattern**: 検証 worker の環境に SDP solver (cvxpy / SCS / MOSEK) が無く、 install も spec で避けたい (再現環境の最小化) が、 qubit〜qutrit 規模の半正定値計画 (共通下界 max Tr c s.t. 0 ≤ c ≤ a, b / joint measurement の最適化) が要る。 scipy の SLSQP で固有値制約を扱うと動くが、 局所 solver の答えは**それ自体では証明にならない**。
+
+**Fix (= `scripts/gpt_measurements.py` に固定した recipe)**:
+1. **primal + dual を別々に解いて sandwich する**: 弱双対性で primal ≤ dual が常に成り立つので、 両方の feasible point を出して [primal, dual] を報告すれば、 solver がどう動いたかによらず float 精度で厳密な区間になる。 dual の feasibility 違反は identity 方向へ shift して repair (例: Y, Z を violation/2 だけ持ち上げ)。
+2. **定性判定 (存在 / 非存在) は solver に頼らない**: 「非零共通下界が無い」 は supp 射影から作る explicit certificate (Y = tP_ker a, Z = tP_ker b、 Y+Z ≥ I、 Tr(aY+bZ) = 0) で証明、 「有る」 は具体的な c と witness を構成して検証。 solver は量的値 (α の数値) にだけ使う。
+3. **gotcha 群** (全て実測): (a) 2×2 の PSD を滑らかな形 (対角 ≥ 0 ∧ det ≥ 0) で書くと SLSQP が凸問題で stall する (det の線形化が悪い) — 固有値制約 + random restart の方が良く動く、 best feasible iterate を保持し全滅時は feasible な x0 に fallback。 (b) 等式制約 (周辺条件) は冗長で QP が rank 落ちする — null-space parametrization で消去する。 (c) c = 0 や canonical joint は制約の退化点 (勾配 0) で動かない — parallel sum a:b = (a⁻¹+b⁻¹)⁻¹ ≤ a, b を内点の出発点にする。 (d) 凹関数の最小化 (α_IS = min_B λ_min(Σb_xx)) は凸計画でない — 純粋状態の scan × 内側凸計画に分解し、 外側 scan は evidence であって certificate でないと明記する。
+5. **並列和の sandwich = solver ゼロの certified 区間** (2026-09 第二の目 campaign): 最大共通下界ノルムは **‖a:b‖ ≤ max‖c‖ ≤ 2‖a:b‖** (a:b = (a⁻¹+b⁻¹)⁻¹ ≤ a, b は自身が共通下界、 逆に任意の共通下界 c は ⟨ξ,cξ⟩ = ⟨x+y, c(x+y)⟩ ≤ 2(⟨x,ax⟩+⟨y,by⟩) の inf で c ≤ 2 a:b)。 SLSQP を回す前にこれで足りるか見る。 道具 = `gpt_measurements.common_lower_bound_sandwich`。 ⚠️ 固有値が 1e-8 を割る作用素 (例: e^{-2|n|} 減衰) は float の逆行列が壊れる — `dps=` で mpmath に切替、 正則化 δ は入力の丸め (double なら 1e-14) 以上に取る (δ 未満だと a+δ が PSD でなく逆行列が発散)。
+6. **exact な主張が double の下にある時は高精度で certify する**: 正定値性・非零性の閾値を float の λ_min に当てる前に、 その量の減衰 rate を見る (prolate 型 Gram 行列は N=16 で 1e-38)。 mpmath 100 桁 (`mp.eighe`) で証明書を出し、 「double で見えない」 を「偽」 と読まない。 実測 = [`physics-verification-cycle.md#definition-level-judge`](physics-verification-cycle.md#definition-level-judge) 10。
+7. **run hygiene**: 長い check を background で回す時、 **同じ出力 file に 2 プロセスが同時書き込みしない** (旧 run を kill せず relaunch すると PASS 行と旧 run の OVERALL: FAIL 行が混ざり、 grep で FAIL 行が見つからないのに OVERALL が FAIL という説明不能な出力になる。 2026-09-05 実測)。 relaunch は `pgrep -fl <script>` で旧 run の不在を確認してから、 出力 file は run ごとに別名。
+8. **汎用 dual が緩い時は問題の構造から明示 dual を組む** (2026-09-05 実測): 共通下界 SDP の dual を SLSQP に解かせると identity 近傍で止まり dual ≈ Tr a + Tr b (primal の 50 倍) で sandwich が無意味になった。 a, b が単位 vector u, v 方向にほぼ rank-one なら (Y, Z) = t(Q_u, Q_v)、 t = 1/(1−|⟨u|v⟩|) が dual 実行可能 (‖p_u + p_v‖ = 1 + |⟨u|v⟩| ⇒ Y + Z ≥ I) で、 値 t[Tr(Q_u a) + Tr(Q_v b)] は証明で使う不等式そのもの = **証明の核心不等式 = 明示 dual certificate** という一致が起きる。 solver の dual は「出せたら報告」、 上界として引用するのは構造から作った方 (`gpt_measurements.py` の `nearly_rank_one_clb_bound`、 一般則 = [`physics-verification-cycle.md#definition-level-judge`](physics-verification-cycle.md#definition-level-judge) kernel 14)。
+
+**関連**: [`physics-verification-cycle.md#definition-level-judge`](physics-verification-cycle.md#definition-level-judge) (証明書ベースの定性判定を検証 item の既定にする理由) / [#verify-independent-derivation](#verify-independent-derivation)。
+
+
+## <a id="analytic-kernel-checks"></a>解析接続した積分核の検証
+
+実変数で得た積分表示を複素変数へ延長し、成分微分・角度積分・次元漸化式で再構成するときの注意。以下は数学と数値計算の共通事項で、特定の模型の導出や検証データは各 project が持つ。
+
+### <a id="complex-null-is-not-zero"></a>複素双線形の零は零ベクトルを意味しない
+
+複素ベクトル $z$ では $z^Tz=0$ から $z=0$ は従わない。例えば $z=(1,i)$ は $z^Tz=0$ だが $z^\dagger z=2$。正定値のエルミートノルムと解析接続用の双線形を区別する。
+
+角度積分の式に $\sqrt{z^Tz}$ による除算が出たら、値が0の分岐でベクトル項を消すのでなく、整関数表示または極限を使う。$F(z^Tz)$ の成分微分は $2z_iF'(z^Tz)$ なので、$z^Tz=0$ 上でも非零になりうる。fixture は零ベクトルと非零の複素 null ベクトルを別々に持ち、疑わしい角度縮約を使わない直接求積と照合する。
+
+### <a id="partial-derivative-held-variables"></a>微分の固定変数を変数変換後も明示する
+
+成分から不変量・半径などへ変数を変えた場合、同じ名前の偏微分でも固定する量が違えば別の演算子になる。一般に $F(t,s(t,x))$ に対し
+$$
+\left.\partial_t\right|_x F
+=\left.\partial_t\right|_s F+
+\left.\partial_t s\right|_x\,\partial_sF.
+$$
+導出と API の両方に固定変数を明記し、元の独立成分を動かす差分か記号計算で検証する。拘束面への代入は必要な微分の後に行う。次元漸化式などで別の変数を固定する操作とは混同しない。
+
+### <a id="precision-through-final-comparison"></a>精度は入力から最終比較まで追跡する
+
+高精度積分の設定桁数は、最終的な検証桁数を保証しない。入力を通常の float で作る、途中で Python complex や NumPy complex128 に変換する、行列積だけを倍精度で行う、といった段階が精度の上限になる。設定桁数、実際の dtype、比較した残差の定義を一緒に記録する。
+
+最大成分差を行列全体の最大成分で割る誤差は、各成分の相対誤差ではない。微小成分の検査には別の尺度または絶対誤差を用いる。少数点で機械精度まで合うことは、領域全体の一様誤差や積分打切り誤差の証明にならない。 複素量も同じで、 全体の相対誤差と、 実部・虚部を個別に割った相対誤差は別の数になり、 成分が零点に近いと成分の側だけが大きくなる。 どちらを述べるかを書く。
+
+### <a id="reference-side-numerics"></a>照合の「厳密」 側も数値である — 参照実装の有効域・丸い入力・巨大な位相の差
+
+近似式を直接求積 (「厳密」) と照合して食い違ったとき、 壊れているのは近似の側とは限らない。
+
+1. **参照実装には有効域がある**。 点数を固定した求積 (Gauss 求積・固定分割) は、 鋭いピークや長い振動のある極端な parameter で黙って別の値を返す。 呼び出し規約 (引数の順序・単位・規格化) は穏当な parameter で照合し、 極端な領域は解析的な anchor (厳密に成り立つ特殊配置・既知の極限) で固める。 極端な領域の不一致を近似の誤りと読む前に、 参照が点数を変えて動かないかを見る。
+2. **理論上依らないはずの parameter で「厳密」 側が動いたら、 まず厳密側を疑う**。 細分しても別の求積法でも動かなければ求積の分解能のせいではないので、 次は被積分関数の評価そのもの (4) を疑う。 それでも分からなければ未解決として残し、 近似の誤りと書かない。
+3. **細分しても・別の求積法でも同じ値が出ることは、 被積分関数の評価が正しいことを保証しない**。 収束は「与えた被積分関数の積分」 に対するもので、 被積分関数が丸めで壊れていれば、 どの求積も同じ誤った値に収束する (収束して見える誤り)。 疑う合図は、 食い違いが位相や指数の大きさと共に単調に増えること。
+4. **巨大な位相どうしの差は、 別々に評価してから引かない**。 $e^{iaL}$ と $e^{-ibL}$ を別々に計算して掛けると、 $aL$ と $bL$ がそれぞれ倍精度に丸められ、 相対位相 $(a-b)L$ に $O(aL\times10^{-16})$ の誤差が乗る ($aL\sim10^{15}$ で $O(0.1)$ rad)。 共通の位相を解析的に落とし、 差を代数的に作る (例: $\sqrt{E^2-m^2}-E=-m^2/(E+\sqrt{E^2-m^2})$)。 大きな正と負の和になる実指数も同じく相殺なしの形にする。 直したら、 高精度演算 (mpmath 等) の参照に対して「分けて評価した積は閾値を超え、 直した形は下回る」 を negative control として検査に残す。
+5. **丸め誤差の仮説は丸くない一般の点で検査する**。 0.05・1・20 のような丸い入力では積や差が偶然きれいに表現され、 誤差が何桁も小さく出るので、 正しい仮説を棄却する (実測)。 seed を固定した乱数の点で rms を取り、 丸い点の結果は「誤差が隠れる例」 として別に残す。
+
+6. **半無限区間に掛けた適応求積は、 細い山を見落とす**。 被積分関数が区間のごく一部 (相対幅が小さい山) にしか支持を持たないとき、 $[a,\infty)$ への適応求積は誤差推定ごと外れた値を返す。 見分ける症状 = 規格化した比が 1 を超える、 依らないはずの parameter で値が大きく振れる。 山の位置と幅が分かるなら、 山の周りの窓を幅で scale した変数 (対数など) に取り、 非適応の則 (密な Simpson 則など) で積分して点数を変えて確かめる。 参照実装を別の regime に持ち込む前に、 その regime の既知の極限 (規格化が 1 になる、 比が 1 以下) で 1 点試す。
+7. **減衰する振動積分を力ずくで積む手順**。 減衰が二重指数になる変数 (rapidity 型) に移す / 無限方向は台形則、 端で被積分関数が奇になる半直線は分割した Gauss 則 / 分解能は、 減衰した支持の中での位相勾配の最大から決める / 分解能を変えて確かめる。 閉形式はまず散らした複素引数で力ずくの値と照合し、 力ずくが届かない領域 (遅い時刻など) の走査は閉形式で行う。
+8. **配列 library の罠**: 行列に scalar を足すと全成分に足される。 単位行列の scalar 倍を書く。 射影子が「成り立たない」 のが症状 (実測)。
+
+9. **相殺で小さくなる積分は、 丸めの床より下では雑音になる — 比を取ると見分けにくい**。 振動や符号の相殺で値が被積分関数の大きさよりずっと小さくなる点 (分布の裾) では、 力ずくの求積の値は (被積分関数の最大値) × 10⁻¹⁶ × (点数) 程度の丸めの雑音になる。 条件付き期待値のように分子と分母の比を取ると、 雑音どうしの比がそれらしい O(1) の値になる (実測: 裾の 1 点で比が 2 割ずれ、 分母を見たら丸めの床の下だった)。 照合の点は、 分母が床より何桁も上にある所に選ぶ。 比を印字するときは分母も一緒に出す。
+
+10. <a id="coupling-to-zero-intercept"></a>**結合を 0 に近づける比較は、 ずれが結合に比例して 0 へ向かうかを見る**。 非摂動の計算と 1 次の式を比べるとき、 結合の 2〜3 点でずれを並べて切片を読む。 切片が残れば物理でなく数値の不一致で、 2 つの計算の初期状態や参照が違う (実測)。 ありがちな原因 = 位相の速い複素振幅を別の格子へ線形補間すること。 補間の中点の絶対値は、 位相の刻みを $\Delta\phi$ として $\cos(\Delta\phi/2) \approx 1 - (\Delta\phi)^2/8$ に落ちる。 格子ごとに解析の式で直接評価する。
+
+11. <a id="extreme-parameter-reference"></a>**極端な parameter の参照は、 縮尺せずに次元を落として作る**。 被積分関数が、 他の変数を固定すると Gauss 型になる方向 (分散関係の横の成分など) は、 係数の依存を残したまま解析的に積分し、 残りを低次元の滑らかな積分にする。 打ち消し合う巨大な位相は、 共通の位相を代数で落としたうえで、 残りを多倍長 (mpmath の 50〜60 桁) で運ぶ。 縮約は、 何も展開しない積分と一度照合する: 安ければ実の格子の総当たり、 位相が速くて格子が届かない所では、 Gauss 部分の鞍点を通る複素の直線 (最急降下の向き) に沿った積分 (被積分関数が滑らかな鐘形になる。 その直線の上で被積分関数が解析的であることを先に確かめる)。 縮尺した parameter で済ませると、 実際の値では小さい組み合わせが O(1) になり、 照合するつもりの近似と関係の無いずれが出る (実測。 読み方 = ai-collaboration の [`physics-verification-cycle.md#uniform-limit-check`](../../ai-collaboration/conventions/physics-verification-cycle.md#uniform-limit-check))。
+
+12. <a id="det-from-eigenvalue-product"></a>**行列式を固有値の積で出さない — 固有値が倍精度の幅まで開く行列では、 小さい固有値が丸めで混ざる**。 複素対称行列の Gauss 積分で $\sqrt{\det}$ の分枝を取るために、 固有値の主値の平方根を掛ける書き方は、 最小と最大の固有値の比が $10^{-15}$ 程度まで開くと崩れる: 固有値の計算の後退誤差 ($\varepsilon\|A\|$) が小さい固有値と同じ大きさになり、 縮退に近い対が混ざって積が % の桁で狂う (実測: 平方根で 1%)。 LU の行列式 (`numpy.linalg.slogdet`) はこの形の誤差を出さなかった (多倍長の行列式と照らして、 大きさも位相も丸めの桁で合った = 実測)。 行列式は大きさも位相も `slogdet` から取り (`root = sqrt(sign)·exp(½ log|det|)`)、 固有値の積は平方根の ± を選ぶのにだけ使う (固有値の積に近い方の符号を取る)。 固有値の積は、 大きさが % の桁で狂う所で位相も $10^{-6}$ rad の桁でずれた (実測) = 位相を固有値の積から取ると、 閉じた式で 0 になる量 (実の振幅どうしの干渉項など) がその桁で残る。 見分ける症状 = 連続な parameter を振ると、 ずれがある値を境に階段状に現れ、 その前後では何桁も一定 (物理の効果なら滑らかに動く)。 理論上 0 に連続につながるはずの極限 (角度 → 0) で、 ずれが不連続に跳ぶのも同じ合図。 同じ行列で `slogdet` と固有値の積を並べて印字すると 1 回で切り分けられる。 他の検算がその道具の積分を「厳密」 側に使っている場合も、 この形の行列に当たる parameter では上の 2 のとおり厳密側を先に疑う。
+
+長い照合 job の進み具合は、 出力を `tail` に流さず `python3 -u … > log` にして log を読む ([`debugging-discipline.md#no-pipe-interactive-script`](debugging-discipline.md#no-pipe-interactive-script) と同じ機構)。
+
+### <a id="narrow-reweighting-shift"></a>狭い分布に重みをかける展開は、 重みの 1 階の項を落とさない
+
+幅 $\sigma$ の狭い分布に滑らかな重み $e^{g}$ をかけると、 中心は $\sigma^2 g'$ だけ動き、 幅の 2 乗は $\sigma^4 g''$ だけ変わる。 調べる量が $1/\sigma^2$ の大きさなら、 中心のずれとの積は $\sigma^0$ で残り、 狭い極限で消えない。 $g''$ の項だけを残した主要項の式は、 その量が中心の位置に依らないときにしか使えない。
+
+- 残る項の係数は分布の 3 次の形 (非対称さ、 量の関数形の曲がり) で決まる。 ある変数でガウスの分布で導いた式を、 その変数の関数でガウスの分布 ($x$ と $x^2$ など) へ流用しない。 幅が同じでも係数が変わる (実測)。
+- 重みの 1 次の効果は一般に $\mathrm{Cov}(g, \text{量})$ で書ける。 分布の形を断らずに「1 次は消える」 と書かない。
+- 確かめ方 = 定義からの数値と比べ、 残差が $\sigma^2$ で減ることを見る。 残差が $\sigma^0$ で残れば項が足りない。
+
+### <a id="differentiate-integrands-before-quadrature"></a>有限微分は可能なら被積分関数に作用させる
+
+積分値への高階数値微分を入れ子にすると、高精度求積が何重にも走り実行時間が増える。収束の一様支配などで微分と積分の交換を正当化できるときは、被積分関数を解析的に微分し、係数漸化式で単一の求積に保つ。その導出の自己照合に加え、元の積分や異なる変数での求積を検証経路に残す。交換の正当化を省略して高速化しない。
+
+### <a id="closed-form-function-class"></a>閉形式は関数クラスと残る操作を明記する
+
+有限和・有限階の微分表示・標準特殊関数による表示は同じ主張ではない。closed form と報告するときは、初等関数／一変数特殊関数／多変数特殊関数のどれか、未評価の微分・積分・漸化計算が残るかを明記する。元の積分を新しい関数名で呼ぶだけでは既存の関数クラスへの帰着にならない。
+
+一般の整数次数の式は有限個の次数での記号照合だけで済ませず、係数漸化式・端点を含む帰納法などで全次数を証明する。特殊なパラメータ面の簡約、全解析領域の恒等式、数値的に安定な評価領域を区別する。特定の変換や微分方程式の構造が不適合でも、他の関数表示すべての不可能性までは従わない。
+
+### <a id="truncated-profile-asymptotics"></a>有限区間で切った profile の漸近
+
+無限台で定義した滑らかな profile (Gauss など) の変換の減衰は、 有限区間で切った同じ profile には引き継がれない。 部分積分の端点項 $[\chi(L)e^{iqL}-\chi(0)]/(iq)$ は、 端の値がどれほど小さくても $1/q$ の裾を残す (端で全階の微分が消える profile だけが超代数的に減衰する)。 「裾が無い」 と書く前に端の値と導関数を評価し、 端点の漸近形との比が 1 に近づく数値を 1 点残す。 離散化した近似 profile は、 それ自身の不連続を持つ。
+
+### <a id="zero-inventory-across-cut"></a>cut を越えて解析接続した関数の零点を数える (伝播関数の複素極など)
+
+閾値より先や複素平面で、 逆伝播関数の零点 (伝播関数の極) を全部数えるときの手順。
+
+1. **第 2 sheet は閉形式で書けることが多い**: 非局所の部分が 1 つの基本関数 (2 体の bubble 関数など) に線形なら、 第 2 sheet = 第 1 sheet + (基本関数の cut の跳び × その係数) が厳密に成り立つ。 跳びの式は閉形式から写すだけで済ませず、 被積分関数の側から 1 回導いて照合する (分母が 0 になる 2 点の間の積分は、 多項式の積分で厳密に出る)。 cut を越えた連続性 (第 2 sheet の下の縁 = 第 1 sheet の上の縁) を数点で確かめ、 跳びの符号を逆にした sheet が連続にならないことを foil にする。
+2. **区域に名前を付けて数える**: 第 1 sheet / 第 2 sheet のうち cut を 1 回越えて届く側 / 第 2 sheet の別の軸を越えないと届かない側。 反対側から cut を越えた sheet の零点は Schwarz の鏡映で決まるので、 片側を数えれば両側が決まる。 第 2 sheet だけにある特異点 (等質量の 2 体なら擬閾値 0) の近くには、 その特異点の係数と局所項の比で位置が決まる零点が出る。 小さい引数の漸近式で予言して照合する。
+3. **cutoff つきの関数 = 漸近形 + 整関数の余り**: proper-time 型の積分なら、 指数積分 E_{p+1} の級数のうち cutoff の負冪で消える項 (k > p) が余りになり、 余りは cut を持たない。 円の上の値から FFT で Taylor 係数を作れば、 余りは cut の近くでも求積なしで評価できる (cut の近くで直接求積すると、 被積分関数の対数の特異点で精度が落ちる)。 cutoff つきの関数の第 2 sheet = 漸近形の第 2 sheet + 同じ余り (cut の跳びは regulator に依らない)。 分解そのものは、 適応求積の高精度の参照と、 実軸と複素の点で照合する。
+4. **数え方**: 偏角の原理を log-polar の扇形の境界で取る (半径の範囲が何十桁に渡っても同じ手順で数えられる)。 位相は、 各段の位相の変化と絶対値の比が小さくなるまで線分を二分して追う。 位置は扇形を winding number で二分して決め、 十分小さくなったら Newton。 実軸に乗る零点は、 関数が実の区間だけで符号の変化から数える (cut の縁など、 関数が実でない区間では数えない)。 扇形は軸のごく近く (角度 η) を除くので、 軸をまたぐ扇形の総数 = 上下の数 + その軸の上の実の零点、 の照合で境界の線に乗った零点を拾う。 除いた原点の近くの小円は、 そこで 1 つの項が支配することを確かめて零点が無いと言う。 数えた数と位置を決めた数の一致を毎回検査する。
+5. **数え方そのものを検査する**: 零点の分かっている関数で。 実軸で符号の変化を数える部分を試す関数は、 実軸の上で実でなければならない (零点を共役の対で置く。 そうしないと、 数え方が無い零点を拾う = 実測)。 零点が実際にある場合 (cutoff の外の既知の零点、 係数を小さくして作った零点) を positive control に、 局所展開で打ち切った form factor が偽の零点を作ることを foil に置く。
+6. **対数の残る漸近形の零点は Lambert W の枝で書ける**: z (ln(1/z) + c) = B の解は z = e^c e^{W_k(−B e^{−c})}。 どの枝がどの sheet に乗るかは、 主値の対数の虚部が (−π, π] に入るかで決まる (cut を越えた sheet では対数が 2πi ずれる)。 枝を広めに (k = −3 … 3 など) 全部走査して、 各 sheet に乗る枝の数を検査する。 漸近形の零点は cutoff の近くにあることが多く、 そこでは cutoff の profile が位置を変える。
+
+## <a id="operator-time-state-order"></a>一般時刻の演算子と初期状態の依存順を分ける
+
+時間依存する場から状態を構成するときは、一般時刻の場・射影・演算子恒等式を先に揃え、初期時刻の真空と状態、その近似、伝播後の観測量の順に説明する。時刻0で定義して後から一般時刻に戻す往復を避ける。演算子の恒等式には作用空間を明記し、真空期待値を取ったスカラーの振幅と同一視しない。
+
+二時刻の式は両方の時刻を非零にして検査し、可能なら独立な Hamiltonian から Heisenberg 発展を作る。一方を常に0にすると、時間差と時間和の取り違えを検出できない。等時刻の正準関係、異時刻の位相、初期真空への作用は別々の検査項目にする。
+
+モード係数の近似、波形の一致、真空ベクトルの近さ、観測量の誤差は別の主張である。ある行列要素の一様絶対誤差から、状態のノルム収束、干渉零点での相対精度、無限時間積分の誤差を無条件に推論しない。具体的な演算子・近似・誤差境界は研究 project のノートと検証コードが所有する。
+
+場に自己共役性などの拘束を課すと独立な生成消滅演算子の数も変わるため、拘束前の Fock 検査を単なる記号置換で流用しない。拘束後の正準関係から検証用の演算子を作り直す。二つの理論を比較するときは観測量、初期状態の選び方、参照基底を揃え、同じ名前の量でも定義が違えばその差を理論の物理的相違と呼ばない。
+
+## <a id="observable-projectors-and-symmetry"></a>部分空間の和・電荷・保存則の対象を固定する
+
+ユニタリ変換後の和を簡約する前に、和を取る添字の範囲を固定する。完全な基底なら $U^\dagger U=1$ だが、観測する部分空間だけなら $U^\dagger P U$ という射影が残る。検出可能な成分の和、完全な基底の和、保存電荷を同じ「total」で呼ばない。重い成分などを切り落とす近似では、部分行列の非ユニタリ性と初期状態の規格化を別に確認する。 保存量 $Q$ と可換な観測量の期待値は密度行列の $Q$ 対角ブロックだけで決まるが、 各ブロックは縮退した部分空間の上の行列のままで、 $Q$ のスペクトル (スカラーの重み) には自動では縮約されない。 スカラーの重みで書くときは、 各固有値でブロック内の状態 (ほかの自由度の分布) を固定する仮定を主張の初出点に書く。 反例の作り方 = 同じスペクトルで縮退の中だけが違う 2 状態 (2 準位の重ね合わせの相対符号) を作り、 観測量が別の値を返すことを確かめる。
+
+<a id="measurement-operation-in-the-claim"></a>**測定の操作は式の一部として書く。** 特定の状態への射影、 有限の窓での和、 完全な終状態の和は別の観測量である。 途中の座標表示の近似が破れても、 和を先に厳密に取った別の表現で結果が保たれることがある = 近似の破れを結果の破れと読む前に、 どの操作の順で出した式かを見る。 同じ密度演算子が異なる純粋状態の混合に分解できるなら、 1 つの分解の成分の parameter は、 準備の模型を置くまで観測量と呼ばない。
+
+電荷は成分数でなく生成子で定義する。複素共役の場は元の場と逆の U(1) 電荷を持つため、場を共役成分へ書き換えた後の無重み和を、元の電荷と同一視しない。基底変換では状態だけでなく観測演算子も変換し、元の基底で計算した期待値と照合する。
+
+一つの相互作用項が対称性を保つことと、理論全体が保存則を持つことを区別する。時間に陽に依存しない電荷の保存を主張するには、完全な Hamiltonian について $[H,Q]=0$ を確認し、破る項がないという条件を主張の初出点に置く。[第一原理との照合](#first-principles-crosscheck)では、対称性を回復する極限と破る項を戻した例を両方残す。縮退した固有状態の基底選択に依存せず同じ電荷が得られるかも確認する。
+
+初期状態の違いは時間発展の違いに見えることがある。参照基底への射影で作った状態とエネルギー固有状態を比較するときは、同じ Hamiltonian でそれぞれを独立に発展させる。相互作用が特定の射影を含むことだけから、生成される粒子の状態もその射影ベクトルだと決めない。生成過程との同定にはその過程の行列要素が必要である。具体的な模型・反例の値・実装は研究 project が所有する。
+
+## <a id="exact-rational-pipelines"></a>厳密有理数の記号計算 pipeline に `nsimplify` を通さない — 抽出器は単項式の閉形式で先に叩く (2026-09)
+
+**Pattern**: 1-loop の極や tensor 係数を sympy の厳密有理数で出す pipeline で、途中の `sympy.nsimplify` (入力行列の整形のつもり) が分母の大きい `Rational` を float と見なし、代数的数に「同定」した (実測: 有理数の代わりに $5\cdot2^{307/522}3^{5/29}\cdots$ が混入)。 256 成分のうち数成分が $10^{-14}$ だけ、別の量では $O(1)$ で狂い、数値誤差に見えて原因が隠れた。 同じ pipeline で、2 本目の propagator を展開式 $(p+q)$ と逆向き $(p-q)$ に流した誤りと、印字式の上下添字を下げずに成分で比べた誤りが重なり、3 つとも「恒等式が成り立たない」という物理の結論に見えた。
+
+**Rule**: (1) 厳密 pipeline では `nsimplify` を使わない (float を有理化したい入口だけ、`rational=True` と許容誤差を明示する)。 入口で Float を拒否する (`expr.atoms(Float)` が空であることを assert)。 (2) 極・積分の抽出器は、物理の量に使う前に**単項式の閉形式** (Feynman parameter の rank 0–3) と既知量 1 つ (QED 真空偏極の $\tfrac43(q^2\eta^{\mu\nu}-q^\mu q^\nu)$) で単体検査する。 上の 2 つの誤りは単項式検査で数秒で出る。 (3) routing は展開式に合わせて 1 か所で決め、逆向きは $q\to-q$ で読み替える。 (4) 印字式どうしは、全添字を計量で下げてから比べる。 (5) 劣決定の線形拘束を `sympy.solve` で解いた結果はそのまま使わない。 退化した branch が返ったことがある (実測: Ward 恒等式の拘束)。 期待する構造を直接代入して残差 0 を確かめる。 <a id="rational-point-is-a-sample"></a>(6) 有理数の試験点で全成分の残差が厳密に 0 になったことは、 丸め誤差の無い**標本点の検査**であって、 恒等式の証明ではない。 記号のまま簡約した検査 (trace の縮約など) とは別の証拠として、 別の行で報告する。 出力には試験点・添字の位置・計量・規格化・除いた領域 (分母が 0 になる配置、 運動学的に禁じた領域) を書き、 特異になりうる配置を試験点に 1 つ入れる。 期待値は検査対象と独立に導き、 同じ実装から作った期待値で自分を確かめない ([#verify-independent-derivation](#verify-independent-derivation))。 道具 = 層1 [`one_loop_pole.py`](../../ai-collaboration/scripts/one_loop_pole.py) (Float 拒否と単項式 selftest を内蔵)。 全 parameter を記号にした積分が終わらないときは、 係数側の parameter を有理数に固定し、 答えの構造を決める変数だけを記号に残す。 数組の有理点で係数が一致すれば多項式恒等式としては実質一般だが、 報告は標本点と書く。
+
+**Why**: 検算が落ちたとき、物理の失敗と読む前に道具の失敗を安く排除する順序にする ([#verify-independent-derivation](#verify-independent-derivation) の道具側)。 「恒等式が成り立たない」が出たら、まず単項式検査を回す。
+
+## <a id="chain-tail-credible-level"></a>MCMC chain から尾の信用水準を出すときは、 chain を間引かず、 推定法を並べる
+
+模型の点 (または軌跡) が事後分布のどの等高線に乗るかを、 公開 chain の密度推定 (KDE) と標本の順位づけで出す計算は、 尾 (99% より外) で次の順に壊れる (実測)。
+
+- **速度のための間引きが値を動かす**: 尾では近くの標本が数個しかなく、 帯域の狭い kernel は標本 1 個ずつの山を作る。 軌跡に沿った最小値は「たまたま標本の近くを通った点」 で決まるので、 chain の偶数行だけ・奇数行だけで $\Delta\chi^2$ が 1〜2 違う。 間引きは速度のためでも入れない。 入れたなら、 残りの半分で同じ計算を回して差を見る。
+- **推定法を 2 つ以上並べる**: 同じ全 chain で、 帯域を変えた KDE と、 別実装 (境界補正つきの標準の道具) を並べる。 表に載せるのは、 推定が丸めの範囲で一致する行は 1 つの数、 一致しない行は範囲。 軌跡に沿った値が滑らかか (最小が 1 点だけの谷でないか) も見る。
+- **分解能を重みで数える**: 点の密度がどの標本よりも低いとき、 言えるのは「chain の外」 までで、 その閾値は (最も密度の低い標本の重み)/(重みの和) から出す。 行数で数えると、 重みつき chain では閾値を低く見積もる。
+- **実効標本数を見る**: 重みの和が $10^5$ でも、 相関を除いた実効標本数は 1 桁少ないことがある。 $-2\ln(1/N_\text{eff})$ より先の水準は、 独立な標本が数個の領域として書く。
+- **別の推定との差を、 原因を確かめずに推定法の違いと書かない**: 「別の推定では 1〜2 低い」 が観測でも、 原因が境界補正か、 帯域か、 間引きかは、 条件を 1 つずつ変えた列を並べるまで分からない。
+
+## <a id="threshold-by-root-not-grid"></a>符号や大小が変わる点は、 格子の値から読まずに根で出す
+
+走査の格子点で「ある点では正、 隣の点では負」 と分かったとき、 本文に書く境目を格子点のどちらか (「約 (下の格子点) より下で正」) にしない。 被積分関数や解を関数にして根を解き (`brentq` など)、 極値も同じ関数で出す。 格子は根を挟む区間を見つけるためだけに使う。 根を出す行を根拠の script に入れ、 出力を保存する (格子の出力だけを残すと、 後から読んだ人が同じ読み違いをする)。 主値積分は、 対称に切り取る方法と QUADPACK の Cauchy 重みの 2 通りで出して一致を見る。
+
+## <a id="table-corners-as-nodes"></a>表で関数を引く (逆引きも) ときは、 折れ目を表の点にし、 確かめの掃引で折れ目を通る
+
+`max(0, ·)` で切る成分や、 最大・最小の成分が入れ替わる式 (`(max + min)/2` など) を含む関数は、 切れる点・入れ替わる点で微分が跳ぶ (折れ目)。 等間隔の点の表を線形補間すると、 折れ目をまたぐ区間だけ誤差が (傾きの跳び) × (刻み) の桁になり、 滑らかな区間の (刻み)² の桁より何桁も大きい (実測: 滑らかな所で $10^{-8}$ の逆引きが折れ目で $6 \times 10^{-5}$)。
+
+- **折れ目を点にする**: 切る前の式の符号が変わる区間を粗い格子で見つけ、 二分法で倍精度の最後の桁まで詰め、 表の点に足す (`np.unique(np.r_[grid, corners])`)。 折れ目が表の範囲の端を決めている (成分が全部切れて値が平らになる) なら、 端もその点になる。
+- **確かめの掃引は折れ目を通る**: 等間隔の粗い掃引 (例 = 100 おき) は折れ目に当たらず、 誤差を見逃す (実測: 65 点の掃引が通り、 折れ目で基準の 50 倍ずれていた)。 掃引に、 折れ目の前後を細かく取った点を足す。
+- **成分の 0 の近くの相対誤差**: 偏移や縮尺をした後に 0 を通る成分 (例 = 色の 1 成分) は、 その近くで値が小さく、 入力の誤差を成分自身に対する相対誤差として際限なく拡げる。 相対の基準は、 成分が一番大きな成分の一定割合 (例 = $10^{-4}$) 以上の所で成分自身に対して、 それより小さい所では一番大きな成分に対して測り、 全成分を自身に対して測った値も並べて出す (実測: 入力の $6 \times 10^{-9}$ の誤差が、 0 の近くの成分では成分自身の $8 \times 10^{-4}$ になった)。 基準を満たせないなら表を細かくする (線形補間の誤差は刻みの 2 乗で下がる)。
+
+## <a id="chunk-wide-broadcasts"></a>(点の数) × (求積の点) の配列は、 点の側で分けて作る
+
+スペクトルの和・求積を numpy の broadcast で書くと、 中間の配列は (評価する点の数) × (求積の点の数) になる。 点が画素 (数百万〜数千万) だと数 GB から数十 GB になり、 機械の swap を埋める。 macOS ではメモリの不足で jetsam が起き、 その process と一緒に常駐の process も kill される ([`macos-exec-policy-kill.md#jetsam-not-exec-policy`](macos-exec-policy-kill.md#jetsam-not-exec-policy))。 点の側を数千ずつに分けて回し (結果の配列だけを持つ)、 画像の縮小も帯ごとに行う (縮小の比が整数の比なら、 帯の境が箱の境に一致する)。 重い script は `/usr/bin/time -l` で最大の常駐の大きさを見てから大きい入力に回す (実測: 100 万点で数 GB を使っていた計算を 4096 点ずつにして 0.2 GB)。
+
+## <a id="sampled-extremum-metrics"></a>格子で標本化した曲線の極値から作る量 (可視度・コントラスト・ピーク比) は格子に依る — 表に写す前に収束を確かめる
+
+- **偏りの向きが決まっている**: 標本化は極大を下げ、 極小を上げる。 同じ極値の組なら、 局所可視度 (I_max − I_min)/(I_max + I_min) やコントラストは真の値**以下**にしか出ない。 縞の間隔が狭い条件ほど大きく下がるので、 条件どうしの比較 (どれが見やすいか) にも偏りが入る。 報告した値が独立実装の収束値より揃って下にあるのは、 標本化を疑う印になる。
+- **離散的に跳ぶ**: 「隣り合う極大と両隣の極小の組」「中心に近い半数の中央値」 のように極値を数えて組む定義は、 格子の点数を 1 つ変えただけで値が大きく跳ぶ。 粗い格子では極値の標本化そのもので、 細かい格子 (1 縞に数十点) でも極大が 1 本少なく数えられる点数では、 中央値が別の縞の値に移る (実測)。 評価する範囲を変えても、 数える縞が変わって値が動く (範囲が裾の閾値より狭いと、 外側の縞が抜けて中心寄りの値が上に出る)。
+- **表に写す前に**: 格子を 2 倍にして値が動かないことを確かめ、 値の隣に格子 (範囲・点数) を書く。 値を出した script を commit してから写す。 探索の走査の script を捨てると、 後で独立実装と食い違ったときに原因が追えない (実測)。
+- **報告値と独立実装が食い違い、 元の script が無いとき**の手順:
+  1. 元のコードから模型そのものを回収し、 独立実装と機械精度で比べる (模型の違いかどうかを先に切る)。
+  2. 残る数値の自由度 (格子・範囲・窓) は、 残っている図の枠と目盛り (画素から描画範囲が読める) と、 **目標以外の**報告値で決める。
+  3. 予言の手順と判定の線を、 目標の値を計算する前に commit する ([`physics-verification-cycle.md#rubric-before-run`](../../ai-collaboration/conventions/physics-verification-cycle.md#rubric-before-run))。 目標に自由度を合わせると、 どの自由度の値でも合ってしまう (後付け適合)。
+  4. 結果は予言の分布の中の位置 (下から何 %) と一緒に書く。 区間に入っても「元の格子が分かった」 とは書かない。
+
+## <a id="truncation-dependence"></a>打ち切りへの依存を読む — 動かない値は収束とは限らない
+
+区間・時間の窓・格子の周期・基底の大きさで打ち切って出した量は、 1 回の計算の値を見ただけでは信用しない。 値は他の量と同じ桁に収まって自然に見える (実測: 発散する量の値を表に入れかけた)。 次の 4 つを確かめる。
+
+1. <a id="increment-ratio"></a>**打ち切りを 2 倍ずつ変えて増分の比を取る** — 比が 1 より十分小さければ収束、 2^α に近づくなら打ち切りの α 乗で発散する。 発散なら、 冪を解析の冪 (スペクトルの端の振る舞い、 裾の減衰) と比べて原因を確かめ、 値を表から外す。 非有界な演算子の 2 次モーメントは、 状態が定義域に入っていないとき、 打ち切りに依る有限の値としてこの形で現れる。 式が代数として閉じていても、 定義域は別に確かめる。
+2. <a id="plateau-not-limit"></a>**値が動かなくなった先まで広げる** — 指数で小さい係数の裾を持つ量は、 極限が無くても、 裾が効き始める手前で値がほとんど動かない範囲 (高原) を作る。 「広げても変わらない」 は高原の中でも成り立つので、 収束の証拠にならない。 上の端が見えるまで広げ、 裾の冪を解析で出して、 そのモーメントの極限があるかを先に確かめる。 極限が無いなら 「極限からの補正」 は定義できない = 高原の値と、 その両端を報告する。 裾の係数が解析で分かれば、 上の端は式で出る。 裾の重い分布では 「標準偏差の何倍」 の基準も正規分布の見積もりから大きく外れる (実測)。 基準は分布の式から出す。
+3. <a id="sum-rounding-floor"></a>**冪を読む前に丸めの床を見積もる** — 打ち消し合う和の絶対誤差は、 刻みを細かくしても (機械精度) × (項の絶対値の和) より下がらない。 打ち消し合いで値がこの床に近づくと、 読んだ冪が曲がり、 打ち切りを広げても格子を細かくしても直らない (実測)。 局所の傾きが収束の向きと逆に動いたら床を疑い、 閉じた形か多倍長で評価する。 収束が遅いだけなら、 傾きは 1/T のように予言へ近づく向きに動くので見分けられる。
+4. <a id="grid-evolution-moments"></a>**格子で時間発展させてモーメントを足すときは、 時間の窓の両側の壁を先に計算する** — 周期箱 (長さ L) の波束は T = L/v で元の位置に戻り、 その裾が窓に入ると T² の重みで分散が大きく狂う (実測) = 窓は ±L/(2v) の内側に取る。 一様な運動量の格子の上の和は、 エネルギーの刻み pΔp で決まる時間 2π/(pΔp) の近くで折り返すので、 窓を広げすぎても同じことが起きる。 打ち切りと折り返しは、 窓を変えたときの誤差の符号で見分ける (実測: 広げたら誤差の符号が反転した)。 状態の形も効く。 コンパクト台の状態の Fourier 変換の裾は指数より遅く、 T の高次モーメントが窓に敏感になるので、 検算の状態はガウスに広い台の bump を掛けた形にする。 位置の格子の和で窓関数を足すときは、 格子の間隔 Δx を窓の幅より細かくする (e^{−x²/σ} の台形則の相対誤差 ≈ 2e^{−π²σ/Δx²})。 全ての点で同じ相対ずれが出たら、 物理より先に数値の側を疑う (実測)。
+
+## <a id="table-parts-sum-check"></a>全体と内訳を別の経路で計算した表は、 内訳の和が全体に合うことを検査に入れる
+
+全体を直接の積分で、 内訳を別の式で計算して 1 つの表に並べると、 片方の経路の数値誤差が表に黙って残る。 内訳の和と全体の差を script の検査に入れ、 差が許容を超えたら表を出さない (実測: 内訳の和が全体に足りず、 手で予想した値との差で気づいた)。
+
+差の原因で多いのは有限差分である。 2 次の中心差分 (`np.gradient`) は波数 k の成分を k(1 − (kh)²/6) 倍するので、 微分の 2 乗ノルムは (h²/3)⟨k⁴⟩ だけ小さく出る。 ⟨k⁴⟩ は関数の 4 次のモーメントで、 位相の速い関数や幅の狭い関数では大きい。 見た目の滑らかさでは分からないので、 値を表に写す前にこの量を見積もる。 式が分かっている関数は解析的に微分し、 格子の上の関数は高次の stencil か FFT で微分する。
+
+## <a id="symmetry-of-prescription-finite-part"></a>計算の処方が対称性を保つかは発散の係数では分からない — Ward 恒等式を極と有限部で別々に検査する
+
+1 ループの発散する積分の処方 (正則化と、 tensor の縮約のやり方) を変えても、 log の係数と、 発散より高い次数の収束する係数は変わらない。 変わるのは、 発散と同じ次数の**有限の局所多項式**だけである。 だから発散部が文献と合うことは、 その処方が対称性を保つ証拠にならない。
+
+- **検査**: Ward 恒等式 (gauge・微分同相) を、 極の係数と有限の定数とで別々に検査する。 対称性を保たない処方は前者を通り、 後者を局所多項式の分だけ破る。 残差を tensor の基底に分解し、 1 点関数の係数が掛かる構造と対称性の型が違えば (全対称と反対称など)、 その係数の定義を変えても吸収できない = 処方そのものが対称性を破っている。
+- **典型**: tensor の縮約だけを 4 次元で行い、 残った scalar 積分だけを次元について延長する処方 (教科書の例 = QED の真空偏極が横波でなくなる)。 この処方の有限の局所項は運動量の取り回し (parameter 積分の shift の後で縮約するか、 外線運動量で展開してから縮約するか) でも変わる = 一意な処方ですらない。 第 2 の経路で同じ量を出して比べると露見する。
+- **差の形は計算前に予言できる**: 縮約の因子 (1/d と 1/4 など) だけが違う 2 つの処方の差は、 (因子の差) × (極) = 表面的な発散次数の局所多項式。 何が違いうるか (局所定数) と違いえないか (log・非局所部分) を先に書いてから計算する。
+- **次元正則化の δ は内部か外部かを分類してから縮約する**: 外場の添字は 4 次元、 loop 運動量の縮約は d 次元。 背景場の作用に全体の密度因子が掛かっていると、 0 次の運動項に掛かる δ は内部の縮約になる (4 と数えると、 Ward 恒等式が局所定数の分だけ破れる)。
+- **「発散が無い構造の有限定数は処方に依らない」 は成り立たない**。 そう書く前に: (i) 上の検査、 (ii) 対称性を保つ別の regulator (共変な cutoff、 Pauli–Villars) で同じ量を計算、 (iii) 既知の極限 (重い場の decoupling、 質量零の anomaly) と照合。 処方に依らないのは、 同じ構造の 2 つの極限の差のような収束する量である。
+- **独立な検算の条件**: 検査したい性質 (ここでは処方が対称性を保つか) が異なる経路どうしで比べる。 実装や積分の順序が別でも、 同じ類の処方どうしの一致は、 その性質については 1 本の検算でしかない ([`#first-principles-crosscheck`](#first-principles-crosscheck) の対称性の検査を、 有限部にも当てる)。
+- **冪の発散を次元正則化の低い次元の極から読むとき** (2 次発散なら 2 次元の極) も同じ注意が要る: tensor の縮約を何次元で行うか、 余剰次元成分を入れるかで係数が変わる。 cutoff の結果と比べる前に、 どちらの流儀かを固定する。
+- **文献なしでできる規格化の検査を先に置く**: 背景場の 2 点関数の零運動量の値は 1 点関数 (真空エネルギー) で決まる、 のような恒等式で規格化と符号を固定してから、 文献と比べる。
+
+## <a id="literature-sign-map"></a>文献の式との符号の対応は、 規約に依らない項で固定する
+
+論文ごとに作用の全体符号 (Euclid / Lorentz、 有効作用の定義) と曲率の符号の規約が違い、 曲率 scalar の符号は本文から確実には読めないことが多い。
+
+- 対応は、 規約に依らない項 (質量の冪だけの項、 正定値の 2 次形式) で全体符号を先に固定し、 それから他の項を比べる ([`#calibrate-magnitude-sign`](#calibrate-magnitude-sign) の文献版)。
+- 1 つの項だけ符号が合わず、 ほかが厳密に合うとき: 自分の側を先に疑い、 その論文自身の入力 (前段の式・係数の表) と、 独立な別の文献の両方で確かめてから「印字の誤り」 と記録する。 記録には、 どの式とどの式が合わないかを書く。
+- 閉形式や数表を写して使うときは、 展開の最初の数項と両端の極限を自分の計算と突き合わせてから使う (全域の一致は、 数点での高精度の数値比較で見る)。
+- 有効作用の局所項と 2 点関数の form factor をつなぐ辞書 (曲率不変量の 2 次形式) は、 文献から写さずに導く: 1 座標だけに依る平面波の計量で曲率を厳密に記号計算し、 2 次の項を射影する。 辞書そのものの検査 = Gauss–Bonnet の組が 0 に射影される、 体積項が行列式の展開を再現する、 曲率の符号を球面で確かめる。
+- trace anomaly のように T^μ{}_μ を比べる量は、 曲率の規約に加えて signature と T^{μν} の定義で全体符号が変わる: 同じ正のエネルギーの T^{μν} で T^μ{}_μ は mostly-minus と mostly-plus で逆符号、 Euclidean の T_E^{μν} = −(2/√g)δW_E/δg_{μν} は mostly-plus と同じ値 (mostly-plus の Wick 回転は座標変換)。 文献どうしで anomaly の係数の全体符号が逆に見えるのは、 多くがこの換算。 文献ごとに ⟨T^μ{}_μ⟩ を定義する式 (δΓ/δσ の符号) を探して読み、 無ければ作用の signature から決める。 換算そのものは、 質量のある古典 scalar の計量変分で T⁰⁰ > 0 と T^μ{}_μ を各規約で出して確かめられる (実測)。
+
+## <a id="cas-library-traps"></a>記号計算・数値積分 library の罠と、 自作 engine の検算 (sympy / mpmath)
+
+実測で踏んだもの。 どれも error を出さずに違う答えを返すか、 関係のない所で落ちる。
+
+- 記号に仮定 (`real=True`・`positive=True`) を付けて `sympy.solve` を呼ぶと、 仮定に合わない根は黙って捨てられ、 空の list が返る。 「実の解が無い」「その根は虚数」 を示したい検査では、 探している根そのものが消える。 返り値の型も入力によって list と dict に分かれる (添字で読むと `KeyError`)。 1 変数の線形なら係数から直接解き (`-f.subs(y, 0) / f.diff(y)`、 線形性は `f.diff(y, 2) == 0` で確かめる)、 根が実か虚かは解いた後に調べる (実測)。
+- `expr.coeff(x)` は、 展開していない式では因子の中に隠れた項を落とす → 先に `expand`。 `expr.coeff(x, 0)` は `log(x)` を含む項を落とす → log を別の記号に置き換えてから係数を取る。
+- `x**2*log(x)` のように 0 で 0 に近づく項を含む式に `expr.subs(x, 0)` を当てると、 `0*log(0)` が `nan` になる。 `simplify(nan - 期待値) == 0` は False なので、 検査は「値が違う」 として落ち、 原因が代入の側だと読めない。 0 での値 (質量 0 の極限など) は `sp.limit(expr, x, 0)` で取る (実測)。
+- 不完全 gamma 関数の非正整数次 (`uppergamma(-n, z)`) の `series` は、 偽の虚部 (branch の項) を返すことがある → 0 次の関数から漸化式で下ろすか、 明示の級数で。
+- 極を掛ける展開は 1 次余分に取る。 打ち切った級数に多項式の前因子を掛けると、 打ち切り次数より上に偽の項が残る → 掛けた後で次数を切る。 打ち切った運動量展開で tensor の恒等式を比べるときは、 構造が運ぶ明示的な運動量の因子のぶん、 比べられる次数が下がる。
+- 対称積分 (tensor の平均) の後で、 先に代入した内積の記号が作り直されることがある → 平均の後にもう一度代入する。
+- regulator つきの parameter 積分が閉じた形 (Beta 関数など) になるなら、 先に厳密に積分してから展開する (級数の打ち切りが要らない)。
+- `sympy.series` を成分ごとに回すと遅い。 展開 parameter の多項式演算で済むものはそうする。 多数の成分の多項式恒等式 (tensor の全成分で恒等式を検査する等) は、 式を「指数の tuple → 有理数」 の dict で持って自前の加算・乗算で回すと、 `expand` を重ねるより桁で速い (trace だけ記号計算で取り、 あとは dict)。
+- macOS の Accelerate BLAS に繋いだ numpy (2.0 系で実測) は、 行列の積で `RuntimeWarning: divide by zero / overflow / invalid value encountered in matmul` を大量に出すことがある。 複素の行列どうしに限らず、 nan も 0 も無い実数の配列と vector の積 (画素ごとの方向の配列 `(H, W, 3) @ (3,)`) でも出る (実測)。 結果は正しかった (実測: 解析解のある小系の時間発展が 4 桁、 交換子の恒等式が 1e-14 で一致)。 警告を消す前に、 同じ code で答えの分かっている量を 1 つ再現して、 警告が偽であることを確かめる。 確かめた後は、 その積を `np.einsum` で書き直すのがよい: 警告は出ず、 値は同じ (実測: 実の行列と複素のスピノルの積、 1e-14 の照合で同じ値)。 行列どうしの積なら、 実部と虚部に分けた実行列の積 4 本に書いても警告は出ない (BLAS を使えるので大きな行列でも速い。 実測)。 `warnings.filterwarnings('ignore', category=RuntimeWarning)` や `np.seterr(all='ignore')` で消すと、 本物の overflow まで隠れる
+- SciPy の `kv(nu, z)` は実の z が約 700 を超えると倍精度で 0 になり、 比 `kv(nu + 1, z) / kv(nu, z)` は警告 1 つで nan になる (nan との比較は False なので、 `assert abs(ratio - 1) < c / z` は値を見せずに落ちる)。 比と対数は指数で割った `kve` (= `exp(z) * kv`) で取る。 複素の `z` で `exp(-z y)` の実部と虚部を `quad` で積分するときは、 振動で丸めの限界が約 1e-11 に来るので、 許容誤差をそれより厳しくしない (警告が出ても値は合うが、 警告で本物の失敗を見落とす)。
+- `mpmath.quad` は、 逐次近似が厳密に一致すると誤差推定の割り算で `ZeroDivisionError` を出す (被積分関数がその引数でほぼ 0、 または厳密に積分できる形)。 小さい引数は級数に、 大きい引数は閉形式に切り替える。 閉形式は級数と数点で突き合わせてから使う。
+- 引数が大きい所での 1 − x 型の桁落ちは、 厳密な恒等式で書き換える (例: 比 (1 + a)/(1 − a) を、 1 − a² の厳密な式を使って (1 + a)²/(1 − a²) に)。
+- <a id="turning-point-gap-from-radicand"></a>**転回点を端に持つ求積で、 出発点から端までの隔たり √(w_p − w_0) を根 w_p と出発点 w_0 の差から取らない** — 被積分関数が 1/√P(w) で、 P の単根 w_p が積分の端のとき、 P = (w_p − w) q(w) と因数分解し w = w_p − s² で正則にするのは定石だが、 出発点が根のすぐ隣だと w_p − w_0 が丸めの大きさになり、 その平方根の誤差がそのまま答えに出る (例: Schwarzschild の光線の掃引角で、 カメラ自身が近点にいる向きの隣の画素)。 出発点での P の値を物理の量から閉じた形で出し (光線なら P(w_0) は出発点での動径方向の成分の 2 乗で決まる)、 s_0 = √(P(w_0)/q(w_0)) とする。 根そのものも、 3 次式の三角関数の解を引き算の無い形 (sin の和) に書いてから出す。 確かめ方 = 根の両側に 1e-13 から 1e-6 だけずらした入力で、 同じ光線を ODE で追った値と比べる (実測: 差から取る実装はこの帯で数桁外れ、 恒等式から取る実装は丸めの大きさで合った)。
+- <a id="singularity-just-outside-endpoint"></a>**平方根の特異点が積分の端のすぐ外にある被積分関数を、 置き換えなしの適応求積に渡さない** — 上の項の隣の形: 根 w_p が端ではなく、 端 w_e のすぐ外にある (P(w_e) は小さいが 0 ではない) とき、 1/√P を w のまま `scipy.integrate.quad` (QAGS) に渡すと、 警告を出さずに系統的にずれる。 ずれは隔たり √(w_p − w_e) に比例し (端に特異点がある積分として外挿し、 ∫ dw/√(w_p − w) の 2√(w_p − w_e) の項を取り落とした大きさ)、 隔たりが 0 に近づくとずれも 0 に近づく = 帯 (隔たりが区間の 1e-8 程度より小さい所) の外の点だけで照合すると見えない (実測: 光線の掃引角と遅延が、 観測者が自分の光線の近点のすぐ外にいる向きの帯で 1e-4〜1e-3 ずれ、 帯の外の受入値とは 1e-9 で合っていた。 光源が光線の近点のすぐ上にある通過でも同じ)。 直し方 = 転回点を持つ光線の脚は、 端が転回点かどうかに関わらず全部 w = w_p ∓ t² で積分し、 観測者の側の端の t は上の項の恒等式で出す。 見つけ方 = 根の両側に隔たりを 1e-10〜1e-2 で振った入力で、 置き換えの形と、 ODE で追った同じ光線と比べる。 ランダムな入力の照合で、 細かい格子が数える符号の変化の数が、 粗い走査で解いた根の数と食い違ったら、 偽の根を作る求積の誤差を疑う (どちらの根も ODE で追って確かめる)。
+- <a id="event-double-crossing-one-step"></a>**`solve_ivp` の event は、 1 歩の中で 2 度またぐ閾値を見落とす** — event は歩の両端の符号の違いでしか発火しないので、 極値のすぐ手前の値 (光線の近点の 1e-8 上の半径など) を閾値にすると、 1 歩の中で + → − → + と変わって発火しない。 結果は「その半径に届かない」 と区別が付かない (実測: 近点のすぐ上を通る光線を作る照合で、 event の配列が空になって落ちた)。 直し方 = 極値 (dr/ds = 0) を別の event で拾い、 密出力 (`dense_output=True`) の上で、 極値の時刻を区切りに入れた標本の符号の変化から brentq で解く。
+- <a id="carry-the-small-difference"></a>**ODE の状態の積や和が境界で決まった値に近づき、 欲しい量がその差からしか決まらないときは、 状態に値でなく差を持たせる** (例: Schwarzschild の特異点の近くの Kruskal 座標は U V → 1 で、 r は 1 − UV ≈ r²/2 からしか決まらない)。 値 U, V を f64 で持つと差の絶対誤差が 1e-16 に固定され、 差から出す量の相対誤差が 1e-16/r² に育つ。 逆関数の分岐点の近く (Lambert W の −1/e など) では出る値が雑音になり、 適応刻みの制御がその雑音を追って遅くなる。 許容誤差を厳しくしても直らず、 かえって終わらなくなる。 状態を (U − 1, V − 1) にし、 差を −(P + Q + PQ) で作り、 その逆は打ち消しの無い級数の Newton で解く。 差の成分の絶対許容誤差は、 その成分のその場の大きさに比例させる (固定の atol は小さい差を丸ごと消す)。 照合は ODE を使わない閉じた形 (保存量と 1 次元の求積) で行い、 失敗も nan も出さずに誤るので、 終わり方 (どの事象で止まったか) も数える (実測)。
+- <a id="length-cap-scales-with-speed"></a>**積分の長さに上限を置き、 上限に届いた解を「決まらない」 として既定の分類 (捕獲・暗) に入れる枝は、 動きの遅い解を黙って誤分類する** — 光線をアフィン径数で追う tracer では、 光子の振動数を観測者の系で 1 に揃えると、 Killing エネルギー |E| の小さい光線は遠くまで行くのに 1/|E| の長さが要る。 上限は解の速さ (保存量) の逆数に比例させ、 打ち切りと分類を別の値で返す。 上限の手前で終わる解は、 上限を延ばしても刻みが変わらないので結果も変わらない (実測)。
+- <a id="geometric-quad-breakpoints"></a>**何桁にもわたる区間 (0 から 10⁸ など) の適応求積を、 区切り点 1 つ (`scipy.integrate.quad` の `points`) で回さない** — 被積分関数が曲がる所が区間の端から何桁も離れていると、 警告だけ出して大きく外す (実測: 40 桁の mpmath と比べて 5 割以上)。 10 倍ごとの等比の区切り点と、 被積分関数の尺度が変わる点 (例: b²u³ = 1 の所) を区切りに入れ、 区間ごとに積分して足す。
+- <a id="tolerance-on-zero-component"></a>**成分ごとの絶対許容誤差を初期値に比例させると、 初期値が 0 か丸め誤差程度の成分 (対称軸に沿った光線の角運動量など) で刻み幅の制御が止まる** (`Required step size is less than spacing between numbers`)。 その成分が取りうる最大の大きさに比べる (例: 角運動量の成分は 1/r、 運動量の成分はいくつかの大きい方)。 端の点 (χ = 0, π) を照合の標本に入れると見つかる (実測)。
+- <a id="singular-stop-event-reachable"></a>**特異点の手前で止める event (半径などの閾値) は、 刻みが浮動小数の間隔に尽きるより手前に置く** — 解が有限の時間で特異点に届く ODE (r → 0 への落下など) では、 閾値を小さくしすぎると適応刻みが先に尽き (`Required step size is less than spacing between numbers`)、 event は発火しない。 動径の自由落下は r ∝ (τ_s − τ)^{2/3} なので、 r = 1e-10 に届くのは τ の浮動小数の間隔より特異点に近い所になり、 角運動量のある軌道ではそれより大きな半径で刻みが尽きた (実測)。 閾値は届く大きさにし、 加えて刻み切れの失敗 (`solve_ivp` の status −1) の最後の状態が特異点の近くなら「特異点に届いた」 と読み替えて、 ほかの失敗と分けて返す (同じ文の別の原因 = [#tolerance-on-zero-component](#tolerance-on-zero-component))。
+- <a id="matched-subset-statistics"></a>**照合の誤差の統計を「分類 (運命・枝) の合った点だけ」 で数えると、 分類を外した点が統計から抜ける** — 外す点が増えるほど誤差の最大が小さく見える。 統計の隣に、 外した点の数と、 外した点がどの層 (境の近く・端) かを必ず出す。 一部の層の標本だけで測った一致を、 全体の一致として報告しない (実測: 本体の標本だけの比較を全体の一致と書き、 境の近くの層の標本は上限で打ち切られて比較から抜けていた)。
+- 複素の対称行列 (Gauss 積分の、 実部が正の固有値を持つ広がりの行列など) の √det は、 固有値ごとの主値の √ の積で取る。 det の主値の √ は、 固有値の偏角の和が π を越えると符号が反転し、 照合した比の位相が π ずれる (実測)。
+- 大きな因子と小さな因子の積 (`exp(x²) erfc(x)` など) を因子ごとに計算すると `inf × 0 = nan` になる。 `scipy.special.wofz`・`erfcx` で積のまま計算し、 引数の実部が負の側は `erfc(x) = 2 − erfc(−x)` で枝を分ける。 `np.where` は使わない枝も評価して警告を出すので、 `np.errstate` をその計算の範囲に絞る (全体の `np.seterr` は本物の overflow を隠す)。 nan の行は表の中で見落としやすいので、 出力を `nan` で grep する (実測)。
+- 2 乗の移動平均の平方根 (`np.sqrt(uniform_filter1d(x ** 2, n))`) は、 0 が長く続く信号 (区間ごとに抜いた音など) では丸め誤差で移動平均が負になり、 nan になる。 `np.percentile`・`np.median` は nan が 1 つでも nan を返すので、 閾値に使うと配列全体が nan に広がる。 平方根の前に `np.maximum(…, 0)` で負を 0 にそろえる。 音を整数の PCM に書くと nan は黙って 0 (無音) になり、 `np.abs(x).max()` が nan で `peak > thr` は False になるので、 正規化も音割れの検査も素通りする (実測: 区間が丸ごと無音になり、 ほかの区間は頭打ちになった) = 書き出す前に `np.isfinite(x).all()` を確かめる。
+- 飛び (階段) のある被積分を一様な刻みの台形則で積分すると、 飛びの所に刻みの大きさの誤差が残り、 収束が 1 次に落ちる。 飛びの位置で刻みを分ける。 閉じた形と比べると見える (実測)。
+- 有限の模型 (帯の幅・格子・打ち切り) と閉じた形の 3 桁目の差は、 原因を決める前にその量を 2 倍にして差の冪を見る (実測: 刻みのせいと決めて帯を狭めたら差が増え、 帯を広げると幅に反比例して消えた)。
+- 別の module の mpmath の関数を参照として import すると、 その関数は import した側の精度 (`mp.mp.dps`、 既定 15 桁) で動く。 その module が自分の main で桁を上げていても、 import では走らない。 参照と照合する前に、 照合する側で桁を設定する (実測: 参照の側の丸めが偽の不一致を出した)。
+- `mpmath.gegenbauer(n, a, x)` は値が厳密に 0 になる点 (奇数の n の x = 0) で `ValueError: hypsum() failed to converge` を出す。 超幾何の和で相対精度を取りに行くが、 0 には相対精度が無い。 `mpmath.quad` の節点がこの点を踏むと積分ごと落ちる。 次数が整数の多項式は三項漸化式で書く。 その 1 回を通すだけなら `zeroprec=200` を渡すと 0.0 が返る (実測)。
+- 格子の走査の結果を真偽 1 つに畳まない。 順序や単調性の検査が False のときは、 破れた組と場所を出す (実測: 全体の False の中身は、 1 組の本物の破れと、 差が丸めの下に沈んだ偽の破れだった)。 差が指数的に小さい領域は桁を上げても沈むので、 比べる範囲を決めて出力に書く。
+- **自作の添字・tensor engine** は、 手で出せる 1 伝播関数の積分で検算してから 2 伝播関数に使う (実測: 1 つの因子の中で自己縮約した δ が次元を返さない誤りが、 この検算で見つかった)。 抽象的な trace の engine は明示的な行列表現と突き合わせる。
+- **校正を必須にする**: 同じ machinery で教科書の量 (既知の極の係数、 横波性、 既知の有限項) を 1 つ再現してから、 目的の量を読む。
+
+## <a id="research-script-homes"></a>研究スクリプトと知見の配置・全数索引
+
+模型固有の式・入力・閾値・検証器は同じ研究 project に置き、汎用の検証原理・模型に依存しない道具だけを共有層に置く。「上層化」はファイルを物理的に浅く移すことでも、未公開の研究内容を公開することでもない。導出と適用範囲は topic note、数値の入力と判定は code、実行結果は生成物、採用判断は DESIGN、再開時の現在地は SESSION が所有する。索引はそれらを結び、導出や数値表を複製しない。
+
+研究 project の解析入口には現行検証・特殊条件のみ・旧近似・独立 review scratch・図生成を区別して載せる。scratch は証拠を保ったまま、採用した知見と再利用する検査を live note/code へ昇格する。旧 scratch を現行主張の正本として使わない。各コードの CLI・依存・作業 directory・生成先を辿れるようにする。
+
+検算の出力の記録は `.txt` で置く。 LaTeX を組む repo の `.gitignore` は `*.out`・`*.log` を落とすので、 dir ごと `git add` しても記録だけが黙って入らず、 ノートからの link の検査は file が手元にあるので通る (実測)。 commit の前に `git check-ignore -v <path>` で確かめる。
+
+<a id="freeze-sent-values"></a>値を直しても、 送付済みの文書の値は消さず、 別の一覧に凍結して selftest に残す。 検算 script の期待値を新しい値で上書きすると、 送った文書の数値を再現する手段が消える (実測)。 現行の値の一覧と送付済みの値の一覧を分けてどちらも selftest で回し、 要約の出力は現行の値を先に出す。 同じ量に近似と厳密の 2 つの関数があるときは、 要約が近似の側を出し続けていないかを見る。
+
+<a id="note-numbers-against-outputs"></a>出力の数を記録 (note) に写したら、 記録の側から出力と突き合わせる: `python3 scripts/check-note-numbers.py <note.md> --outputs <出力の file か dir>` が、 記録の小数・百分率のうち出力のどこにも字のまま無いものを行ごとに並べる。 並んだ数は 3 種に分けて読む: 丸めて写した数 (丸め元が出力にあるか見る)、 本文に書いた定数、 出力の数から頭で計算した数 (比・差・範囲)。 最後の種は出力に無い数を記録に足している = 出力にある値のまま書くか、 計算を script に入れて出力に出す (実測: 出力の 2 つの値の比を範囲として書き、 この照合で出力に無いと分かった)。 書き直すたびに回す。 向きは締めの道具の数値照合 ([`lib/output_numbers.py`](../scripts/lib/output_numbers.py) = 出力の数が記録にあるか) の逆で、 両方を回す。 字のままの一致しか見ないので、 同じ字の数が別の量にあっても一致になる = 並ばなかった数が正しい出どころから来た証拠にはならない。
+
+「すべて掲載」を主張する前に、対象 directory と拡張子を宣言し、[check-script-index.py](../scripts/check-script-index.py) で Git 管理対象と非無視の新規ファイルを索引の直接リンクに突き合わせる。索引だけにある名前や、索引から辿れない新規スクリプトを検出できる。使い方・構文上の限界は script の `--help` が正本。網羅性の検査は、各記載の意味の正しさや研究結果の検証を代替しない。
+
+同じ検査器の `--suffix .md` で科学ノートの索引も照合できる。実行ファイルとノートは scan 範囲・参照する索引・生成する検査記録を分け、履歴ノートを含めるかも明示する。一つの検証ファイルに複数の検査群がある場合は、topic note に関数名・生成 report の key・守る主張を対応させる。数値残差や閾値を索引へ複製しない。
+
+## <a id="observable-state-generator-audit"></a>観測量・状態・生成子を別々に固定して検算する
+
+模型どうしを比べる前に、準備した状態、測る演算子、時間発展の生成子、平均と極限を取る順序をそれぞれ書く。同じ語や同じ増大指数が現れても、この組が違えば比較する量を揃えてから解釈する。[演算子と状態の依存順](#operator-time-state-order) に加え、次を検査する。
+
+- **平均と分布**: 平均値の一致を、各試行で同じ結果が出ることへ読み替えない。確率分布または分散を出し、決定的な個数と期待個数を区別する。複合系の一部だけを論じるなら、その部分の密度行列を部分トレースで作り、規格化・純度・観測量を確かめる。全体の純粋性や同じ対角確率から部分系の純粋性を推測しない。
+- **平均と非線形操作の順序**: 個々の時系列の最大値を平均する計算と、平均した時系列の最大値を取る計算を区別する。ピーク位置が揺らぐなら、位置を揃える操作の有無も記す。有限次元切断の極限では、状態を固定して切断だけを広げる手順と、切断端とともに状態を動かす手順を分け、境界項を検査する。 点ごとの値の比 (端のピークが内部の何倍か) から、 積分した重みの支配を推論しない。 重み (測度)・支持の長さ・規格化を固定して積分で比べ、 支持を広げると結論が反転するかを 1 点試す (低く長い台地は高く狭いピークに勝ちうる)。
+- **スペクトルと相互作用**: 固有値の間隔、遷移行列要素、環境を消去した後の有効生成子は独立に指定する。スペクトルだけから結合演算子の行列要素を決めない。環境の周波数分解や近似の変更で有効チャネルを分けたら、その生成子から観測量の時間微分を導き直す。符号の判定で演算子の重みを落とすときは、落としても同値となる条件を検査する。
+- **条件付き状態と実際の時間発展**: 規格化した単一の操作で状態の形が保たれる性質を、連続時間の占有数やエネルギーが減らないという主張へ移さない。近似誤差を制御する量を、その近似に含めた相互作用の下で評価する。存続確率、粒子数、エネルギーの損失は別々の観測量として計算する。
+- **干渉の判定**: 分離した 2 つの寄与が干渉するかは、 検出の効果演算子を通した交差項 (時間を積分する検出なら $\int u\,v^*\,dt$) で判定する。 検出器が時刻を区別しないことは、 2 つの寄与を同じモードへコヒーレントに射影することとは別で、 重ならない 2 つのパルスは時間を積分する検出でも干渉しない (可視度は重なり積分で決まる)。
+
+これらは検算方法であり、特定の模型への適用判断はその研究 project の導出・入力・独立検査が持つ。文献の式と説明が食い違う場合は、[独立導出](#verify-independent-derivation) と[原典からの転記の検証](#sympy-verify-transcript)へ戻り、定義からの計算と原版の照合を別々に残す。
+
+## <a id="alternative-method-option-test"></a>別の手法を選ぶ option は、 fallback と違う値を返すことまで test する
+
+誤差の出し方・積分法・推定量を option で切り替える関数は、 選んだ手法が失敗したときに既定の手法へ戻る枝を持ちやすい。 その枝が黙って入ると、 option は一度も効かないまま既定と同じ値を返す。 旧実装の出力を参照値にして移植を確かめると、 移植の側が正しく、 旧実装の側がこの状態だったことがある (実測: 旧実装の option は精度の警告を失敗と取って毎回戻っていた = 機構は [`wolfram-scripting.md#check-catches-precision-warning`](wolfram-scripting.md#check-catches-precision-warning))。
+
+1. **参照値はその手法の定義から取る** — 旧実装の option の出力をそのまま参照値にしない。 旧実装でも、 option の中の計算 (根・積分) を直接呼んで出す。 加えて、 test の中で別の経路 (密な格子の走査など、 本体と違う root finder) で同じ量を出して比べる。
+2. **既定の手法と違う値を返すことを assert する** — 2 つの手法が目に見えて違うはずの data (歪んだ分布・外れ値のある組) を選び、 差がある幅より大きいことを確かめる。 これが無いと、 戻る枝に入っても他の test は全部通る。
+3. **既知の極限で一致することも確かめる** — 2 つの手法が一致するはずの極限 (Gaussian の極限など) で、 差が予想どおりの次数で縮むか。 違う値を返す test と組で、 「別の値を返す」 と「正しい別の値を返す」 を分ける。
+4. **壊れを入れて、 上の test が落ちることを確かめる** — 本体の root finder などを失敗させる変異 (pytest なら `-p` で読み込む小さな plugin で差し替える) で、 戻る枝を強制する。 落ちる test が 2 と 1 で、 落ちない test が既定の手法の test と 3 なら、 守りが効いている。 変異の file は test の隣に置き、 起動の 1 行を冒頭に書く。 照合を 1 本の `--selftest` に並べた script で変異を回すときは、 変異で Python が error を投げる (ODE が特異点に届くなど) と selftest が途中で止まり、 非 0 では終わるのに、 どの照合が落ちたかが記録に残らない (実測) = 照合ごとに error を捕まえて失敗と数え、 最後に「error を投げた照合が無い」 を 1 項目にする。
+5. **既定は変えない** — この test は option の正しさを守るだけ。 既定の手法をどちらにするかは、 test を足した turn ではなく研究の記録の側で決める。

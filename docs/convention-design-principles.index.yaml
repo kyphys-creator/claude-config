@@ -1,0 +1,1038 @@
+# Stable slug index -- AUTO-GENERATED from the doc by scripts/generate-doc-index.py.
+# id/level/title are DERIVED from the markdown (edit the md + re-run, do NOT hand-edit
+# them here). legacy (a section's original §-number = a permanent forwarding address),
+# related, and any other hand field are PRESERVED. See convention-design-principles §14.7 (= #inbound-ref-robustness).
+# Validated by scripts/check-office-automation-index.py (dangling=0 / orphan=0).
+sections:
+  - id: placement-by-scope
+    legacy: "1"
+    level: 2
+    title: "1. 規約の配置原則：影響範囲の最大公約数に置く"
+  - id: no-duplicate-rules
+    legacy: "2"
+    level: 2
+    title: "2. ルールの重複を避ける：定義は1箇所、他はポインタ"
+  - id: sot-ranking-declaration
+    legacy: "2.1"
+    level: 3
+    title: "2.1 自動検出が届かない format の fact には「SoT 序列表」を宣言する"
+  - id: sot-declaration-collision-sweep
+    legacy: "2.2"
+    level: 3
+    title: "2.2 正本の宣言・引っ越しは「衝突宣言 sweep」とワンセット"
+  - id: harmonization-amplification
+    legacy: "2.2b"
+    level: 3
+    title: "2.2b 派生文書間の不一致は SoT に対して解決する — 調和による増幅 (harmonization amplification)"
+  - id: sot-read-side
+    legacy: "2.3"
+    level: 3
+    title: "2.3 SoT の read 側 — entity を「言及するだけの store」を SoT と取り違えない"
+  - id: errata-on-preserved-records
+    legacy: "2.4"
+    level: 3
+    title: "2.4 削除できない誤り記録には errata marker を残す"
+  - id: sot-duplication-trichotomy
+    legacy: "2.5"
+    level: 3
+    title: "2.5 SoT 重複の 3 つの扱い (design-out vs reactive) — 成熟度で分類し、検出器を「未 design-out の症状」と読む"
+  - id: time-decaying-fact-authoring
+    legacy: "2.6"
+    level: 3
+    title: "2.6 時点依存 fact は undated 断定で書かない — 「環境が変わると偽になる文」の authoring 規律"
+  - id: rule-addition-criteria
+    legacy: "3"
+    level: 2
+    title: "3. 規約追加の判断基準：「規約がない」のか「規約を読まない」のか"
+  - id: orient-before-act
+    legacy: "4"
+    level: 2
+    title: "4. Orient before act（行動前に方位を取れ）"
+  - id: motivated-substitution-trap
+    legacy: "4.1"
+    level: 3
+    title: "4.1 指定された成果物・手段から逸脱する時の self-justification trap（motivated substitution）"
+  - id: self-rca-framing-minimization
+    legacy: "4.2"
+    level: 3
+    title: "4.2 自分の失敗を framing する時の severity-minimization — §4.1 の cure-不能な残余クラス"
+  - id: severity-flattening-in-enumeration
+    legacy: "4.3"
+    level: 3
+    title: "4.3 finding を並列 list に入れると severity が消える — 行き先を変える finding は list に入れない"
+  - id: memory-positioning
+    legacy: "5"
+    level: 2
+    title: "5. メモリの位置づけ"
+  - id: design-exploring-separation
+    legacy: "6"
+    level: 2
+    title: "6. DESIGN.md と EXPLORING.md の分離"
+  - id: design-mixing-problem
+    level: 3
+    title: "問題: DESIGN.md に 3 種類が混ざっていた"
+  - id: design-separation-rationale
+    level: 3
+    title: "なぜ分けるべきか（3 つの実害）"
+  - id: design-two-files-not-three
+    level: 3
+    title: "なぜ 2 ファイルで、3 ファイルではないか"
+  - id: design-no-tags
+    level: 3
+    title: "なぜタグ付け (1 ファイル) ではないか"
+  - id: design-boundary-rules
+    level: 3
+    title: "DESIGN.md との境界判別ルール"
+  - id: design-exploration-promotion
+    level: 3
+    title: "lifecycle: 探索 → 決定の昇格"
+  - id: design-application-cases
+    level: 3
+    title: "適用事例"
+  - id: design-snapshot-operation
+    legacy: "7"
+    level: 2
+    title: "7. DESIGN.md の snapshot 運用"
+  - id: design-entry-types
+    legacy: "7.1"
+    level: 3
+    title: "7.1 DESIGN.md の 3 entry 種別"
+  - id: design-supersession-handling
+    legacy: "7.2"
+    level: 3
+    title: "7.2 超越時の処理"
+  - id: description-vs-judgment
+    legacy: "7.3"
+    level: 3
+    title: "7.3 Description と Judgment の境界"
+  - id: design-entry-granularity
+    legacy: "7.4"
+    level: 3
+    title: "7.4 粒度: 代替検討があった判断のみ entry にする"
+  - id: design-aggregation-pattern
+    legacy: "7.5"
+    level: 3
+    title: "7.5 集約 pattern: 散在を避ける"
+  - id: design-when-in-doubt
+    legacy: "7.6"
+    level: 3
+    title: "7.6 When in doubt デフォルト"
+  - id: design-diagnostic-retroactive
+    legacy: "7.7"
+    level: 3
+    title: "7.7 Diagnostic と retroactive 救済"
+  - id: design-self-consistency
+    legacy: "7.8"
+    level: 3
+    title: "7.8 適用事例と self-consistency"
+  - id: rule-vs-mechanism
+    legacy: "8"
+    level: 2
+    title: "8. ルールは文脈、メカニズムは制御 — LLM 基盤の非対称性"
+  - id: structural-facts
+    legacy: "8.1"
+    level: 3
+    title: "8.1 構造的事実"
+  - id: rule-to-mechanism-shift
+    legacy: "8.2"
+    level: 3
+    title: "8.2 設計原則: rule → mechanism への重心移動"
+  - id: precedent-as-training-data
+    legacy: "8.3"
+    level: 3
+    title: "8.3 Precedent-as-training-data (memory の毒性)"
+  - id: friction-asymmetry
+    legacy: "8.4"
+    level: 3
+    title: "8.4 Friction asymmetry と memory bias"
+  - id: memory-anxiety-response
+    legacy: "8.5"
+    level: 3
+    title: "8.5 Memory 書き込みは「不安応答」としても発動する"
+  - id: agent-learning-illusion
+    legacy: "8.6"
+    level: 3
+    title: "8.6 Agent 学習の錯覚 — session を越えて persist するのはシステム改変のみ"
+  - id: mechanism-application-example
+    legacy: "8.7"
+    level: 3
+    title: "8.7 適用例"
+  - id: proxy-blind-spot
+    legacy: "8.8"
+    level: 3
+    title: "8.8 メカニズムが proxy を検証すると、proxy の盲点を検証の盲点として継ぐ"
+  - id: set-diff-false-positive
+    legacy: "8.9"
+    level: 3
+    title: "8.9 set 差分で drift を検出する時、差分には「真の違反」 と「正当な乖離」 が混在する"
+  - id: fail-loud-not-fail-empty
+    legacy: "8.10"
+    level: 3
+    title: "8.10 mechanism は parse/load 失敗を fail-empty で飲み込まず fail-loud に + 不変条件は編集時 gate で守る"
+  - id: downstream-net-intake-leverage
+    legacy: "8.11"
+    level: 3
+    title: "8.11 downstream の安全網は intake で正しく表現された対象しか守れない — leverage は上流にあり、しばしば判断 (= 機械化不能)"
+  - id: firing-surface-hierarchy
+    legacy: "8.12"
+    level: 3
+    title: "8.12 規律の発火面 hierarchy — doc 記載 (recall 依存) は最弱、 書く前に発火面を選ぶ"
+  - id: documented-not-wired
+    legacy: "8.12a"
+    level: 3
+    title: "8.12a′ 症状表に「対処」 を書いても、共有 engine に入っていなければ効いていない (2026-09-12)"
+  - id: automation-trigger-routing
+    legacy: "8.12a"
+    level: 3
+    title: "8.12a 「自動化」は mechanism 名ではない — 5 軸で発火経路を先に route する"
+  - id: symptom-keyed-entry-point
+    legacy: "8.12b"
+    level: 3
+    title: "8.12b doc tier の中にも強弱がある — home は topic 側、 入口は「症状の瞬間」 側に置く"
+  - id: completion-boundary-state-gate
+    legacy: "8.12c"
+    level: 3
+    title: "8.12c 複数段 workflow は中間 command でなく完了境界の状態を gate する"
+  - id: human-memory-not-a-carrier
+    legacy: "8.12d"
+    level: 3
+    title: "8.12d 人の記憶も carrier ではない — 「あとで 1 回やって」 を人に渡さない"
+  - id: recovery-state-transition
+    legacy: "8.12e"
+    level: 3
+    title: "8.12e 復旧は命令の再実行でなく状態遷移 — healthy な既存 instance を壊して作り直さない"
+  - id: hub-first-follow-by-courier
+    legacy: "8.12f"
+    level: 3
+    title: "8.12f 正本を変えてから追従を別便で配ると、 届く前の複製は「する事が無い」 と区別がつかない"
+  - id: self-provisioning-prerequisites
+    legacy: "8.12g"
+    level: 3
+    title: "8.12g 前提は、 それを使う人の入口で機械が満たす — 自動配線の作り方"
+  - id: signal-to-readers-channel
+    legacy: "8.12h"
+    level: 3
+    title: "8.12h 知らせは、 それを読んで動く人の通知が鳴る場所に出す"
+  - id: conditional-firing-visibility
+    legacy: "8.13"
+    level: 3
+    title: "8.13 条件付き発火の mechanism は「自分が非活性」 を可視信号にしないと、 沈黙が解釈不能になる"
+  - id: activation-evidence-ladder
+    legacy: "8.13a"
+    level: 3
+    title: "8.13a 提案・設定・活性化・実走は別状態 — UI card を activation evidence にしない"
+  - id: single-field-identity-corroboration
+    legacy: "8.14"
+    level: 3
+    title: "8.14 単一 field の一致で record を同定すると偶然一致が「同一」 と誤主張される — 行動を伴う同定には corroboration を要求"
+  - id: enforcement-surface-frontend-survival
+    legacy: "8.15"
+    level: 3
+    title: "8.15 enforcement surface は frontend/実行 context で生存性が違う — guard を「どこで生存すべきか × 何を検査するか」で配置する"
+  - id: absence-channel-coverage
+    legacy: "8.16"
+    level: 3
+    title: "8.16 不在主張の channel scope — single-channel null は universal absence の証明ではない"
+  - id: broadcast-obligation-blind-spot
+    legacy: "8.17"
+    level: 3
+    title: "8.17 broadcast で届く個人義務 — per-person addressing proxy の構造的 false negative"
+  - id: request-mail-two-date-axes
+    legacy: "8.18"
+    level: 3
+    title: "8.18 依頼 mail の二日付軸 — event 日を urgency の proxy にすると行動〆切が落ちる"
+  - id: retrieval-key-choice
+    legacy: "8.19"
+    level: 3
+    title: "8.19 retrieval の null は「対象が無い」 でなく「key が悪い」 を先に疑う — 人間可読な属性は経路で失われ、 案件 ID は残る"
+  - id: acceptance-is-not-specification
+    legacy: "8.20"
+    level: 3
+    title: "8.20 「通った」 は仕様ではない — 前例成果物を base にするとき、 受理は正しさの証拠にならない"
+  - id: noise-obligation-signal-sharing
+    legacy: "8.21"
+    level: 3
+    title: "8.21 noise 抑制の識別 signal を義務 mail が共有する — bucket 混在には obligation-class override"
+  - id: lapsing-deadline
+    legacy: "8.22"
+    level: 3
+    title: "8.22 失効型期限 — 超過が「遅れ」でなく「義務の消滅」になる deadline class"
+  - id: lapsing-opportunity-intake
+    legacy: "8.23"
+    level: 3
+    title: "8.23 失効型〆切つきの機会 — 義務網と応答網の谷間に落ちる opportunity class"
+  - id: surfaced-not-consumed
+    legacy: "8.24"
+    level: 3
+    title: "8.24 surface されても消費されない — silent 再表示の壁紙化と disposition 終端"
+  - id: detection-zero-location
+    legacy: "8.25"
+    level: 3
+    title: "8.25 検出失敗の RCA は「ゼロの位置」を先に特定する — 能力の不在と trigger の不在を分離する"
+  - id: disjunctive-finding-self-routing
+    legacy: "8.26"
+    level: 3
+    title: "8.26 二択を提示する finding は判別証拠を同梱する — 枝の選択を消費側 recall に残さない"
+  - id: user-execution-handoff
+    legacy: "8.27"
+    level: 3
+    title: "8.27 user-execution handoff — 最終 leg が人間本人にしかできない義務は「手渡しの機構」を要する"
+  - id: confirmation-question-aim
+    legacy: "8.28"
+    level: 3
+    title: "8.28 確認設問は照準した軸しか検証しない — 事実主張を運ぶ文の user 確認は真偽を第一問に"
+  - id: generation-error-trigger-gap
+    legacy: "8.29"
+    level: 3
+    title: "8.29 操作を trigger にする gate は、操作を伴わない生成 error を素通しする"
+  - id: expected-inbound-tripwire
+    legacy: "8.30"
+    level: 3
+    title: "8.30 予告された inbound 依頼には時計を — 「来るはず」 は tracked object になるまで網に乗らない"
+  - id: principle-birth-stock-audit
+    legacy: "8.31"
+    level: 3
+    title: "8.31 原則が生まれた turn で既存 config を棚卸しする — 登録時 gate は flow にしか効かない"
+  - id: rca-as-labeling
+    legacy: "8.32"
+    level: 3
+    title: "8.32 「〜型」 と分類した瞬間が機械層を足す最安の瞬間 — label は対処ではない"
+  - id: protocol-cheapest-action-coverage
+    legacy: "8.33"
+    level: 3
+    title: "8.33 新しい protocol は最頻・低 stakes の行為を protocol 内で最安にする — 迂回路は初日に現れる"
+  - id: context-branch-as-leak-path
+    legacy: "8.34"
+    level: 3
+    title: "8.34 安全側の出力が context 判定に依存するとき、 判定の設定漏れが唯一の穴になる — 分岐を消せないか先に問う"
+  - id: post-resolution-scope-revalidation
+    legacy: "8.35"
+    level: 3
+    title: "8.35 resolver の出力は新しい trust boundary — 最終 action target で scope を再検証する"
+  - id: input-does-not-transfer-decision-ownership
+    legacy: "8.36"
+    level: 3
+    title: "8.36 入力の提供は判断責任を移さない — 事実・規程適用・将来確約を分離する"
+  - id: proxy-outbound-reply-blindspot
+    legacy: "8.37"
+    level: 3
+    title: "8.37 他人名義で出した依頼の返信は、自分の受信箱に来ない — Cc は送信の証拠であって返信の網ではない"
+  - id: false-positive-declaration-needs-control
+    legacy: "8.38"
+    level: 3
+    title: "8.38 「偽陽性だ」 の宣言は主張である — positive control を出せないなら、それは偽陽性でなく「未検証」"
+  - id: completion-record-from-counterparty
+    legacy: "8.39"
+    level: 3
+    title: "8.39 完了の記録は「送ったもの」 でなく「相手が返したもの」 から作る"
+  - id: measured-vs-inferred-provenance
+    legacy: "8.40"
+    level: 3
+    title: "8.40 doc の一文は「測った」 と「説明した」 を書式で分ける — 説明は観察の権威を借りる"
+  - id: unique-token-kills-the-carrier
+    legacy: "8.41"
+    level: 3
+    title: "8.41 保存する rule の key に per-call 一意な値が混ざると、その rule は二度と発火しない"
+  - id: detector-fires-on-its-own-signal
+    legacy: "8.42"
+    level: 3
+    title: "8.42 検出器が literal で持つ signal は、 その検出器について書かれた文章にも現れる — 除外でなく**構造**に anchor する"
+  - id: sweep-null-needs-per-form-control
+    legacy: "8.43"
+    level: 3
+    title: "8.43 sweep の「無い」 は、探している class の形ごとに陽性対照を通してから信じる"
+  - id: rule-visible-where-the-act-happens
+    legacy: "8.44"
+    level: 3
+    title: "8.44 規則は「それを破る行為をする session」 が読み込む場所に置く — 正しい repo に書いた規則でも、 行為の場所から見えなければ無いのと同じ (2026-09-13)"
+  - id: rule-gap-not-owner-decision
+    legacy: "8.45"
+    level: 3
+    title: "8.45 規則に class が無いことから生じた迷いを、 owner の判断として中立に渡さない (2026-09-14)"
+  - id: semantic-detector-ack-ratchet
+    legacy: "8.46"
+    level: 3
+    title: "8.46 誤検出を持つ意味の検出器は、 承認を「行の中身の hash」 に縛って固定する (2026-09-14)"
+  - id: deadline-in-the-referent
+    legacy: "8.47"
+    level: 3
+    title: "8.47 期限が本文に無く、参照先の予定にしかない義務 — 日付 detector の構造的圏外 (2026-09-14)"
+  - id: mention-implies-triage
+    legacy: "8.48"
+    level: 3
+    title: "8.48 自分の出力で言及した item は、その turn で triage を終える — 言及は認識の証拠 (2026-09-14)"
+  - id: hedge-scope-covers-only-generated-options
+    legacy: "8.49"
+    level: 3
+    title: "8.49 留保は自分が並べた選択肢の上にしか掛からない — 出所を疑う留保と、選択を疑う留保は別物 (2026-09-14)"
+  - id: triage-and-subtraction
+    legacy: "9"
+    level: 2
+    title: "9. Triage と subtraction — 規約システムの成長・代謝バランス"
+  - id: blast-radius-triage
+    legacy: "9.1"
+    level: 3
+    title: "9.1 失敗の blast radius triage"
+  - id: asymmetric-reflection-bias
+    legacy: "9.2"
+    level: 3
+    title: "9.2 Asymmetric reflection bias"
+  - id: subtraction-trigger-design
+    legacy: "9.3"
+    level: 3
+    title: "9.3 Subtraction trigger の設計"
+  - id: preference-approximation-gap
+    legacy: "9.4"
+    level: 3
+    title: "9.4 Preference-approximation gap"
+  - id: closed-loop-mutual-reinforcement
+    legacy: "9.5"
+    level: 3
+    title: "9.5 Closed loop: 規約構造と Claude 応答構造の相互強化"
+  - id: subtraction-forms
+    legacy: "9.6"
+    level: 3
+    title: "9.6 Subtraction の形態: 削除 > migrate > 規約追加"
+  - id: diminishing-returns-detection
+    legacy: "9.7"
+    level: 3
+    title: "9.7 Diminishing-returns detection と meta-loop 離脱 (Claude 側の規律)"
+  - id: single-observation-scope-check
+    legacy: "9.8"
+    level: 3
+    title: "9.8 単一観察から構造対策に飛ばない (scope 確認先行)"
+  - id: new-definition-self-violation-probe
+    legacy: "9.9"
+    level: 3
+    title: "9.9 新しい定義は自分の origin 例で破られやすく、その自己違反は定義の under-specification を指す probe"
+  - id: completeness-audit-add-bias
+    legacy: "9.10"
+    level: 3
+    title: "9.10 完全性 audit の add-bias — 「何が欠けているか」 frame が低価値・mis-weighted な追加を製造する"
+  - id: file-role-architecture
+    legacy: "10"
+    level: 2
+    title: "10. File-role architecture — context 効率のための auto-load tier 設計"
+  - id: four-tier-classification
+    legacy: "10.1"
+    level: 3
+    title: "10.1 4 tier 分類"
+  - id: tier-criteria
+    legacy: "10.2"
+    level: 3
+    title: "10.2 切り分け基準"
+  - id: narrative-extraction-pattern
+    legacy: "10.3"
+    level: 3
+    title: "10.3 narrative 抽出 pattern (T1 → T3)"
+  - id: tier-failure-patterns
+    legacy: "10.4"
+    level: 3
+    title: "10.4 失敗 pattern"
+  - id: tier-lifecycle
+    legacy: "10.5"
+    level: 3
+    title: "10.5 Tier 間 lifecycle"
+  - id: tier-application-example
+    legacy: "10.6"
+    level: 3
+    title: "10.6 適用例 (2026-04-17 odakin-prefs)"
+  - id: auto-context-byte-budget
+    legacy: "10.7"
+    level: 3
+    title: "10.7 auto-context byte budget (行数 proxy からの脱却)"
+  - id: context-capacity-evidence-layers
+    legacy: "10.7a"
+    level: 3
+    title: "10.7a headline context と実効耐久力を同一視しない — capacity / cost / durability の 6 軸を別々に測る"
+  - id: deletion-delegation-trap
+    legacy: "10.8"
+    level: 3
+    title: "10.8 削除・委譲判断の trap"
+  - id: code-canonical-doc-dedup
+    legacy: "10.9"
+    level: 3
+    title: "10.9 Code を canonical とする doc dedup pattern (§10.8 と併読)"
+  - id: claudemd-chain-nested-autoload
+    legacy: "10.10"
+    level: 3
+    title: "10.10 CLAUDE.md chain の nested auto-load (Claude Code 実装依存)"
+  - id: super-summary-pattern
+    legacy: "10.11"
+    level: 3
+    title: "10.11 「超要約 (super-summary)」pattern"
+  - id: migration-level-ladder
+    legacy: "10.12"
+    level: 3
+    title: "10.12 Migration level の階段"
+  - id: in-plan-exploration-trail
+    legacy: "11"
+    level: 2
+    title: "11. In-plan exploration trail — single-session walkback の保存"
+  - id: walkback-trail-disappears
+    legacy: "11.1"
+    level: 3
+    title: "11.1 問題: walkback の trail が plan close 時に消える"
+  - id: exploring-md-difference
+    legacy: "11.2"
+    level: 3
+    title: "11.2 §6 EXPLORING.md との違い"
+  - id: exploration-trail-section
+    legacy: "11.3"
+    level: 3
+    title: "11.3 解決: plan §1.6 etc. に「探索過程」 セクションを置く"
+  - id: when-to-write-trail
+    legacy: "11.4"
+    level: 3
+    title: "11.4 適用判断: いつ §1.6 を書くか"
+  - id: rejected-alternatives-relationship
+    legacy: "11.5"
+    level: 3
+    title: "11.5 §11 「やらないこと」 との関係"
+  - id: trail-application-example
+    legacy: "11.6"
+    level: 3
+    title: "11.6 適用事例"
+  - id: monitoring-list-scope-marker
+    legacy: "12"
+    level: 2
+    title: "12. 監視 list の scope marker — 「監視」 と「禁止」 の categorical 分離"
+  - id: monitoring-scope-pathology
+    legacy: "12.1"
+    level: 3
+    title: "12.1 観察された pathology"
+  - id: monitoring-vs-prohibition-separation
+    legacy: "12.2"
+    level: 3
+    title: "12.2 「監視」 と「禁止」 の categorical 分離"
+  - id: explicit-scope-marker
+    legacy: "12.3"
+    level: 3
+    title: "12.3 解法: explicit scope marker を必須化"
+  - id: monitoring-scope-origin
+    legacy: "12.4"
+    level: 3
+    title: "12.4 由来"
+  - id: monitoring-scope-applicability
+    legacy: "12.5"
+    level: 3
+    title: "12.5 適用範囲"
+  - id: monitoring-scope-related-rules
+    legacy: "12.6"
+    level: 3
+    title: "12.6 周辺規律"
+  - id: cross-repo-migration-ordering
+    legacy: "13"
+    level: 2
+    title: "13. Cross-repo refactor の migration ordering — データ側を先に commit"
+  - id: migration-order-footgun
+    legacy: "13.1"
+    level: 3
+    title: "13.1 観察された footgun"
+  - id: data-first-commit-principle
+    legacy: "13.2"
+    level: 3
+    title: "13.2 原則: データ側を先に commit、 コード側を後に commit"
+  - id: graceful-skip-design
+    legacy: "13.3"
+    level: 3
+    title: "13.3 graceful skip 設計の併用"
+  - id: collaborator-shared-ordering
+    legacy: "13.4"
+    level: 3
+    title: "13.4 collaborator-shared 場合"
+  - id: migration-order-origin
+    legacy: "13.5"
+    level: 3
+    title: "13.5 由来"
+  - id: migration-order-applicability
+    legacy: "13.6"
+    level: 3
+    title: "13.6 適用範囲"
+  - id: migration-order-related-rules
+    legacy: "13.7"
+    level: 3
+    title: "13.7 周辺規律"
+  - id: intrafile-slug-identity
+    legacy: "14"
+    level: 2
+    title: "14. 大規模 reference / gotcha convention の intra-file 構造 — slug identity + 検証可能 index"
+  - id: intrafile-trigger-signals
+    legacy: "14.1"
+    level: 3
+    title: "14.1 trigger signal (= 3 つのいずれか)"
+  - id: slug-over-positional
+    legacy: "14.2"
+    level: 3
+    title: "14.2 cross-ref は positional 番号でなく安定 slug で"
+  - id: thin-index-db-benefits
+    legacy: "14.3"
+    level: 3
+    title: "14.3 薄い index で「DB の利点」 を prose を動かさず得る"
+  - id: split-axis-access-pattern
+    legacy: "14.4"
+    level: 3
+    title: "14.4 split-axis は access pattern に合わせる + slug を先に振る"
+  - id: mechanical-script-extraction
+    legacy: "14.5"
+    level: 3
+    title: "14.5 mechanical な部分は script 化 (§10.9 と整合)"
+  - id: intrafile-origin-example
+    legacy: "14.6"
+    level: 3
+    title: "14.6 由来 + worked example"
+  - id: inbound-ref-robustness
+    legacy: "14.7"
+    level: 3
+    title: "14.7 cross-repo inbound-ref robustness — 下流からの参照を restructure で黙って壊さない"
+  - id: db-metadata-not-content
+    legacy: "14.8"
+    level: 3
+    title: "14.8 「DB 化」 は metadata-DB であって content-DB ではない — prose は markdown に残す"
+  - id: index-autogenerate
+    legacy: "14.9"
+    level: 3
+    title: "14.9 薄い index は markdown から自動生成する (= 手で 2 ファイル同期しない)"
+  - id: legacy-append-only
+    legacy: "14.10"
+    level: 3
+    title: "14.10 legacy は永久転送先 — append-only を機械 enforce する"
+  - id: sot-consolidation-recipe
+    legacy: "15"
+    level: 2
+    title: "15. SoT consolidation recipe — README-as-SoT / 多重記述の是正手順"
+  - id: derive-not-summarize
+    legacy: "16"
+    level: 2
+    title: "16. 要約は load-bearing な「関係」を不可視に落とす — derive-not-summarize の徹底"
+  - id: summarize-pathology
+    legacy: "16.1"
+    level: 3
+    title: "16.1 観察された pathology"
+  - id: why-single-sot-insufficient
+    legacy: "16.2"
+    level: 3
+    title: "16.2 なぜ単一-SoT 原則 (§2/§15) では足りないか"
+  - id: summarize-remediation
+    legacy: "16.3"
+    level: 3
+    title: "16.3 修正 (構造的に強い順)"
+  - id: summarize-honest-scope
+    legacy: "16.4"
+    level: 3
+    title: "16.4 honest scope"
+  - id: hierarchical-name-collision
+    legacy: "17"
+    level: 2
+    title: "17. 階層内の同名 entity 併存 — SoT 表現で context path を明示"
+  - id: hierarchical-name-collision-pattern
+    legacy: "17.1"
+    level: 3
+    title: "17.1 観察 pattern"
+  - id: hierarchical-name-collision-trap
+    legacy: "17.2"
+    level: 3
+    title: "17.2 Trap pattern (= 同型再発の signature)"
+  - id: hierarchical-name-collision-discipline
+    legacy: "17.3"
+    level: 3
+    title: "17.3 規律: SoT 表現で path を明示"
+  - id: hierarchical-name-collision-relation
+    legacy: "17.4"
+    level: 3
+    title: "17.4 関連"
+  - id: derived-view-as-recovery
+    legacy: "18"
+    level: 2
+    title: "18. 生成 view は正本の意図せぬ時点 backup — 件数 parity で切り詰めを検出する"
+  - id: derived-view-as-recovery-observation
+    legacy: "18.1"
+    level: 3
+    title: "18.1 観察 (2026-08)"
+  - id: derived-view-as-recovery-principles
+    legacy: "18.2"
+    level: 3
+    title: "18.2 一般則"
+  - id: rollcall-line-marker
+    legacy: "19"
+    level: 2
+    title: "19. 点呼行 (rollcall line) — 散文で書かれた sub-obligation は数え直しで消える"
+  - id: rollcall-line-observation
+    legacy: "19.1"
+    level: 3
+    title: "19.1 観察 pattern"
+  - id: rollcall-line-pattern
+    legacy: "19.2"
+    level: 3
+    title: "19.2 pattern: 機械可読 1 行 marker + 不在も咎める検出器"
+  - id: rollcall-line-when
+    legacy: "19.3"
+    level: 3
+    title: "19.3 適用判断"
+  - id: batch-generation-hides-per-target-application
+    legacy: "19.4"
+    level: 3
+    title: "19.4 第 2 の消失経路 — 一括生成の完了イベントが、個別適用の未了を隠す"
+  - id: state-as-one-record
+    legacy: "19.5"
+    level: 3
+    title: "19.5 点呼行が 3 つ目の読み手を持ったら、 案件ごとに 1 つの状態 record へ育てる — 散文の marker を正本にしない"
+  - id: record-is-not-the-artifact
+    legacy: "19.6"
+    level: 3
+    title: "19.6 凍結した記録は「渡した物そのもの」 として引用される — 一致するかを機械可読な field で宣言させ、 無宣言の凍結を拒否する"
+  - id: time-keyed-file-appends-only
+    legacy: "19.7"
+    level: 3
+    title: "19.7 時間を key にした状態 file は追記しかできない — 現在地は案件を key にし、 形を gate で守る"
+  - id: demoted-defense-reversal
+    legacy: "19.8"
+    level: 3
+    title: "19.8 見送った防御には、 それを戻す観測を書く — 宣言した盲点は次の再発の予測として読む"
+  - id: verdict-expires-with-the-gate
+    legacy: "19.9"
+    level: 3
+    title: "19.9 合格は関門と一緒に古くなる — 判定は成果物でなく「外へ出す操作」 に付ける"
+  - id: recall-waiver-is-not-quarantine
+    legacy: "19.10"
+    level: 3
+    title: "19.10 回収と隔離は別の操作 — 「出し直さない」 は「これからも使ってよい」 ではない"
+  - id: prose-handover-is-not-an-edge
+    legacy: "19.11"
+    level: 3
+    title: "19.11 文で渡した引き継ぎは辺にならない — 子を閉じても、 その子に結ばれていた入口と約束は親に移らない"
+  - id: premise-bound-rule-expiry
+    legacy: "20"
+    level: 2
+    title: "20. 規則は前提より長生きする — 上流属性の切替は下流定数の一括再判定を要求する"
+  - id: premise-expiry-observation
+    legacy: "20.1"
+    level: 3
+    title: "20.1 観察 pattern"
+  - id: premise-expiry-mechanism
+    legacy: "20.2"
+    level: 3
+    title: "20.2 なぜ規則だけが生き残るか"
+  - id: premise-expiry-pattern
+    legacy: "20.3"
+    level: 3
+    title: "20.3 pattern"
+  - id: premise-change-stakeholder-lag
+    legacy: "20.4"
+    level: 3
+    title: "20.4 前提の切替は、 自分の代わりに規則を当てる人にも届いていない — 他者の規則引用は「どの前提の文書か」 を正本で照合してから従う"
+  - id: supersede-completion
+    legacy: "20.5"
+    level: 3
+    title: "20.5 supersede は「新しい正本を書く」 では完了しない"
+  - id: provisional-value-freeze
+    legacy: "20.5.2"
+    level: 3
+    title: "20.5.2 暫定値は「確定した瞬間」 に置換されないと、書類に嘘として残る"
+  - id: enumeration-staleness
+    legacy: "20.5.3"
+    level: 3
+    title: "20.5.3 散文に焼いた「個数」 は、本文が伸びた瞬間に嘘になる"
+  - id: derived-value-beside-inputs
+    legacy: "20.5.4"
+    level: 3
+    title: "20.5.4 派生値を入力の隣に書くなら、 書く時に計算する — 並べた日付と期間は最初から合っていないことがある"
+  - id: premise-dropped-at-copy
+    legacy: "20.6"
+    level: 3
+    title: "20.6 同じ作業の後の変更が、 前の決定の前提を消す — 台帳への写しで理由が落ち、 ぶつかりを格で解く"
+  - id: premise-expiry-scope
+    legacy: "20.4"
+    level: 3
+    title: "20.4 適用範囲・関連"
+  - id: rule-variant-drift
+    legacy: "21"
+    level: 2
+    title: "21. 同一 rule の variant (言語別・媒体別) は片方だけ更新され silent に stale 化する"
+  - id: variant-drift-observation
+    legacy: "21.1"
+    level: 3
+    title: "21.1 観察 pattern"
+  - id: variant-drift-remedies
+    legacy: "21.2"
+    level: 3
+    title: "21.2 3 択 (強い順)"
+  - id: variant-drift-when
+    legacy: "21.3"
+    level: 3
+    title: "21.3 判別と由来"
+  - id: silent-probe-false-healthy
+    legacy: "22"
+    level: 2
+    title: "22. 安全網が自分で使う probe の失敗は、健全と同じ姿の答えに化ける"
+  - id: false-healthy-observation
+    legacy: "22.1"
+    level: 3
+    title: "22.1 観察 pattern"
+  - id: false-healthy-why
+    legacy: "22.2"
+    level: 3
+    title: "22.2 なぜ安全網の内側で起きるか"
+  - id: false-healthy-pattern
+    legacy: "22.3"
+    level: 3
+    title: "22.3 pattern"
+  - id: false-healthy-when
+    legacy: "22.4"
+    level: 3
+    title: "22.4 判別と由来"
+  - id: reconcile-with-independent-count
+    legacy: "22.5"
+    level: 3
+    title: "22.5 正しく動いて 0 件も健全の証明にならない — 係の外の独立した数と定期に突き合わせる"
+  - id: required-field-fabrication
+    legacy: "23"
+    level: 2
+    title: "23. 必須にした field は、 値が無いとき捏造される — 「無い」 を機械可読にする第三の状態を用意する"
+  - id: fabrication-observation
+    level: 3
+    title: "観察"
+  - id: fabrication-why-bad
+    level: 3
+    title: "なぜ悪いか"
+  - id: fabrication-remedy
+    level: 3
+    title: "対策: 出自を宣言する第三の状態"
+  - id: fabrication-detection
+    level: 3
+    title: "適用の見分け方"
+  - id: coarse-entry-hides-its-contents
+    legacy: "8.40"
+    level: 3
+    title: "8.40 粗い 1 件が中身を隠す — 「埋まっている」 は「検討した」 ではない"
+  - id: detector-config-must-be-derived
+    legacy: "8.50"
+    level: 3
+    title: "8.50 検出器が読む「人が書く一覧」 は育たない — 設定も SoT から導出し、 追随と死活を別々に検査する"
+  - id: flagged-text-is-not-the-defect
+    legacy: "8.51"
+    level: 3
+    title: "8.51 検出器に鳴らされた文が欠陥とは限らない — 規約どおりの使用なら、 直すのは検出器で、 原文ではない"
+  - id: literal-anchor-detector
+    legacy: "8.52"
+    level: 3
+    title: "8.52 目印の文字列で重複を探す検出器は、 目印と「参照あり」 の判定の両方が黙って死ぬ — 登録簿そのものを機械で点検する"
+  - id: display-cap-is-not-the-count
+    legacy: "8.53"
+    level: 3
+    title: "8.53 表示の上限を件数として出す検出器は、 自分が壊れたことを隠す — 過検出は「うるさい」 ではなく「見えなくする」"
+  - id: detector-installed-after-the-stock
+    legacy: "8.54"
+    level: 3
+    title: "8.54 後から入れた検出器は、 それ以前の在庫を検査していない — 設置と同じ turn に全量を 1 回通す"
+  - id: elapsed-time-urgency-inversion
+    legacy: "8.55"
+    level: 3
+    title: "8.55 経過日数で強める印は、 期限の近い義務ほど弱く付く — 期限が取れる item は残り時間で印と並びを決める"
+  - id: surface-reader-is-not-the-owner
+    legacy: "8.56"
+    level: 3
+    title: "8.56 表示を読むのは agent、 義務を負うのは人 — 「表示した」 を「伝わった」 と数えない"
+  - id: lapse-claim-is-absence-claim
+    legacy: "8.57"
+    level: 3
+    title: "8.57 「期間が過ぎた」 は不在の主張 — 失効と書く前に、 案件の key で後続を引く"
+  - id: single-deadline-field-many-legs
+    legacy: "8.58"
+    level: 3
+    title: "8.58 期限欄は 1 つ、 手順の期限は複数 — 目安で欄を上書きすると、 本物の期限は注釈と散文に落ちる"
+  - id: narrowing-makes-input-load-bearing
+    legacy: "8.59"
+    level: 3
+    title: "8.59 表示を絞る変更は、 絞った後に残る入力の正しさを load-bearing にする — 条件の外に落ちたものは件数で残す"
+  - id: detector-change-breaks-downstream-writers
+    legacy: "8.60"
+    level: 3
+    title: "8.60 検出器を締める変更は、 その前に立つ無人の書き手を黙って止める — 過去の出力を今の検出器に通し直す"
+  - id: rules-present-but-not-read-before-the-act
+    legacy: "8.61"
+    level: 3
+    title: "8.61 規則は在るのに、 行為の直前に効かない 4 つの入口 — 理由の無い手順・問いの置き換え・必読の grep 化・訂正の 1 本化"
+  - id: steady-state-is-not-a-finding
+    legacy: "8.62"
+    level: 3
+    title: "8.62 通常の周期の状態を警告にしない — 知らせる価値は「今打てる手が、 用事の時点の結果を変えるか」 で決まる"
+  - id: observe-dont-estimate
+    legacy: "8.63"
+    level: 3
+    title: "8.63 観測できるものを推定で置き換えない — 推定器を作る前に、 1 回の安い観測で同じ問いに答えられないかを問う"
+  - id: completion-by-observation
+    legacy: "8.64"
+    level: 3
+    title: "8.64 人に頼んだ操作の完了は、 報告させず機械が状態で見る — 頼む・待つ・続きから進む"
+  - id: index-doc-state-copy
+    legacy: "8.65"
+    level: 3
+    title: "8.65 入口の doc (README) に状態を写さない — 状態を進める操作は写しを通らない"
+  - id: audit-unit-vs-rule-unit
+    legacy: "8.66"
+    level: 3
+    title: "8.66 検査が列挙する単位を、規則が守る対象の単位に合わせる — ずれた分は永久に見えない"
+  - id: green-check-endorses-unasked-premise
+    legacy: "8.67"
+    level: 3
+    title: "8.67 検査の緑は、 検査が問わなかった前提まで追認して読まれる — 前提を決める判断が成果物の外にあるなら、 作る時に成果物へ書き込み、 出口で読む"
+  - id: rule-copy-lint-reach
+    legacy: "8.68"
+    level: 3
+    title: "8.68 規則の写しは逐語 lint では追い切れない — doc が規則を書けない構造にし、 成果物は gate に決めさせる"
+  - id: failure-exit-equals-violation-exit
+    legacy: "8.69"
+    level: 3
+    title: "8.69 「止まった」 は対照にならない — 故障の合図を違反の合図と同じ値にすると、 全部が止まる故障が陽性対照を緑にする"
+  - id: isolation-shortens-the-path
+    legacy: "8.70"
+    level: 3
+    title: "8.70 隔離のために環境を差し替えた test は、 意図より手前で落ちて緑になる — 新しい対照は「直す前の実装で赤くなる」 ことまで確かめて初めて対照になる"
+  - id: event-anchored-legs
+    legacy: "8.71"
+    level: 3
+    title: "8.71 行事の日付から決まる手順は、 回ごとの起票でなく行事の日付から導く — 起票した回でしか鳴らない仕組みは、 起票を忘れた回に全部そろって黙る"
+  - id: catch-all-branch-absorbs-covered-class
+    legacy: "8.72"
+    level: 3
+    title: "8.72 「未対応」 の受け皿は、 上流が既に扱う class を吸ってはいけない — 索引の miss を「resolver 未実装」 に降格しない"
+  - id: fixture-default-bakes-bug
+    legacy: "8.73"
+    level: 3
+    title: "8.73 selftest の fixture の既定値が現実と違う軸は、 その軸に依存する不具合を期待値に焼き込む — helper の既定は現実の向きから取る"
+  - id: directive-strength-before-cannot
+    legacy: "8.74"
+    level: 3
+    title: "8.74 組織の文書の「〜しないように」 を「できない」 と伝える前に、 文の強さと例外の手続きを確かめる — お願い・手続きつきの可・禁止は別物"
+  - id: control-dependency-is-dependency
+    legacy: "8.75"
+    level: 3
+    title: "8.75 制御の依存も依存 — 前の結果で次を出すか決まる操作は、 同じ応答に並べない"
+  - id: referent-outside-the-window
+    legacy: "8.76"
+    level: 3
+    title: "8.76 「読み直す」 は起きるが 「取りに行く」 は起きない — 誤断定のうち人に届くのは、 確認の referent が出力窓の外にあるものだけ"
+  - id: ledger-filter-on-the-reader
+    legacy: "8.77"
+    level: 3
+    title: "8.77 別の process が書く cache に台帳の抑制を効かせるなら、 読む側の全部に当てる — fail-open な検出器は失敗の件数だけでなく種類を残す"
+  - id: reconcile-from-evidence
+    legacy: "8.78"
+    level: 3
+    title: "8.78 照合の不具合を直したら、 溜まった誤った状態は一次の証拠から照合し直す — state を手で書き換えない"
+  - id: unstaffed-intake-queue
+    legacy: "8.79"
+    level: 3
+    title: "8.79 受付に担当がいない待ち行列 — 表示をどれだけ磨いても、 読む主体と刻限が無ければ「読まないと急ぎと分からない依頼」 は残る"
+  - id: blocking-gate-pay-path
+    legacy: "8.80"
+    level: 3
+    title: "8.80 止める gate は「払う」 を「取り下げる」 より安くする — でないと、 止めた分だけ要る追記が黙って落ちる"
+  - id: ask-before-it-is-produced
+    legacy: "8.81"
+    level: 3
+    title: "8.81 残してほしいものは、 それが生まれる前に頼む — 事後の回収手順は、 書き出されなかったものを回収できない"
+  - id: recognizer-inputs-are-protected
+    legacy: "8.82"
+    level: 3
+    title: "8.82 形で見分ける guard は、 見分けの元 (定義) の変化も止める — でないと 2 段の編集で抜かれる"
+  - id: state-detector-source-must-move
+    legacy: "8.83"
+    level: 3
+    title: "8.83 状態を読む検出器は、 状態を 1 回変えて読み値が動くのを見てから入れる — 源が古い写しのことがある"
+  - id: split-input-every-char-in-one-check
+    legacy: "8.84"
+    level: 3
+    title: "8.84 入力を 2 つの比較に分ける検出器は、 両方の読み方で全部の文字がどちらかに残るようにする — 開きと閉じが同じ記号の構造は、 片方から外さない"
+  - id: exhaustive-lister-scoring
+    legacy: "8.85"
+    level: 3
+    title: "8.85 網羅的に挙げる検出器は、 当たりの率でなく、 問題の無い側での発火と上位の当たりで測る"
+  - id: overwrite-needs-read-token
+    legacy: "8.86"
+    level: 3
+    title: "8.86 欄を丸ごと置き換える道具は、 読んだ印を求める — 上書きされる中身を見せるだけでは、 絞った出力で消える"
+  - id: state-field-one-direction
+    legacy: "8.87"
+    level: 3
+    title: "8.87 状態の欄が 1 つの向きしか持たないと、 同居した逆向きの義務が gate から落ちる — 向きごとに欄を分け、 gate は一次の記録も見る"
+  - id: missing-sot-is-a-task
+    legacy: "8.88"
+    level: 3
+    title: "8.88 確かめられない事実は、 答えを探して終えず「正本が無い」 を 1 件の仕事にする"
+  - id: status-line-since-and-effect
+    legacy: "8.89"
+    level: 3
+    title: "8.89 検出器の 1 行は「いつから」 と「ここで効く数」 を言う — 最後の観測と設定の数だけでは、 原因を探す場所がずれる"
+  - id: measure-warning-hit-rate
+    legacy: "8.90"
+    level: 3
+    title: "8.90 事前の注意は、 過去の入力で当たる割合を測ってから入れる — 形がありふれていて害が稀なら、 害の出た出力を見る事後の検出にする"
+  - id: tooled-rows-run-reading-rows-skip
+    legacy: "8.91"
+    level: 3
+    title: "8.91 手順の表では、 道具のある行だけが回る — 人が読む行にも、 範囲を絞る道具と処分を照合する出口を付ける"
+  - id: signal-from-the-side-that-knows
+    legacy: "8.92"
+    level: 3
+    title: "8.92 知らせは、 その瞬間を知る側から出す — 起こす側の操作に掛けた仕組みは、 起こす側が手を動かさずに起きる経路を見ない"
+  - id: test-rule-text-on-its-case
+    legacy: "8.93"
+    level: 3
+    title: "8.93 規則の文は、 その規則を生んだ事例に字面のまま当ててから出す — 上限・下限は等しい値を通す"
+  - id: fix-round-paired-predicates
+    legacy: "8.94"
+    level: 3
+    title: "8.94 1 つの事柄を止める・運ぶ・外す・承認する道は同じ照合を使う — 片方を直すたびに対の道に後退ができる。 壊す側の試しは回帰の試験に移し、 往復には止めどきを置く"
+  - id: role-from-the-work
+    legacy: "8.95"
+    level: 3
+    title: "8.95 session の役は、 本人の語や session が読む規則の文でなく、 session がしている仕事から機械が決める — 語に結ぶと、 仕事の名前だけで開いた session に効かない"
+  - id: clear-action-must-be-doable
+    legacy: "8.96"
+    level: 3
+    title: "8.96 知らせに「消し方」 を書く検出器は、 消し方の行き先が在るかまで判定に入れる — 別の台帳の id を行き先の名に使うと、 消せない知らせになる"
+  - id: fail-open-names-the-duty
+    legacy: "8.97"
+    level: 3
+    title: "8.97 規則の務めを肩代わりする道具が落ちたら、 知らせは残った務めとそれを果たす 1 行を言う — 「今までどおりで出す」 は、 読んだ側の計画になる"
+  - id: environment-literal-placement
+    legacy: "24"
+    level: 2
+    title: "24. 環境に依存する値は「配る物」 に焼かない — 実行時に導くか、 導けない形式なら install 時に生成する"
+  - id: literal-placement-question
+    legacy: "24.1"
+    level: 3
+    title: "24.1 判別の 1 問"
+  - id: literal-placement-three-ways
+    legacy: "24.2"
+    level: 3
+    title: "24.2 三択 — 実行時に導く / install 時に生成する / 理由つきの literal"
+  - id: justified-literal
+    legacy: "24.3"
+    level: 3
+    title: "24.3 literal が正しい 3 つの型 — 消さずに理由を残す"
+  - id: do-not-rewrite-records
+    legacy: "24.4"
+    level: 3
+    title: "24.4 ⚠️ 記録は掃除の対象ではない"
+  - id: expansion-is-the-readers-job
+    legacy: "24.5"
+    level: 3
+    title: "24.5 実装の罠 — 展開するのは書いた側ではなく読む側"
+  - id: literal-placement-origin
+    legacy: "24.6"
+    level: 3
+    title: "24.6 由来"
+  - id: comparison-window-alignment
+    legacy: "25"
+    level: 2
+    title: "25. 2 つの source を突き合わせて「無い」 と言う検出器は、 両側が同じ範囲を見ているときだけ正しい"
+  - id: gate-backtest-against-live
+    legacy: "26"
+    level: 2
+    title: "26. 検査を過去の呼び出しに当て直すときは、 実地の結果で当て直しの道具を較正する"
+  - id: changelog
+    level: 2
+    title: "変更履歴"

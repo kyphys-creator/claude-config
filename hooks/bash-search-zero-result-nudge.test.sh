@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# bash-search-zero-result-nudge.test.sh — logic + incident-reproduction selftest
+#
+# 正本: <claude-config>/hooks/bash-search-zero-result-nudge.test.sh
+#
+# §A logic: detector A (tree-search null / glob 不成立) と detector B
+#   (truncate-before-grep) の fire / silent 境界 + rate-limit + FORCE + surface file
+# §C detector C (素の grep が binary 扱いで飛ばす file): 本物の file を一時 dir に置いて見る
+# §B incident reproduction: 2026-08-24 の 2 実 incident の command 形を
+#   決定的 fixture として再現し、 hook が fire することを固定する
+#   (= sibling の transcript-依存 §B と違い inline fixture = 全環境で決定的。
+#    fixture path は架空 〔/tmp/demo-*〕 = public repo に private repo 名を焼かない)
+
+set -uo pipefail
+
+# surface file は隔離 dir に書かせる (= 本物の ~/.claude/surface/ を fixture で汚さない。
+# hook 側は CLAUDE_SURFACE_DIR を尊重する。 2026-09-11 汚染 RCA)
+SURFACE_TMP="$(mktemp -d)"
+trap 'rm -rf "$SURFACE_TMP"' EXIT
+export CLAUDE_SURFACE_DIR="$SURFACE_TMP/surface"
+
+HOOK="$(cd "$(dirname "$0")" && pwd)/bash-search-zero-result-nudge.sh"
+[ -x "$HOOK" ] || { echo "FAIL: hook not executable: $HOOK"; exit 1; }
+
+MARKER='🛑 ローカル検索 null'
+pass=0
+fail=0
+results=()
+
+# rate-limit を無効化した isolated 環境で 1 fixture を流す
+assert_fire() {
+  local label="$1" expect="$2" input="$3"
+  local out actual=0
+  local sdir
+  sdir="$(mktemp -d)"
+  out="$(printf '%s' "$input" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=0 "$HOOK" 2>/dev/null)" || true
+  rm -rf "$sdir" 2>/dev/null || true
+  if printf '%s' "$out" | grep -qF "$MARKER"; then actual=1; fi
+  if [ "$actual" = "$expect" ]; then
+    pass=$((pass+1)); results+=("✅ $label")
+  else
+    fail=$((fail+1)); results+=("❌ $label (expect=$expect actual=$actual)")
+  fi
+}
+
+echo "=== §A logic tests ==="
+
+# === detector A: FIRE ===
+assert_fire "A1: grep -rn <dir> 空出力 → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -rn needle /tmp/demo-repo-a/"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "A2: find <dir> -name 空出力 → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"find /tmp/demo-repo-a /tmp/demo-repo-b -name \"*spec*\" 2>/dev/null"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "A3: zsh glob 不成立 (no matches found) → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"ls -1 /tmp/demo-hooks/mcp-search-*.sh"},"tool_response":{"stdout":"","stderr":"(eval):1: no matches found: /tmp/demo-hooks/mcp-search-*.sh"}}'
+
+assert_fire "A3b: zsh -c 形式の nomatch (zsh:1: prefix) → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"zsh -c ls *.zzz"},"tool_response":{"stdout":"","stderr":"zsh:1: no matches found: *.zzz"}}'
+
+assert_fire "A3c: interactive 形式の nomatch (zsh: prefix) → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"ls *.zzz"},"tool_response":{"stdout":"","stderr":"zsh: no matches found: *.zzz"}}'
+
+# ⚠️ 自己言及 FP (2026-09-12 実発生): 検出文字列そのものを含む file を grep すると
+#    出力に phrase が載る。 行頭 anchor 導入前は これで発火していた。
+assert_fire "A3d: 本 hook の source を grep して phrase が出力に載る → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -n matches hooks/bash-search-zero-result-nudge.sh"},"tool_response":{"stdout":"122:  if printf %s | grep -q no matches found; then","stderr":""}}'
+
+assert_fire "A3e: 散文中に phrase (行頭 anchor 不成立) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"cat notes.md"},"tool_response":{"stdout":"zsh said no matches found when the glob failed","stderr":""}}'
+
+assert_fire "A4: git grep 空出力 → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"git grep needle -- docs/"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "A5: string 型 tool_response (空) + grep -R → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -Rn pat /tmp/demo-dir"},"tool_response":""}'
+
+# === detector A: SILENT (= FP 防止の境界) ===
+assert_fire "A6: grep -rn <dir> hit あり → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -rn needle /tmp/demo-repo-a/"},"tool_response":{"stdout":"/tmp/demo-repo-a/x.md:3:needle here","stderr":""}}'
+
+assert_fire "A7: 単一 file grep 空出力 (leak check 型、 -r なし) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -inE \"password|token\" /tmp/draft.md"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "A8: pipe 入力 grep 空出力 (git diff | grep) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"git diff --unified=0 | grep \"^+\" | grep -inE \"secret\""},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "A9: find hit あり → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"find /tmp/demo -name \"*.md\""},"tool_response":{"stdout":"/tmp/demo/a.md","stderr":""}}'
+
+assert_fire "A10: 非検索 command の空出力 (mkdir) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"mkdir -p /tmp/demo-out"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "A11: 非 Bash tool → silent" 0 \
+  '{"tool_name":"Read","tool_input":{"file_path":"/tmp/x.md"},"tool_response":"no matches found"}'
+
+# === detector B: FIRE (= 構造 signal、 hit 有無に関わらず) ===
+assert_fire "B1: sed -n 窓 → grep (hit あり) → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"mycli --help 2>&1 | sed -n \"40,200p\" | grep -iE \"import|share|export\""},"tool_response":{"stdout":"  --file <specs...>  File resources","stderr":""}}'
+
+assert_fire "B2: head → grep → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"mycli --help | head -60 | grep -i import"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "B3: tail -100 → grep → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"tail -100 /tmp/app.log | grep ERROR"},"tool_response":{"stdout":"","stderr":""}}'
+
+# === detector B: SILENT (= 正常 idiom / 除外) ===
+assert_fire "B4: grep → head (正常 idiom) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -n pattern /tmp/big.txt | head -5"},"tool_response":{"stdout":"3:pattern","stderr":""}}'
+
+assert_fire "B5: tail -f → grep (stream 監視 idiom) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"tail -f /tmp/app.log | grep --line-buffered ERROR"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "B6: sed 置換 (s///、 -n なし) → grep → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"sed \"s/foo/bar/\" /tmp/x.txt | grep bar"},"tool_response":{"stdout":"bar","stderr":""}}'
+
+# 別 command の truncator と grep は 1 本の pipeline ではない (実測の誤発火 3 形)
+assert_fire "B7: a | tail -1; b | grep (; で区切った別 command) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"git fetch -q 2>&1 | tail -1; git remote -v | grep -v fork"},"tool_response":{"stdout":"origin\thttps://example.invalid/x.git (fetch)","stderr":""}}'
+
+assert_fire "B8: a | head -1 && b | grep -c (&& で区切った別 command) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"git status -sb | head -1 && git diff -U0 -- x.md | grep -c \"^@@\""},"tool_response":{"stdout":"## main\n1","stderr":""}}'
+
+assert_fire "B9: a || b | head; c | grep (|| を pipe と取り違えない) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"test -d /tmp/demo || ls /tmp | head -3\ncat /tmp/x.txt | grep foo"},"tool_response":{"stdout":"foo","stderr":""}}'
+
+assert_fire "B10: head -c N | grep -q MAGIC (形式の magic を真偽で判定) → silent" 0 \
+  '{"tool_name":"Bash","tool_input":{"command":"git cat-file -p HEAD:x.md | head -c 9 | grep -qa GITCRYPT && echo encrypted"},"tool_response":{"stdout":"encrypted","stderr":""}}'
+
+# 区切りを入れても、 同じ pipeline の中の逆順は従来どおり発火する
+assert_fire "B11: x; a | head -60 | grep (同じ pipeline の逆順) → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"cd /tmp/demo; mycli --help | head -60 | grep -i import"},"tool_response":{"stdout":"","stderr":""}}'
+
+assert_fire "B12: head -c N | grep (-q なし = 窓の中を読む) → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"curl -s https://example.invalid/ | head -c 5000 | grep -i title"},"tool_response":{"stdout":"","stderr":""}}'
+
+# === rate limit ===
+sdir="$(mktemp -d)"
+in_a='{"tool_name":"Bash","tool_input":{"command":"grep -rn needle /tmp/demo-repo-a/"},"tool_response":{"stdout":"","stderr":""}}'
+out1="$(printf '%s' "$in_a" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=9999 "$HOOK" 2>/dev/null)" || true
+out2="$(printf '%s' "$in_a" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=9999 "$HOOK" 2>/dev/null)" || true
+rm -rf "$sdir" 2>/dev/null || true
+if printf '%s' "$out1" | grep -qF "$MARKER" && ! printf '%s' "$out2" | grep -qF "$MARKER"; then
+  pass=$((pass+1)); results+=("✅ R1: rate limit — 1 回目 fire / 窓内 2 回目 silent")
+else
+  fail=$((fail+1)); results+=("❌ R1: rate limit (out1=$(printf '%s' "$out1" | grep -cF "$MARKER") out2=$(printf '%s' "$out2" | grep -cF "$MARKER"))")
+fi
+
+# === FORCE bypass ===
+out="$(printf '%s' '{"tool_name":"Read","tool_response":"hits everywhere"}' | BASH_SEARCH_NUDGE_FORCE=1 "$HOOK" 2>/dev/null)" || true
+if printf '%s' "$out" | grep -qF "$MARKER"; then
+  pass=$((pass+1)); results+=("✅ F1: FORCE bypass fires on any tool")
+else
+  fail=$((fail+1)); results+=("❌ F1: FORCE bypass failed")
+fi
+
+# === surface file ===
+SURFACE_FILE="$CLAUDE_SURFACE_DIR/bash-search-zero.txt"
+rm -f "$SURFACE_FILE" 2>/dev/null || true
+sdir="$(mktemp -d)"
+printf '%s' "$in_a" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=0 "$HOOK" >/dev/null 2>&1 || true
+rm -rf "$sdir" 2>/dev/null || true
+if [ -f "$SURFACE_FILE" ] && grep -q 'ローカル検索 null' "$SURFACE_FILE"; then
+  pass=$((pass+1)); results+=("✅ S1: surface file written")
+else
+  fail=$((fail+1)); results+=("❌ S1: surface file not written")
+fi
+
+# ---------- §C detector C (= file の中身を見るので本物の file を置く) ----------
+echo ""
+echo "=== §C binary-skipped file ==="
+
+CDIR="$SURFACE_TMP/c dir"
+mkdir -p "$CDIR/sub"
+printf 'needle abc\n日本語の行\n' > "$CDIR/ok.txt"
+{ printf 'needle abc\n'; printf '\346\227\245\350\n'; } > "$CDIR/bad.txt"
+printf 'needle a\0b\n' > "$CDIR/nul.txt"
+cp "$CDIR/bad.txt" "$CDIR/sub/rel.txt"
+python3 -c 'import sys; open(sys.argv[1], "wb").write(b"needle\n" + b"x" * 300000 + b"\n\xe8\n")' "$CDIR/deep.txt"
+
+c_input() { jq -n --arg c "$1" --arg d "${2:-}" --arg o "${3:-}" '{tool_name:"Bash",cwd:$d,tool_input:{command:$c},tool_response:{stdout:$o,stderr:""}}'; }
+assert_c() { local MARKER='detector: C'; assert_fire "$1" "$2" "$(c_input "$3" "${4:-}" "${5:-}")"; }
+q() { printf '%q' "$1"; }
+
+assert_c "C1: 不正な UTF-8 の file を素の grep → fire" 1 "grep -n needle $(q "$CDIR/bad.txt")"
+assert_c "C2: NUL の file を素の grep -c → fire" 1 "grep -c needle $(q "$CDIR/nul.txt")"
+assert_c "C3: 正しい UTF-8 → silent" 0 "grep -n needle $(q "$CDIR/ok.txt")"
+assert_c "C4: command grep → silent" 0 "command grep -n needle $(q "$CDIR/bad.txt")"
+assert_c "C5: grep -a → silent" 0 "grep -a -c needle $(q "$CDIR/bad.txt")"
+assert_c "C6: grep -an (束ねた -a) → silent" 0 "grep -an needle $(q "$CDIR/bad.txt")"
+assert_c "C7: pipe 入力 → silent" 0 "cat $(q "$CDIR/bad.txt") | grep needle"
+assert_c "C8: 再帰 → silent" 0 "grep -rn needle $(q "$CDIR")" "" "hit"
+assert_c "C9: 無い file → silent" 0 "grep needle $(q "$CDIR/none.txt")"
+assert_c "C10: 先頭 256 KiB より奥のバイト → silent" 0 "grep -c needle $(q "$CDIR/deep.txt")"
+assert_c "C11: 引数なしの pattern だけ → silent" 0 "grep needle"
+assert_c "C12: heredoc の本文の grep → silent" 0 "python3 - <<'EOF'
+grep needle $(q "$CDIR/bad.txt")
+EOF"
+assert_c "C13: 同じ command の代入で渡した path (別の出力が混ざる実測の形) → fire" 1 "S=$(q "$CDIR"); cat \$S/ok.txt | tail -1; grep -n needle \$S/bad.txt | cut -c1-90" "" "needle abc"
+assert_c "C14: cd の後の相対 path → fire" 1 "cd $(q "$CDIR/sub") && grep -c needle rel.txt"
+assert_c "C15: hook の cwd からの相対 path → fire" 1 "grep -c needle sub/rel.txt" "$CDIR"
+assert_c "C16: 解けない変数 (loop) → silent" 0 "for f in a b; do grep needle \"\$f\"; done"
+assert_c "C17: if の条件の grep → fire" 1 "if grep -q needle $(q "$CDIR/bad.txt"); then echo yes; fi"
+assert_c "C18: -e の pattern の後の file → fire" 1 "grep -e needle $(q "$CDIR/bad.txt")"
+assert_c "C19: 2>/dev/null つき → fire" 1 "grep -c needle $(q "$CDIR/bad.txt") 2>/dev/null"
+assert_c "C20: 環境変数を前に置いた形 → fire" 1 "LC_ALL=C grep -c needle $(q "$CDIR/bad.txt")"
+
+# A・B の窓の中でも detector C は出る (file が決まっている指摘)
+sdir="$(mktemp -d)"
+printf '%s' "$in_a" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=9999 "$HOOK" >/dev/null 2>&1 || true
+c_in="$(c_input "grep -c needle $(q "$CDIR/bad.txt")")"
+out1="$(printf '%s' "$c_in" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=9999 "$HOOK" 2>/dev/null)" || true
+out2="$(printf '%s' "$c_in" | BASH_SEARCH_NUDGE_STATE_DIR="$sdir" BASH_SEARCH_NUDGE_WINDOW=9999 "$HOOK" 2>/dev/null)" || true
+rm -rf "$sdir" 2>/dev/null || true
+if printf '%s' "$out1" | grep -qF 'detector: C' && ! printf '%s' "$out2" | grep -qF 'detector: C'; then
+  pass=$((pass+1)); results+=("✅ C21: A の窓の中でも 1 回出て、 C の窓の中は 2 回目を出さない")
+else
+  fail=$((fail+1)); results+=("❌ C21: rate limit (out1=$(printf '%s' "$out1" | grep -cF 'detector: C') out2=$(printf '%s' "$out2" | grep -cF 'detector: C'))")
+fi
+if printf '%s' "$out1" | grep -qF 'command grep か grep -a で読み直す' && printf '%s' "$out1" | grep -qF 'bad.txt'; then
+  pass=$((pass+1)); results+=("✅ C22: 読み直し方と file の名前を出す")
+else
+  fail=$((fail+1)); results+=("❌ C22: 読み直し方か file の名前が出ていない")
+fi
+
+# ---------- §B incident reproduction (= 2026-08-24 の 2 実 incident、 決定的 inline) ----------
+echo ""
+echo "=== §B incident reproduction ==="
+
+# incident ①: 複数 repo を find で -name 検索 → null → 「doc は存在しない (stale)」 と
+# 誤断定した形 (実体は検索対象外の sibling repo に実在した)。 path は架空に一般化。
+assert_fire "I1: incident① 型 = 2-repo find -name null → fire" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"find /tmp/repo-x /tmp/repo-y -name \"*schedule-spec*\" -not -path \"*/.git/*\" 2>/dev/null"},"tool_response":{"stdout":"","stderr":""}}'
+
+# incident ②: --help 全 227 行のうち sed -n の窓 (40-200 行) の上で grep して
+# 「該当 flag 無し」 と断定した形 (hit はあったが窓外 201-227 行が未検査)。
+assert_fire "I2: incident② 型 = --help | sed -n 窓 | grep → fire (hit あり)" 1 \
+  '{"tool_name":"Bash","tool_input":{"command":"\"$CL\" --help 2>&1 | sed -n \"40,200p\" | grep -iE \"import|share|export|url|conversation\""},"tool_response":{"stdout":"  --chrome    Enable Claude in Chrome integration","stderr":""}}'
+
+echo ""
+echo "=== 結果 ==="
+for r in "${results[@]}"; do echo "  $r"; done
+echo ""
+echo "pass: $pass / fail: $fail"
+exit $fail

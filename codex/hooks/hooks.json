@@ -1,0 +1,195 @@
+{
+  "description": "claude-config's narrow, product-neutral Codex lifecycle hooks.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/resume_context.py\"",
+            "timeout": 3,
+            "statusMessage": "Restoring shared work context"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_provenance.py\"",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/board_surface.py\"",
+            "timeout": 10,
+            "statusMessage": "Reading the board"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/parent_wrap_observe.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking accepted workers"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_provenance.py\"",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/first_prompt_stamp.py\"",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_touch.py\" acknowledge",
+            "timeout": 12
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/worker_record_context.py\"",
+            "timeout": 5,
+            "statusMessage": "Passing the worker record contract"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_provenance.py\"",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_touch.py\" track",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/manuscript_claim_guard.py\"",
+            "timeout": 20,
+            "statusMessage": "Checking manuscript claims and authority rules"
+          }
+        ]
+      },
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/pre_tool_policy.py\"",
+            "timeout": 3,
+            "statusMessage": "Checking public-repository edit"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/manuscript_claim_guard.py\"",
+            "timeout": 20,
+            "statusMessage": "Checking manuscript claims and authority rules"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_touch.py\" track",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|mcp__codex_app__create_thread|mcp__codex_app\\.create_thread",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/worker_record_context.py\"",
+            "timeout": 5,
+            "statusMessage": "Passing the worker record contract"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_touch.py\" track",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/session_touch.py\" nudge",
+            "timeout": 12
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/first_turn_stamp_check.py\"",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/parent_wrap_observe.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking accepted workers"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/manuscript_claim_guard.py\" --stop",
+            "timeout": 12
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/worker_record_context.py\"",
+            "timeout": 5,
+            "statusMessage": "Passing the worker record contract"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/worker_record_context.py\"",
+            "timeout": 5,
+            "statusMessage": "Passing the worker record contract"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.codex/claude-config-hooks/worker_record_context.py\"",
+            "timeout": 5,
+            "statusMessage": "Passing the worker record contract"
+          }
+        ]
+      }
+    ]
+  }
+}

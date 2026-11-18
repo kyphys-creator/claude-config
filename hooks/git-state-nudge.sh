@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# git-state-nudge.sh
+# git-state-nudge.sh — PostToolUse(Bash): 直近 commit の未 push 検出 + first-sighting で fetch+stale 検出
 #
 # PostToolUse(Bash) hook: nudge Claude when a git repo has state needing
 # attention. The hook is the SOLE git-state monitor — it subsumes the
@@ -12,11 +12,11 @@
 #
 #   (1) "Orphan tree on origin" — HEAD has NO common ancestor with @{u}.
 #       This is the unambiguous signature of a re-init force-push from
-#       elsewhere (the failure mode that fooled Claude on 2026-04-07 —
-#       see "divergence の解釈規律" and "過去の失敗事例" sections in
-#       odakin-prefs/push-workflow.md). The nudge tells Claude that
-#       AHEAD commits are likely ORPHANED, not unpushed, and points to
-#       the 4-query checklist there.
+#       elsewhere (a failure mode that previously fooled Claude on
+#       2026-04-07 into interpreting AHEAD commits as "missing push"
+#       instead of orphans on a force-rewritten remote). The nudge tells
+#       Claude that AHEAD commits are likely ORPHANED, not unpushed,
+#       and to investigate before pushing.
 #       NOTE: an earlier version also detected `forced-update` in the
 #       origin/<branch> reflog, but that was too eager — the reflog entry
 #       persists for ~90 days even after `git reset --hard` resolves the
@@ -149,7 +149,10 @@ check_repo_state() {
     FIRST_SIGHTING=1
   else
     local SEEN_MTIME
-    SEEN_MTIME="$(stat -f %m "$SEEN_FILE" 2>/dev/null || stat -c %Y "$SEEN_FILE" 2>/dev/null || echo "$NOW")"
+    # BSD/GNU stat: 数値検証分岐 (正本 = hook-authoring.md#substitution-fallback-stdout-mixing)
+    SEEN_MTIME="$(stat -f %m "$SEEN_FILE" 2>/dev/null)"
+    case "$SEEN_MTIME" in ''|*[!0-9]*) SEEN_MTIME="$(stat -c %Y "$SEEN_FILE" 2>/dev/null)" ;; esac
+    case "$SEEN_MTIME" in ''|*[!0-9]*) SEEN_MTIME="$NOW" ;; esac
     local SEEN_AGE=$((NOW - SEEN_MTIME))
     [ "$SEEN_AGE" -gt "$SEEN_THRESHOLD" ] && FIRST_SIGHTING=1
   fi
@@ -199,7 +202,10 @@ check_repo_state() {
     if [ -n "$PORCELAIN_HASH" ] && [ "$PORCELAIN_LAST" = "$PORCELAIN_HASH" ]; then
       # Same dirty set as last seen — measure how long it has persisted.
       local PMTIME PAGE
-      PMTIME="$(stat -f %m "$PORCELAIN_FILE" 2>/dev/null || stat -c %Y "$PORCELAIN_FILE" 2>/dev/null || echo "$NOW")"
+      # BSD/GNU stat: 数値検証分岐 (同上、 正本 = hook-authoring.md#substitution-fallback-stdout-mixing)
+      PMTIME="$(stat -f %m "$PORCELAIN_FILE" 2>/dev/null)"
+      case "$PMTIME" in ''|*[!0-9]*) PMTIME="$(stat -c %Y "$PORCELAIN_FILE" 2>/dev/null)" ;; esac
+      case "$PMTIME" in ''|*[!0-9]*) PMTIME="$NOW" ;; esac
       PAGE=$((NOW - PMTIME))
       PAGE_HOURS=$((PAGE / 3600))
       if [ "$PAGE" -gt 86400 ]; then
@@ -274,18 +280,28 @@ check_repo_state() {
   fi
 
   # ---- Emit ----
-  # Case (1): orphan-tree (highest priority). Concise — full
-  # 4-query checklist lives in odakin-prefs/push-workflow.md.
+  # Case (1): orphan-tree (highest priority). Concise — emit just enough
+  # for Claude to recognize the situation and investigate.
   if [ "$ORPHAN_NUDGE" -eq 1 ]; then
     printf '[git-nudge] %s%s\n' "$LABEL_PREFIX" "$REPO_ROOT"
     printf '  - ORPHAN TREE: HEAD has NO common ancestor with %s\n' "$UPSTREAM"
-    printf '  - Per push-workflow.md "divergence の解釈規律": run the 4 queries\n'
-    printf '    BEFORE concluding "push 忘れ". Your %s AHEAD commit(s) may be ORPHANED.\n' "$AHEAD"
+    printf '  - This signals a remote re-init / force-push, not "push 忘れ".\n'
+    printf '    INVESTIGATE before pushing — your %s AHEAD commit(s) may be ORPHANED.\n' "$AHEAD"
     echo "${HEAD_SHA}-orphan" > "$NUDGED_FILE" 2>/dev/null || true
     return 0
   fi
 
   # Case (2): just-committed-not-pushed.
+  #
+  # Default: nudge only (per CONVENTIONS §4「コミット後は常に push」—
+  # recommendation, not strict enforcement).
+  #
+  # Opt-in auto-push (2026-04-14): set CLAUDE_GIT_AUTO_PUSH=1 in the
+  # environment and the hook itself will run `git push` after any commit
+  # that's AHEAD>0 / BEHIND=0. Users with strict "commit → push atomicity"
+  # discipline typically want this; default claude-config users can stay
+  # with nudge-only.
+  # BEHIND > 0 always falls back to nudge (rebase first).
   if [ "$RECENT_COMMIT_NUDGE" -eq 1 ]; then
     printf '[git-nudge] %s%s\n' "$LABEL_PREFIX" "$REPO_ROOT"
     printf '  - You just committed (%ss ago); HEAD is %s commit(s) ahead of %s.\n' \
@@ -293,10 +309,24 @@ check_repo_state() {
     if [ "$BEHIND" -gt 0 ]; then
       printf '  - DIVERGED: also %s commit(s) BEHIND %s.\n' "$BEHIND" "$UPSTREAM"
       printf '  - Run `git pull --rebase` first, then `git push`. A plain push\n'
-      printf '    will be rejected as non-fast-forward.\n'
+      printf '    will be rejected as non-fast-forward. (auto-push skipped)\n'
+    elif [ "${CLAUDE_GIT_AUTO_PUSH:-0}" = "1" ]; then
+      # Attempt auto-push (opt-in). Timeout guards against credential
+      # prompts / hung network. Output captured to be shown in nudge.
+      local PUSH_OUT PUSH_RC
+      PUSH_OUT="$(cd "$REPO_ROOT" && timeout 20 git push 2>&1)"
+      PUSH_RC=$?
+      if [ "$PUSH_RC" -eq 0 ]; then
+        printf '  - Auto-pushed (CLAUDE_GIT_AUTO_PUSH=1).\n'
+      else
+        printf '  - AUTO-PUSH FAILED (rc=%s). Investigate:\n' "$PUSH_RC"
+        printf '%s\n' "$PUSH_OUT" | sed 's/^/      /'
+        printf '  - Resolve and push manually before continuing.\n'
+      fi
     else
       printf '  - Per CONVENTIONS §4: コミット後は常に push. Run `git push` now\n'
       printf '    unless you are intentionally stacking commits.\n'
+      printf '  - (Opt-in: export CLAUDE_GIT_AUTO_PUSH=1 to have this hook auto-push.)\n'
     fi
     echo "$HEAD_SHA" > "$NUDGED_FILE" 2>/dev/null || true
     return 0
@@ -344,6 +374,15 @@ if command -v jq >/dev/null 2>&1 && [ ! -t 0 ]; then
     BASH_CMD="$(printf '%s' "$STDIN_JSON" | jq -r '.tool_input.command // empty' 2>/dev/null || echo '')"
   fi
 fi
+
+# Landed check: the legacy nudges below print plain stdout, which a
+# PostToolUse hook does not hand back to the window. They are captured here so
+# that, when hooks/git-write-landed-check.py finds a commit or push that did not
+# land, everything goes back as one additionalContext JSON. Otherwise the
+# legacy text is printed unchanged. 正本 = hooks/git-write-landed-check.py の冒頭
+LEGACY_TMP="$(mktemp "${TMPDIR:-/tmp}/git-state-nudge.XXXXXX" 2>/dev/null || echo '')"
+exec 4>&1
+[ -n "$LEGACY_TMP" ] && exec 1>"$LEGACY_TMP"
 
 # Track repos already inspected so we don't double-warn for cwd + git -C
 # pointing at the same place.
@@ -482,6 +521,40 @@ if [ -d "$CC_DIR/.git" ]; then
       printf '  - Full details: ~/Claude/claude-config/SESSION.md\n'
     fi
   fi
+fi
+
+# ----------------------------------------------------------------------
+# Landed check: did the commit / push in this command actually land?
+# Prefilter = a superset of the engine's predicate (the words commit / push),
+# so python starts only for those commands (hook-authoring.md#prefilter-superset-of-predicate).
+# ----------------------------------------------------------------------
+exec 1>&4 4>&-
+LEGACY_OUT=""
+if [ -n "$LEGACY_TMP" ]; then
+  LEGACY_OUT="$(cat "$LEGACY_TMP" 2>/dev/null || true)"
+  rm -f "$LEGACY_TMP" 2>/dev/null || true
+fi
+LANDED_MSG=""
+if [ -n "$BASH_CMD" ] && command -v python3 >/dev/null 2>&1 \
+   && grep -qE '(^|[^A-Za-z0-9_-])(commit|push)([^A-Za-z0-9_-]|$)' <<< "$BASH_CMD" 2>/dev/null; then
+  SELF="${BASH_SOURCE[0]}"
+  while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+  done
+  LANDED_ENGINE="$(dirname "$SELF")/git-write-landed-check.py"
+  if [ -f "$LANDED_ENGINE" ]; then
+    LANDED_MSG="$(printf '%s' "$STDIN_JSON" | python3 "$LANDED_ENGINE" 2>/dev/null || true)"
+  fi
+fi
+if [ -n "$LANDED_MSG" ]; then
+  if [ -n "$LEGACY_OUT" ]; then
+    LANDED_MSG="$LANDED_MSG
+$LEGACY_OUT"
+  fi
+  jq -n --arg m "$LANDED_MSG" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $m}}'
+elif [ -n "$LEGACY_OUT" ]; then
+  printf '%s\n' "$LEGACY_OUT"
 fi
 
 exit 0

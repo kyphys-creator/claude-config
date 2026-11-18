@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# public-precommit-runner.sh — 公開リポ pre-commit gate（Tier A 構造 / B literal / C private repo 名 / D 未公開文書の逐語 + local-only 機密 / E 活動の事実）
 # public-precommit-runner.sh — 公開リポの pre-commit gate
 #
 # 正本: claude-config/scripts/public-precommit-runner.sh
@@ -10,33 +11,131 @@
 #   2. 各ファイルの追加行 (`^+` で始まる、`+++` ヘッダ除く) を抽出
 #   3. Tier A 構造制約 regex を適用:
 #        - email (allowlist: noreply@anthropic.com / noreply@github.com
-#          / support@github.com)
-#        - /Users/<name> 絶対 path
+#          / support@github.com / *@example.{com,org,net,invalid} = RFC 2606
+#          予約 doc 用 domain、 実在人物であり得ないので fixture / 例示に安全
+#          / ssh remote の user 部 = git@<code host> の github.com・gitlab.com・
+#          bitbucket.org。 remote URL の一部であって個人の address ではない、 2026-09-12)
+#        - home 直下の絶対 path (`/Users/<name>` と Windows の `C:\Users\<name>`)
 #        - IPv4 (RFC1918 / loopback / link-local / broadcast allowlist)
 #        - token prefix (ghp_ / github_pat_ / sk- + 30 文字以上)
-#   4. `$HOME/Claude/odakin-prefs/sensitive-terms.txt` が存在すれば
+#   4. 個人層の `sensitive-terms.txt` (= lib/find-personal-layer.sh で動的解決、
+#      foreign user では個人層なし → 空文字列でこのチェックは skip) が存在すれば
 #      ephemeral に load して追加行に対して `grep -F -f` で literal check
 #      (本 script は sensitive-terms.txt の中身を memory 上に持たない。
 #       grep プロセスに file path を渡すだけで直接 read しない)
 #   5. hit があれば `exit 1` で commit を reject。詳細を stderr に出す
 #   6. `--no-verify` で bypass 可能 (git 標準の escape hatch)
+#   7. leak gate を pass したら、対象 repo に
+#      `<repo_root>/.claude/pre-commit-extra.sh` (executable) があれば
+#      call + `exit $?` で chain する (`exec` ではない理由は本体の
+#      該当箇所コメント参照)。repo 固有の commit 規律 (placeholder
+#      検出・SESSION.md 同期警告等) はこちらに置く。stub は触らずに
+#      済むので install-public-precommit.sh の冪等性が保たれる
 #
 # 設計思想:
 #   本 script は `sensitive-repo-patterns.ja.md §3-3` の批判 (b)
 #   「blacklist 自体が leak 源」を、**hook 本体 (claude-config, public)
-#   と literal data (odakin-prefs/sensitive-terms.txt, gitignore)
-#   の構造分離** で回避する。本 script source には literal が一切
-#   埋め込まれない。詳細は claude-config/DESIGN.md §公開リポ leak 防止。
+#   と literal data (個人層 (layer 3) の sensitive-terms.txt + gitignore で
+#   隔離) の構造分離** で回避する。本 script source には literal も特定の
+#   個人層名も埋め込まれない (= 個人層は lib/find-personal-layer.sh で動的解決)。
+#   詳細は claude-config/DESIGN.md §公開リポ leak 防止。
+#
+# Sibling (= 2-layer 防御):
+#   本 script は **file 本文** (= stage 済 file の追加行) を Tier A/B で scan する。
+#   commit message + subject は別 hook `commit-msg-leak-guard-runner.sh` (BLOCK)
+#   が cover (= 2026-05-26 追加、 claude-code 2.1.x harness invoke bug の
+#   mitigation option B、 詳細 conventions/hook-authoring.md#delivery-audit-4-axes (d) + DESIGN.md
+#   §2026-05-26)。 install は `install-public-precommit.sh` (= 本 stub) +
+#   `install-public-commit-msg.sh` (= sibling stub) で setup.sh Step 8 内 1 loop
+#   で同時 install。 Tier A regex は本 file 固有、 **Tier C は commit-msg gate と
+#   同じ shared library を file 本文にも当てる** (= 2026-09-12 まで private repo 名の
+#   検査は commit message 側だけで、 逆向き 〔message OK + 本文に repo 名〕 が開いて
+#   いた。 実害あり = Tier C の block comment 参照)。
 
 set -uo pipefail
 
-SENSITIVE_TERMS="$HOME/Claude/odakin-prefs/sensitive-terms.txt"
+# 個人層の sensitive-terms.txt を動的解決。
+# foreign user (個人層なし) では空文字列 → 後段の [ -f "$SENSITIVE_TERMS" ] で skip。
+. "$(dirname "$0")/lib/find-personal-layer.sh"
+PERSONAL_LAYER="$(find_personal_layer)"
+SENSITIVE_TERMS=""
+if [ -n "$PERSONAL_LAYER" ]; then
+  SENSITIVE_TERMS="$PERSONAL_LAYER/sensitive-terms.txt"
+fi
+
+# 本人の承認 (この repo だけ、 Tier B の語と Tier C の repo 名だけ) = leak-guard-consent.py が正本。
+# 止めた文字列に本人の発言を承認として記録すると、 その repo でだけ通す (承認の記録は個人層)。
+# 道具が無い・python3 が無い・個人層が無い = 承認は空 (= 今までどおり止める、 fail-closed)
+CONSENT_TOOL="$(dirname "$0")/leak-guard-consent.py"
+CONSENT_REPO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+consent_allowed() {   # $1 = terms | repo-name
+  [ -f "$CONSENT_TOOL" ] && [ -n "$CONSENT_REPO" ] && [ -n "$PERSONAL_LAYER" ] || return 0
+  python3 "$CONSENT_TOOL" allowed --repo "$CONSENT_REPO" --layer "$PERSONAL_LAYER" --tier "$1" 2>/dev/null || true
+}
 
 # ----------------------------------------------------------------------
 # Stage 済みファイルを列挙。削除済み (D)・merge commit は skip。
 # ----------------------------------------------------------------------
 STAGED="$(git diff --cached --name-status 2>/dev/null | awk '$1 != "D" { print $NF }')"
+# ⚠️ 受理一覧 (.claude/public-tree-accept.txt) は **受理した token をそのまま並べる file** なので、
+# 本 gate に掛けると自分の signal で必ず落ちる (= 検出器が自分の設定を検出する、
+# docs/convention-design-principles.md#detector-fires-on-its-own-signal)。 この 1 file だけ外す。
+# 隠し場所にならない保証は scan-public-tree.sh 側が持つ — **受理一覧に書けるのは tree の他の場所に
+# 既に在る文字列だけ** で、 そうでない行は finding として報告される。
+STAGED="$(printf '%s\n' "$STAGED" | grep -v '^\.claude/public-tree-accept\.txt$' || true)"
+# Even a deletion-only commit must reach the manuscript/authority gate below.
+
+# ----------------------------------------------------------------------
+# Merge conflict marker gate (staged content 全体、 shared lib)。
+# 検出 logic / escape hatch / 設計動機 (2026-07-10 = conflict marker 入り conventions/*.md
+# が public repo に commit+push された実事故) の SoT = lib/staged-conflict-markers.sh header。
+# lib 不在は skip (= fail-open、 leak gate 本体を壊さない)。
+# ----------------------------------------------------------------------
+CONFLICT_LIB="$(dirname "$0")/lib/staged-conflict-markers.sh"
+if [ -f "$CONFLICT_LIB" ]; then
+  . "$CONFLICT_LIB"
+  if ! check_staged_conflict_markers; then
+    exit 1
+  fi
+fi
+
+# ----------------------------------------------------------------------
+# 原稿の主張と agent の権限規約の gate (AI agent の session の commit だけを見る。 人の commit は通す)。
+# 公開 repo では主に権限規約 (正本 doc の本文・参照行・配線) の lock として効く。
+# agent の commit は検査不能でも止め、修復して再検査する。
+# 正本 = conventions/manuscript-claim-ownership.md
+# ----------------------------------------------------------------------
+MCG_ENGINE="$(dirname "$0")/manuscript-claim-guard.py"
+if [ -n "${CLAUDE_CONFIG_AGENT_SESSION:-}${CLAUDE_CODE_SESSION_ID:-}${CODEX_SESSION_ID:-}${CODEX_THREAD_ID:-}" ]; then
+  if [ ! -f "$MCG_ENGINE" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo 'manuscript-claim-guard: inspection unavailable (engine/runtime missing); repair and retry.' >&2
+    exit 1
+  fi
+  mcg_rc=0
+  mcg_out="$(python3 "$MCG_ENGINE" git-precommit 2>&1)" || mcg_rc=$?
+  [ -n "$mcg_out" ] && printf '%s\n' "$mcg_out" >&2
+  if [ "$mcg_rc" -ne 0 ]; then
+    echo 'manuscript-claim-guard: commit stopped; resolve the finding or inspection failure and retry.' >&2
+    exit 1
+  fi
+fi
 [ -z "$STAGED" ] && exit 0
+
+# 学生の識別子 (学籍番号の形・氏名・path の姓) を平文で新しく入れる commit の gate (pre-commit-bib と同じ engine・同じ契約)。
+# 値の一覧は machine-local、 無い機械では何もしない。 述語・escape hatch (CLAUDE_STUDENT_ID_GUARD=0) の SoT =
+# check-student-identifiers.py docstring。 止めるのは「exit 1 かつ engine の BLOCK 見出し」 のときだけ。
+SID_ENGINE="$(dirname "$0")/check-student-identifiers.py"
+if [ -f "$SID_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  sid_rc=0
+  sid_out="$(python3 "$SID_ENGINE" --staged 2>&1)" || sid_rc=$?
+  [ -n "$sid_out" ] && printf '%s\n' "$sid_out" >&2
+  if [ "$sid_rc" -eq 1 ] && grep -q 'check-student-identifiers: BLOCK' <<< "$sid_out"; then
+    exit 1
+  fi
+  if [ "$sid_rc" -ne 0 ] && ! grep -q 'check-student-identifiers:' <<< "$sid_out"; then
+    echo "⚠️ pre-commit: 学生の識別子の検査が異常終了した (rc=${sid_rc}) — この commit では走っていない (commit は止めない)。 確認: python3 ${SID_ENGINE} --selftest" >&2
+  fi
+fi
 
 # ----------------------------------------------------------------------
 # 各ファイルの追加行を 1 つのバッファに集約 (file:line prefix 付き)
@@ -59,9 +158,24 @@ while IFS= read -r file; do
       ' >> "$ADDED_BUF"
 done <<< "$STAGED"
 
-if [ ! -s "$ADDED_BUF" ]; then
-  exit 0  # 追加行なし (削除のみ・空 commit 等)
+# 公刊済みの著作の書誌 (arXiv / DOI の title・authors・abstract、 公開先 link だけの行) を外す (2026-09-15)。
+# 定義上公開済みで、 これを残すと共同研究者の論文を記録する bot の自動 commit が著者名で毎回止まる (実測)。
+# 書き手の文 (reason / summary / link 以外の語がある行) は外さない。 判定と理由の正本 = lib/published_metadata.py、
+# 規律 = conventions/confidential-repo-boundary.md#published-metadata-is-public。
+# python3 / lib が無い・失敗したときは外さない (= 鳴る側に倒れる)
+PM_LIB="$(dirname "$0")/lib/published_metadata.py"
+if [ -f "$PM_LIB" ] && command -v python3 >/dev/null 2>&1 && [ -s "$ADDED_BUF" ]; then
+  PM_OUT="$(mktemp)"
+  if python3 "$PM_LIB" --filter-added "$ADDED_BUF" > "$PM_OUT" 2>/dev/null; then
+    cat "$PM_OUT" > "$ADDED_BUF"
+  fi
+  rm -f "$PM_OUT"
 fi
+
+# 追加行なしでも early-exit しない (2026-06-18): 削除のみ commit (= 例: slug index の legacy 行
+# 削除) でも、 末尾の repo-local chain hook (.claude/pre-commit-extra.sh = legacy append-only
+# gate / tree drift) を走らせる必要があるため。 leak scan 自体は ADDED_BUF が空なら下流の
+# awk/grep が自然に no-op になり HITS 空 → chain 到達、 で安全。
 
 # ----------------------------------------------------------------------
 # Tier A regex check
@@ -72,7 +186,8 @@ HITS=""
 EMAIL_HITS="$(
   awk -F'\t' '{ print $2 }' "$ADDED_BUF" \
     | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
-    | grep -vE '^(noreply@anthropic\.com|noreply@github\.com|support@github\.com)$' \
+    `# 末尾の @[23]x.<ext> は retina asset の file 名 (Icon@2x.png)。 TLD に 2x/3x は無いので安全に外せる` \
+    | grep -vE '^(noreply@anthropic\.com|noreply@github\.com|support@github\.com|git@(github\.com|gitlab\.com|bitbucket\.org)|[A-Za-z0-9._%+-]+@example\.(com|org|net|invalid)|[A-Za-z0-9._%+-]+@[23]x\.[A-Za-z0-9]+)$' \
     | sort -u \
     || true
 )"
@@ -81,10 +196,14 @@ if [ -n "$EMAIL_HITS" ]; then
 [tier-a/email] $(printf '%s' "$EMAIL_HITS" | head -5 | tr '\n' ' ')"
 fi
 
-# Tier A-2: /Users/<name>
+# Tier A-2: home 直下の絶対 path。 macOS/Linux の `/Users/<name>` と
+# **Windows の `C:\Users\<name>`** の両方 (= 後者が抜けていて、 別マシンで書かれた
+# build spec の中の他人の username が public repo に残っていた、 実測)。
+# Windows 形は drive letter を任意にし、 区切りは `\` と `/` の両方を見る
+# (= Python の raw string / MSYS path / JSON の escape で両方現れる)
 PATH_HITS="$(
   awk -F'\t' '{ print $2 }' "$ADDED_BUF" \
-    | grep -oE '/Users/[a-z][a-z0-9_-]*' 2>/dev/null \
+    | grep -oE '/Users/[a-z][a-z0-9_-]*|[A-Za-z]:[\\/]+Users[\\/]+[A-Za-z][A-Za-z0-9_.-]*' 2>/dev/null \
     | sort -u \
     || true
 )"
@@ -132,24 +251,63 @@ fi
 
 # ----------------------------------------------------------------------
 # Tier B: sensitive-terms.txt ephemeral literal check
+#
+# Word-boundary semantics (2026-06-29 追加):
+#   - ASCII-only term (= 0x20-0x7e の printable のみで構成): word-boundary
+#     一致 (`grep -wF`) を適用。 短 ASCII token (= 4-6 字程度) が arxiv 等の
+#     英文 abstract 中の longer word の substring に偶然一致する FP class を
+#     構造的に消す。 grep の word 境界 = `[A-Za-z0-9_]` 外、 つまり space /
+#     punctuation / `-` 等は境界。 「SECRET」 in 「SECRET-KEY」 は依然 match
+#     (= 意図的 leak、 substring でなく word の左境界が `-` で成立)
+#   - 非 ASCII term (= 日本語等): 単純 substring 一致 (`grep -F`)。 CJK 連続
+#     文字列に word 境界 概念が ill-defined ゆえ全 term 一律 `-w` 化は破壊的
+#     (= 日本語 token は隣接 CJK と連結し空白で区切られないので、 grep の
+#      ASCII word 境界が現れず単独 hit が不可能になる)
+#   - sensitive-terms.txt は read-only、 ephemeral 分割 (= temp file 経由)
+#     のみ。 script memory に literal は残さず (= path 引数で grep に渡す)
+#
+# 設計動機: 2026-06-29 arxiv-digest archive 8 file が短 ASCII term の
+#   substring FP で commit block。 user 確定方針 = root 治療 (= word-boundary
+#   化)、 escape hatch (= --no-verify) で逃げない。 詳細 RCA:
+#   odakin-prefs/plans/2026-06-29-archive-leak-wordbound-results.md
 # ----------------------------------------------------------------------
-if [ -f "$SENSITIVE_TERMS" ] && [ -s "$SENSITIVE_TERMS" ]; then
-  # grep -F -f でファイル参照のみ。script の memory に literal が残らない
-  LITERAL_HITS="$(
+if [ -f "$SENSITIVE_TERMS" ] && [ -s "$SENSITIVE_TERMS" ] && [ -f "$(dirname "$0")/lib/sensitive-terms.sh" ]; then
+  . "$(dirname "$0")/lib/sensitive-terms.sh"
+  ASCII_TERMS="$(mktemp)"
+  NA_TERMS="$(mktemp)"
+  ALLOW_TERMS="$(mktemp)"
+  # 既存 EXIT trap は ADDED_BUF のみ — 拡張
+  # shellcheck disable=SC2064
+  trap "rm -f '$ADDED_BUF' '$ASCII_TERMS' '$NA_TERMS' '$ALLOW_TERMS'" EXIT
+
+  # 行の種類 (`!複合語` = 許可 / ASCII = 単語境界 / 他 = 部分一致) の正本 = lib/sensitive-terms.sh
+  st_split "$SENSITIVE_TERMS" "$ASCII_TERMS" "$NA_TERMS" "$ALLOW_TERMS"
+  # この repo で本人が承認した語は、 許可した複合語と同じに消してから照合する (ほかの repo では今までどおり止まる)
+  consent_allowed terms >> "$ALLOW_TERMS"
+
+  # 許可した複合語を消した本文で照合し、 当たった行の **番号** で ADDED_BUF に戻る
+  # (= 本文を書き換えたので、 行の文字列では file に戻れない)
+  LITERAL_NUMS="$(
     awk -F'\t' '{ print $2 }' "$ADDED_BUF" \
-      | grep -Ff "$SENSITIVE_TERMS" 2>/dev/null \
-      | head -5 \
-      || true
+      | st_strip_allowed "$ALLOW_TERMS" \
+      | st_hit_line_numbers "$ASCII_TERMS" "$NA_TERMS"
   )"
-  if [ -n "$LITERAL_HITS" ]; then
-    # 表示時も literal 本体を晒さず「何行 hit した」と該当ファイル名のみ
-    LITERAL_COUNT="$(printf '%s\n' "$LITERAL_HITS" | wc -l | tr -d ' ')"
-    LITERAL_FILES="$(
-      awk -F'\t' 'NR==FNR { bad[$0]=1; next }
-        bad[$2] { print $1 }' \
-        <(printf '%s\n' "$LITERAL_HITS") "$ADDED_BUF" \
-      | sort -u | head -5 | tr '\n' ' '
+
+  # **件数は上限をかける前に数える** — 表示の上限を件数の真値として報告すると、 検出語に一般語が
+  # 混じって全行に当たる状態でも「5 件」 としか出ず、 gate が実質死んでいることに気づけない。
+  # 規律 = docs/convention-design-principles.md#display-cap-is-not-the-count
+  if [ -n "$LITERAL_NUMS" ]; then
+    LITERAL_COUNT="$(printf '%s\n' "$LITERAL_NUMS" | sed '/^$/d' | wc -l | tr -d ' ')"
+    # file 名も **全 hit** から起こす (= 表示は head -5 で切るが、 切ったことが分かるよう総数を併記する)
+    LITERAL_FILES_ALL="$(
+      awk -F'\t' 'NR==FNR { hit[$1]=1; next }
+        (FNR in hit) { print $1 }' \
+        <(printf '%s\n' "$LITERAL_NUMS") "$ADDED_BUF" \
+      | sort -u
     )"
+    LITERAL_FILE_COUNT="$(printf '%s\n' "$LITERAL_FILES_ALL" | sed '/^$/d' | wc -l | tr -d ' ')"
+    LITERAL_FILES="$(printf '%s\n' "$LITERAL_FILES_ALL" | head -5 | tr '\n' ' ')"
+    [ "$LITERAL_FILE_COUNT" -gt 5 ] && LITERAL_FILES="${LITERAL_FILES}… (計 ${LITERAL_FILE_COUNT} file)"
     HITS="${HITS}
 [tier-b/literal] ${LITERAL_COUNT} line(s) match sensitive-terms.txt in: ${LITERAL_FILES}"
   fi
@@ -160,10 +318,290 @@ else
 fi
 
 # ----------------------------------------------------------------------
+# Tier C: 非例外 private repo 名 (= commit message gate と同じ matcher を file 本文にも当てる)
+#
+# 2026-09-12 まで repo 名の検査は commit message 側にしか無く、 **file 本文に書いた
+# private repo 名は素通り**していた (= 本 file 冒頭が「cover 範囲は disjoint で相補的」
+# と書いていた前提の穴。 塞いだのは「本文 OK + message に leak」 の向きだけで、 逆向きが
+# 開いていた)。 実害 = 2026-09-12 に公開 repo の SESSION.md へ private repo 名 4 つを
+# 書いて push (既出名だったので増分 leak ではなかったが、 止まらなかったこと自体が穴)。
+#
+# **staged 追加行だけ**を見る (= ADDED_BUF)。 既存の記述は grandfather し、 新規の混入
+# だけ止める — 全文検査にすると過去分で常時 block して gate ごと無視されるため。
+#
+# 較正 (実測、 2026-09-12): 直近 150 commit の追加行に replay して **5 回発火・5 件とも
+# 真陽性** (= 公開 repo に持ち込まれた非例外 private repo 名。 うち 1 件が上記の実害 commit)。
+# repo 名が普通の英単語と同綴りのもの (= repos.md にそういう名前が数件ある) による誤検出は
+# 0 件だった — それらは古い commit の本文には在るが、 追加行には 150 commit の間 1 度も
+# 現れていない。 go-forward にしていることがそのまま誤検出対策にもなっている。
+# matcher は (a) sensitive-terms も見るが、 それは Tier B と重複するので repo 名由来の
+# hit 行だけを取り出す。
+# ----------------------------------------------------------------------
+REPO_NAME_MATCHER="$(dirname "$0")/lib/commit-msg-leak-matcher.sh"
+if [ -f "$REPO_NAME_MATCHER" ] && [ -s "$ADDED_BUF" ]; then
+  . "$REPO_NAME_MATCHER"
+  # この repo で本人が承認した repo 名は例外の一覧に足す (この repo の検査の間だけ。 例外の一覧そのものは変えない)
+  CONSENTED_NAMES="$(consent_allowed repo-name | tr '\n' ' ')"
+  [ -n "${CONSENTED_NAMES// /}" ] && LEAK_MATCHER_ALLOWLIST="$LEAK_MATCHER_ALLOWLIST $CONSENTED_NAMES"
+  ADDED_TEXT="$(awk -F'\t' '{ print $2 }' "$ADDED_BUF")"
+  run_leak_matcher "$ADDED_TEXT"
+  REPO_NAME_HITS="$(printf '%s\n' "${LEAK_MATCHER_HITS:-}" \
+    | grep -E '^[[:space:]]*\[(repo-name|repo-path|claude-path)\]' || true)"
+  if [ -n "$REPO_NAME_HITS" ]; then
+    HITS="${HITS}
+[tier-c]${REPO_NAME_HITS#*]}"
+  fi
+fi
+
+# ----------------------------------------------------------------------
 # 判定
 # ----------------------------------------------------------------------
+# Tier D-G = 識別子でない漏洩の段。 1 つの関数にまとめる (止めるときは return 1)。 commit では Tier A-C が空のときだけ
+# 回す (従来どおり)。 tree の棚卸し (CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS=1) では A-C に当たりがあっても回す = 受理済みの
+# A-C の当たりが D-G を隠さないように (2026-11-09。 それまで棚卸しは、 A-C に受理済みの当たりがある repo を D-G を見ずに
+# 「受理済みのみの 0」 と記録していた = 実測)。 規律 = conventions/confidential-repo-boundary.md#scan-zero-needs-control
+leak_tiers_d_to_g() {
+  # Tier D (2026-09-13): 識別子を含まない leak。 D-1 = 未公開文書の逐語 (quoted span / prose run)、
+  # D-2 = local-only repo の機密 (指紋 + pattern)。 Tier A-C は識別子しか見ないので、 公開 repo の規約の
+  # 「実例」 に未公開原稿の文を写した commit が 1 週間で 3 回 landed した。 D-1 の engine =
+  # check-unpublished-quote.py (源 = 個人層の unpublished-sources.txt、 較正 = 公開 2 repo の全履歴 1,667 commit に
+  # replay して 4 commit を検出・全件が原稿由来、 誤検出 0)。 D-2 の engine = check-confidential-leak.py
+  # (2026-09-12 作成、 層3 chain = private repo にしか配線されておらず公開 repo では走っていなかった)。
+  # どちらも「exit 1 かつ engine 自身の見出し」 のときだけ止める (= engine の import error で全 commit を巻き添えにしない)。
+  # escape hatch: CLAUDE_UNPUBLISHED_GUARD=0 / CLAUDE_LEAK_GUARD=0。
+  # 規律 = conventions/confidential-repo-boundary.md#unpublished-text-public-gate
+  if command -v python3 >/dev/null 2>&1; then
+    UQ_ENGINE="$(dirname "$0")/check-unpublished-quote.py"
+    if [ "${CLAUDE_UNPUBLISHED_GUARD:-1}" != "0" ] && [ -f "$UQ_ENGINE" ] && [ -n "${PERSONAL_LAYER:-}" ] \
+        && [ -f "$PERSONAL_LAYER/unpublished-sources.txt" ]; then
+      uq_rc=0
+      uq_out="$(python3 "$UQ_ENGINE" --config "$PERSONAL_LAYER/unpublished-sources.txt" 2>&1)" || uq_rc=$?
+      [ -n "$uq_out" ] && printf '%s\n' "$uq_out" >&2
+      if [ "$uq_rc" -eq 1 ] && grep -q '\[unpublished-quote\] the staged change contains' <<< "$uq_out"; then
+        echo "[public-precommit-runner] commit rejected by Tier D (unpublished-quote). bypass once: CLAUDE_UNPUBLISHED_GUARD=0" >&2
+        return 1
+      fi
+    fi
+    CL_ENGINE="$(dirname "$0")/check-confidential-leak.py"
+    if [ "${CLAUDE_LEAK_GUARD:-1}" != "0" ] && [ -f "$CL_ENGINE" ]; then
+      cl_rc=0
+      cl_out="$(python3 "$CL_ENGINE" 2>&1)" || cl_rc=$?
+      [ -n "$cl_out" ] && printf '%s\n' "$cl_out" >&2
+      if [ "$cl_rc" -eq 1 ] && grep -q '\[confidential-leak\]' <<< "$cl_out"; then
+        echo "[public-precommit-runner] commit rejected by Tier D (confidential-leak). bypass once: CLAUDE_LEAK_GUARD=0" >&2
+        return 1
+      fi
+    fi
+    # Tier E (2026-09-14): owner の非公開の活動の事実 (何に・いつ・何件応募したか、 事務の指摘、 推薦、 固有名)。
+    # 識別子でも文書の文でもないので A-D は見ない。 engine = check-activity-facts.py: 個人層 activity-fact-terms.txt の
+    # 固有語 (プログラム名・領域番号・提出物 file 名の語幹) → BLOCK / 出来事の語 × 日付・件数の共起 → 警告だけ。
+    # 較正 = 公開 2 repo の直近 927 commit に replay して、 警告は 80 commit、 固有語の BLOCK は 14 commit (全件が実際の漏洩)。
+    # 止めるのは「exit 1 かつ engine の見出し」 のときだけ。 escape hatch: CLAUDE_ACTIVITY_FACTS_GUARD=0。
+    # 規律 = CLAUDE.md#owner-activity-facts
+    AF_ENGINE="$(dirname "$0")/check-activity-facts.py"
+    if [ "${CLAUDE_ACTIVITY_FACTS_GUARD:-1}" != "0" ] && [ -f "$AF_ENGINE" ]; then
+      af_rc=0
+      af_out="$(CLAUDE_PERSONAL_LAYER="${PERSONAL_LAYER:-${CLAUDE_PERSONAL_LAYER:-}}" python3 "$AF_ENGINE" 2>&1)" || af_rc=$?
+      [ -n "$af_out" ] && printf '%s\n' "$af_out" >&2
+      if [ "$af_rc" -eq 1 ] && grep -q '\[activity-facts\] the staged change contains a literal' <<< "$af_out"; then
+        echo "[public-precommit-runner] commit rejected by Tier E (activity-facts). bypass once: CLAUDE_ACTIVITY_FACTS_GUARD=0" >&2
+        return 1
+      fi
+    fi
+    # Tier F (2026-10-19): owner が暗号化して持つ値 (電話・口座・生年月日・住所) の平文の写し。 A-E は識別子・文・活動の
+    # 語を見るので、 値そのものは見ない。 engine = check-value-index.py (源 = 個人層の value-index.txt が指す、 暗号化された
+    # file の索引の節)。 出力は file と行番号だけ。 索引が読めない機械 (鍵が無い) では 1 行出して通す。
+    # 止めるのは「exit 1 かつ engine の見出し」 のときだけ。 escape hatch: CLAUDE_VALUE_INDEX_GUARD=0
+    VI_ENGINE="$(dirname "$0")/check-value-index.py"
+    if [ "${CLAUDE_VALUE_INDEX_GUARD:-1}" != "0" ] && [ -f "$VI_ENGINE" ] && [ -n "${PERSONAL_LAYER:-}" ] \
+        && [ -f "$PERSONAL_LAYER/value-index.txt" ]; then
+      vi_rc=0
+      vi_out="$(python3 "$VI_ENGINE" --config "$PERSONAL_LAYER/value-index.txt" 2>&1)" || vi_rc=$?
+      [ -n "$vi_out" ] && printf '%s\n' "$vi_out" >&2
+      if [ "$vi_rc" -eq 1 ] && grep -q '\[value-index\] the staged change contains' <<< "$vi_out"; then
+        echo "[public-precommit-runner] commit rejected by Tier F (value-index). bypass once: CLAUDE_VALUE_INDEX_GUARD=0" >&2
+        return 1
+      fi
+    fi
+    # Tier G (2026-11-05): この session で非公開の source から読んだ値 (額の組・本数・コードの並び) の写し。 A-F は識別子・
+    # 文・活動の語・暗号化した値の索引を見るので、 較正で読んだ本物の値を例やコメントに写した行は通る (実測)。
+    # engine = check-session-carryover.py (源 = この session の会話記録、 env CLAUDE_CODE_SESSION_ID で引く)。 出力は file と
+    # 行番号だけ。 Claude の外の commit (session の env が無い) と tree の棚卸し (CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS=1 =
+    # session の読んだものではなく tree 全体を見る場) では走らせない。 止めるのは「exit 1 かつ engine の見出し」 のときだけ
+    # (= 故障 〔rc 3〕 で全 commit を止めない)。 escape hatch: CLAUDE_CARRYOVER_GUARD=0。
+    # 規律 = conventions/confidential-repo-boundary.md#session-carryover-gate
+    SC_ENGINE="$(dirname "$0")/check-session-carryover.py"
+    if [ "${CLAUDE_CARRYOVER_GUARD:-1}" != "0" ] && [ -f "$SC_ENGINE" ] \
+        && [ -n "${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_CARRYOVER_TRANSCRIPT:-}" ] \
+        && [ "${CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS:-0}" != "1" ]; then
+      sc_rc=0
+      sc_out="$(python3 "$SC_ENGINE" --staged --repo "$(git rev-parse --show-toplevel)" 2>&1)" || sc_rc=$?
+      [ -n "$sc_out" ] && printf '%s\n' "$sc_out" >&2
+      if [ "$sc_rc" -eq 1 ] && grep -q 'check-session-carryover: BLOCK' <<< "$sc_out"; then
+        echo "[public-precommit-runner] commit rejected by Tier G (session-carryover). bypass once: CLAUDE_CARRYOVER_GUARD=0" >&2
+        return 1
+      fi
+    fi
+  fi
+  return 0
+}
+
 if [ -z "$HITS" ]; then
+  leak_tiers_d_to_g || exit 1
+  # ----------------------------------------------------------------------
+  # 漏洩の段 (Tier A-F) をここまでで全部通った。 漏洩以外の段 (壊れた text・全角の直前の変数・SESSION の形・
+  # 履歴の増え方・節参照・AGENTS の入口) はこの後に回す (2026-11-05)。 前に置くと、 それらが止めた commit と
+  # tree の棚卸し (scan-public-tree.sh = tree 全体が追加行に見える) では漏洩の段まで届かず、 棚卸しが「0」 と
+  # 記録した (実測)。 棚卸しは CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS=1 を渡し、 下の 1 行で「漏洩の段は通った」 を知る。
+  # ----------------------------------------------------------------------
+  if [ "${CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS:-0}" = "1" ]; then
+    echo "[public-precommit-runner] leak tiers passed" >&2
+  fi
+# ----------------------------------------------------------------------
+# script 置換の暴走で壊れた text の gate (1 行の異常な繰り返し / HEAD 比の爆発的な増加。 縮小は ⚠️ だけ)。
+# 述語・閾値・escape hatch (CLAUDE_DEGENERATE_TEXT_GUARD=0) の SoT = check-degenerate-text.py docstring。
+# 止めるのは「exit 1 かつ engine の見出し」 のときだけ (= engine の故障 〔rc 3〕 で全 commit を止めない)。
+# ----------------------------------------------------------------------
+DGT_ENGINE="$(dirname "$0")/check-degenerate-text.py"
+if [ -f "$DGT_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  dgt_rc=0
+  dgt_out="$(python3 "$DGT_ENGINE" --staged 2>&1)" || dgt_rc=$?
+  [ -n "$dgt_out" ] && printf '%s\n' "$dgt_out" >&2
+  if [ "$dgt_rc" -eq 1 ] && grep -q 'check-degenerate-text:' <<< "$dgt_out"; then
+    exit 1
+  fi
+fi
+
+# shell script で波括弧の無い変数の直後に全角文字が続く形 ("$name、") の gate (UTF-8 の locale では bash 3.2 が全角文字の
+# 先頭 byte を変数名に取り込む)。 述語・escape hatch (CLAUDE_UNBRACED_MB_VAR_GUARD=0) の SoT = check-unbraced-multibyte-var.py
+# docstring、 規約 = conventions/shell-multibyte-truncation.md#unbraced-var-before-multibyte。
+# 止めるのは「exit 1 かつ engine の BLOCK 見出し」 のときだけ。 見出しの無い非 0 (engine の異常終了) は 1 行出して通す。
+UMV_ENGINE="$(dirname "$0")/check-unbraced-multibyte-var.py"
+if [ -f "$UMV_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  umv_rc=0
+  umv_out="$(python3 "$UMV_ENGINE" --staged 2>&1)" || umv_rc=$?
+  [ -n "$umv_out" ] && printf '%s\n' "$umv_out" >&2
+  if [ "$umv_rc" -eq 1 ] && grep -q 'check-unbraced-multibyte-var: BLOCK' <<< "$umv_out"; then
+    exit 1
+  fi
+  if [ "$umv_rc" -ne 0 ] && ! grep -q 'check-unbraced-multibyte-var:' <<< "$umv_out"; then
+    echo "⚠️ pre-commit: 変数の直後の全角文字の検査が異常終了した (rc=${umv_rc}) — この commit では走っていない (commit は止めない)。 確認: python3 ${UMV_ENGINE} --selftest" >&2
+  fi
+fi
+
+# pipefail の下で変数・file を grep -q に pipe で流す形 (変数を printf / echo で流す・file を cat で流す) の gate (grep -q が
+# 最初の一致で読み終えると、 書き終わっていない書き手が閉じた pipe に書いて死に、 入力が約 64 KB を越えると一致したのに偽になる)。
+# 述語・escape hatch (CLAUDE_PIPEFAIL_GREP_Q_GUARD=0) の SoT = check-pipefail-grep-q.py docstring、
+# 規約 = conventions/shell-env.md#pipefail-grep-q-sigpipe。 コマンドの出力を流す形は警告を出すだけ (commit は止めない)。
+# 止めるのは「exit 1 かつ engine の BLOCK 見出し」 のときだけ。 見出しの無い非 0 (engine の異常終了) は 1 行出して通す。
+PGQ_ENGINE="$(dirname "$0")/check-pipefail-grep-q.py"
+if [ -f "$PGQ_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  pgq_rc=0
+  pgq_out="$(python3 "$PGQ_ENGINE" --staged 2>&1)" || pgq_rc=$?
+  [ -n "$pgq_out" ] && printf '%s\n' "$pgq_out" >&2
+  if [ "$pgq_rc" -eq 1 ] && grep -q 'check-pipefail-grep-q: BLOCK' <<< "$pgq_out"; then
+    exit 1
+  fi
+  if [ "$pgq_rc" -ne 0 ] && ! grep -q 'check-pipefail-grep-q:' <<< "$pgq_out"; then
+    echo "⚠️ pre-commit: pipefail の grep -q の検査が異常終了した (rc=${pgq_rc}) — この commit では走っていない (commit は止めない)。 確認: python3 ${PGQ_ENGINE} --selftest" >&2
+  fi
+fi
+
+# SESSION.md の形の gate (= 案件ごとの現在地 + 正本への link。 日付を見出しにした節・commit hash・messageId・経緯を詰めた
+# 1 行・200 行を超えて育つ commit を止める。 README の自称正本 = 公開 repo では warn / CLAUDE.md の「SESSION・README に書け」 = warn)。
+# 述語・閾値・escape hatch (CLAUDE_SESSION_SHAPE_GUARD=0) の SoT = check-session-shape.py docstring、 規約 = CONVENTIONS.md#session-no-durable-record。
+# 止めるのは「exit 1 かつ engine の見出し」 のときだけ (= engine の故障 〔rc 3〕 で全 commit を止めない)。
+SSH_ENGINE="$(dirname "$0")/check-session-shape.py"
+if [ -f "$SSH_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  ssh_rc=0
+  ssh_out="$(python3 "$SSH_ENGINE" --staged 2>&1)" || ssh_rc=$?
+  [ -n "$ssh_out" ] && printf '%s\n' "$ssh_out" >&2
+  if [ "$ssh_rc" -eq 1 ] && grep -q 'check-session-shape:' <<< "$ssh_out"; then
+    exit 1
+  fi
+fi
+
+# 差分の効かない file (build した PDF・暗号化した台帳) の頻繁な commit と、 大きすぎる file を知らせる。
+# 止めるのは GitHub が push を拒否する大きさ (1 file 100 MiB 超) だけ = 「exit 1 かつ engine の見出し」 のとき
+# (engine の故障 〔rc 3〕 では止めない)。 SoT = check-history-growth.py docstring / conventions/repo-history-growth.md。
+HG_ENGINE="$(dirname "$0")/check-history-growth.py"
+if [ -f "$HG_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  hg_rc=0
+  hg_out="$(python3 "$HG_ENGINE" --staged 2>&1)" || hg_rc=$?
+  [ -n "$hg_out" ] && printf '%s\n' "$hg_out" >&2
+  if [ "$hg_rc" -eq 1 ] && grep -q 'check-history-growth: BLOCK' <<< "$hg_out"; then
+    exit 1
+  fi
+fi
+
+# 文中の節参照 (「path §「節名」」 / `path#anchor`) が実在する file の実在しない節を指していたら知らせる
+# + この commit で消した見出しを他の file が指していたら知らせる。 止めない (exit 1 = 🔴 あり・警告済み、
+# 3 = 検査が走っていない → 1 行出す)。 承知済み一覧は engine が各 repo root と個人層から読む。
+# 述語・escape hatch (CLAUDE_TEXT_SECTION_REFS=0) の SoT = check-text-section-refs.py docstring、
+# 一般則 = docs/convention-design-principles.md#text-section-refs。
+TSR_ENGINE="$(dirname "$0")/check-text-section-refs.py"
+if [ -f "$TSR_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+  tsr_rc=0
+  tsr_out="$(python3 "$TSR_ENGINE" --staged 2>&1)" || tsr_rc=$?
+  [ -n "$tsr_out" ] && printf '%s\n' "$tsr_out" >&2
+  if [ "$tsr_rc" -ne 0 ] && [ "$tsr_rc" -ne 1 ] && ! grep -q 'check-text-section-refs:' <<< "$tsr_out"; then
+    echo "⚠️ pre-commit: 文中の節参照の検査が異常終了した (rc=${tsr_rc}) — この commit では走っていない (commit は止めない)。 確認: python3 ${TSR_ENGINE} --selftest" >&2
+  fi
+fi
+
+# root AGENTS.md の入口が無い repo を知らせる (止めない、 SoT = lib/agents-entrypoint-warn.sh header)
+AGENTS_WARN_LIB="$(dirname "$0")/lib/agents-entrypoint-warn.sh"
+if [ -f "$AGENTS_WARN_LIB" ]; then
+  . "$AGENTS_WARN_LIB"
+  warn_missing_agents_entrypoint
+fi
+
+  # markdown 相対 link guard (= leak ではないので leak 判定を通った後で走らせる)。
+  # file を sub-dir や archive へ MOVE すると ../ の段数がずれて link が黙って死ぬ。
+  # engine = 同 dir の fix-md-links.py --staged (staged .md の index の中身、 0.1 秒)。
+  # exit 1 = 直せる壊れ link を commit しようとしている → 止める / exit 3 = engine 内部エラー
+  # → 止めない (全 commit を巻き添えにしない)。 escape hatch: CLAUDE_MD_LINKS_GUARD=0。
+  # 規律 = docs/convention-design-principles.md#link-target-rot
+  MDL_ENGINE="$(dirname "$0")/fix-md-links.py"
+  if [ "${CLAUDE_MD_LINKS_GUARD:-1}" != "0" ] && [ -f "$MDL_ENGINE" ] && command -v python3 >/dev/null 2>&1; then
+    mdl_rc=0
+    mdl_out="$(python3 "$MDL_ENGINE" --staged 2>&1)" || mdl_rc=$?
+    [ -n "$mdl_out" ] && printf '%s\n' "$mdl_out" >&2
+    # block only on "exit 1 AND the finding header": a syntax/import error in the engine also
+    # exits 1, and must not stop every commit in every public repo
+    if [ "$mdl_rc" -eq 1 ] && grep -q 'point nowhere at their' <<< "$mdl_out"; then
+      echo "[public-precommit-runner] commit rejected by the markdown link guard (run the fix above; bypass: CLAUDE_MD_LINKS_GUARD=0)" >&2
+      exit 1
+    fi
+  fi
+  # Tier A/B leak gate を pass。
+  # repo-local extension があれば chain (exit code 透過)。
+  # 注: exec ではなく call + exit にしているのは、bash の exec は EXIT
+  # trap (上で $ADDED_BUF cleanup を登録済) を skip するため。tempfile を
+  # leak させないため call → 終了コード透過 → 親の trap 発火、の順にする。
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  EXTRA_HOOK="$REPO_ROOT/.claude/pre-commit-extra.sh"
+  if [ -n "$REPO_ROOT" ] && [ -x "$EXTRA_HOOK" ]; then
+    "$EXTRA_HOOK" "$@"
+    exit $?
+  fi
   exit 0
+fi
+
+# Tier A-C に当たりがあった。 棚卸しのときだけ D-G の関数も回して結果を出す (commit は下の報告で止めるだけ = 従来どおり)。
+# 棚卸しの印のときは Tier G (この session で読んだ値) は走らない作り = 実際に回るのは D-F。 通れば 1 行を出す =
+# scan-public-tree.sh は「受理済みのみ」 の 0 を「D-F も通った」 と記録できる。 止まれば各段が「commit rejected by Tier …」 を
+# 出す (下の A-C の報告も続けて出す)
+if [ "${CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS:-0}" = "1" ]; then
+  if leak_tiers_d_to_g; then
+    echo "[public-precommit-runner] tiers D-F passed after tier A-C hits" >&2
+  fi
+fi
+
+# 止めた Tier B の語と Tier C の repo 名をこの機械に控える (本人の承認を記録する時に、 何を承認するかの源になる。 公開しない)
+if [ -f "$CONSENT_TOOL" ] && [ -n "$CONSENT_REPO" ]; then
+  python3 "$CONSENT_TOOL" note-block --repo "$CONSENT_REPO" --added "$ADDED_BUF" --ascii "${ASCII_TERMS:-}" \
+    --na "${NA_TERMS:-}" --allow "${ALLOW_TERMS:-}" --repo-hits "${REPO_NAME_HITS:-}" 2>/dev/null || true
 fi
 
 cat >&2 << EOF
@@ -181,12 +619,22 @@ staged hits:$HITS
   - tier-a/abs_path    → \$HOME/ or ~/ 相対 path へ
   - tier-a/ipv4        → 0.0.0.0 / 127.0.0.1 / RFC1918 へ
   - tier-a/token_prefix → 即 revoke + secret manager へ移動
-  - tier-b/literal     → odakin-prefs/sensitive-terms.txt の term を
+  - tier-b/literal     → 個人層の sensitive-terms.txt にある term を
                           本文から除去 or 一般化
+  - tier-c             → 非例外 private repo 名。「或る paper repo」 等の
+                          一般名に置換するか、 その fact 自体を層 3 へ移す
+                          (= どの repo かは層 3 の関心事)。 例外 list への
+                          追加は user 判断 (claude-config/CLAUDE.md §安全規則)
 
-意図的に commit したい場合は \`git commit --no-verify\` で bypass 可能
-(escape hatch)。bypass 事例は odakin-prefs/leak-incidents.md に記録
-することを推奨。
+本人がこの文字列を載せると決めたなら (tier-b の語と tier-c の repo 名だけ。
+tier-a は承認では外さない):
+  agent の session で、 本人の発言を引いて承認を記録してから commit し直す
+  (止めた文字列を、 この repo でだけ通す。 記録は個人層 = push すればほかの機械も読む):
+    python3 $CONSENT_TOOL record --repo "$CONSENT_REPO" --quote '<本人の発言そのもの>'
+  承認の一覧 = 同じ道具の list --repo "$CONSENT_REPO"
+
+人が端末で、 意図的に検査を全部外して commit するときだけ \`git commit --no-verify\`
+(agent は使わない = 承認の道を使う)。
 EOF
 
 exit 1

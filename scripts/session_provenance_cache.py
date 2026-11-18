@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Own shared Codex model/effort resolution and the hook metadata cache.
+
+Also owns the Claude transcript model lookup. Claude: SessionStart input carries `model` only on some launch paths (not the SDK launch a desktop window uses,
+not print mode, not after /clear = conventions/hook-authoring.md#sessionstart-model-by-launch-path), so the
+cache written from it is often missing. `--resolve-claude <session-id>` reads the same session's transcript
+instead: the last assistant turn's `message.model` is the model the committing turn runs on (reader =
+scripts/lib/session_model.py). Prints nothing when the transcript is absent or has no assistant turn.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import sys
+import tempfile
+
+
+SAFE_SESSION = re.compile(r"^[A-Za-z0-9_-]+$")
+SAFE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+\[\]-]*$")
+SAFE_EFFORT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def effort_from_event(event: dict[str, object]) -> str:
+    value = event.get("effort")
+    if isinstance(value, dict):
+        value = value.get("level")
+    if not isinstance(value, str):
+        for key in ("reasoning_effort", "model_reasoning_effort"):
+            candidate = event.get(key)
+            if isinstance(candidate, str):
+                value = candidate
+                break
+    return value if isinstance(value, str) and SAFE_EFFORT.fullmatch(value) else ""
+
+
+def state_directory(
+    agent: str,
+    environment: dict[str, str] | None = None,
+) -> Path:
+    if environment is None:
+        environment = dict(os.environ)
+    override = environment.get("CLAUDE_CONFIG_SESSION_PROVENANCE_STATE_DIR")
+    if override:
+        return Path(override)
+    home = Path(environment.get("HOME", str(Path.home())))
+    if agent == "codex":
+        root = Path(environment.get("CODEX_HOME", str(home / ".codex")))
+    else:
+        root = Path(environment.get("CLAUDE_CONFIG_DIR", str(home / ".claude")))
+    return root / "state" / "session-provenance"
+
+
+def read_existing(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"model", "effort"}:
+                values[key] = value
+    except OSError:
+        pass
+    return values
+
+
+def cached_metadata(
+    agent: str,
+    session_id: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    if not SAFE_SESSION.fullmatch(session_id):
+        return {}
+    return read_existing(state_directory(agent, environment) / f"{session_id}.env")
+
+
+def codex_state_databases(environment: dict[str, str] | None = None) -> list[Path]:
+    if environment is None:
+        environment = dict(os.environ)
+    configured_root = environment.get("CODEX_SQLITE_HOME") or environment.get("CODEX_HOME")
+    home = Path(environment.get("HOME", str(Path.home())))
+    root = Path(configured_root) if configured_root else home / ".codex"
+    if root.is_file():
+        return [root]
+    try:
+        databases = list(root.glob("state_*.sqlite"))
+    except OSError:
+        return []
+
+    def database_version(path: Path) -> int:
+        match = re.fullmatch(r"state_(\d+)\.sqlite", path.name)
+        return int(match.group(1)) if match else -1
+
+    databases.sort(key=database_version, reverse=True)
+    development_database = root / "sqlite" / "codex-dev.db"
+    if development_database.is_file():
+        databases.append(development_database)
+    return databases
+
+
+def codex_thread_metadata(
+    session_id: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Read only the exact current-thread row from Codex's local state."""
+    if not SAFE_SESSION.fullmatch(session_id):
+        return {}
+    for database in codex_state_databases(environment):
+        try:
+            connection = sqlite3.connect(
+                database.resolve().as_uri() + "?mode=ro",
+                uri=True,
+                timeout=0.2,
+            )
+            try:
+                connection.execute("PRAGMA query_only = ON")
+                columns = {
+                    str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")
+                }
+                selected = [name for name in ("model", "reasoning_effort") if name in columns]
+                if "model" not in selected:
+                    continue
+                row = connection.execute(
+                    f"SELECT {', '.join(selected)} FROM threads WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            continue
+        if row is None:
+            continue
+        raw = dict(zip(selected, row))
+        values: dict[str, str] = {}
+        model = raw.get("model")
+        if isinstance(model, str) and model != "unknown" and SAFE_MODEL.fullmatch(model):
+            values["model"] = model
+        effort = raw.get("reasoning_effort")
+        if isinstance(effort, str) and effort != "unknown" and SAFE_EFFORT.fullmatch(effort):
+            values["effort"] = effort
+        if values:
+            return values
+    return {}
+
+
+def claude_transcript_model(session_id: str) -> str:
+    """The last assistant turn's model in this Claude session's transcript ('' when unknown). Never raises."""
+    if not SAFE_SESSION.fullmatch(session_id):
+        return ""
+    try:
+        path = Path(__file__).resolve().parent / "lib" / "session_model.py"
+        spec = importlib.util.spec_from_file_location("session_model", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        model = module.model_of(session_id)
+    except Exception:
+        return ""
+    if isinstance(model, str) and model != "unknown" and SAFE_MODEL.fullmatch(model):
+        return model
+    return ""
+
+
+def first_valid(
+    candidates: tuple[object, ...],
+    pattern: re.Pattern[str],
+) -> str:
+    for candidate in candidates:
+        if (
+            isinstance(candidate, str)
+            and candidate != "unknown"
+            and pattern.fullmatch(candidate)
+        ):
+            return candidate
+    return ""
+
+
+def resolve_codex_metadata(
+    session_id: str,
+    event: dict[str, object] | None = None,
+    environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve one Codex session with one shared, validated precedence order."""
+    if not SAFE_SESSION.fullmatch(session_id):
+        return {}
+    event = event or {}
+    if environment is None:
+        environment = dict(os.environ)
+    cache = cached_metadata("codex", session_id, environment)
+    thread = codex_thread_metadata(session_id, environment)
+    model = first_valid(
+        (
+            event.get("model"),
+            environment.get("CLAUDE_CONFIG_AGENT_MODEL"),
+            cache.get("model"),
+            thread.get("model"),
+        ),
+        SAFE_MODEL,
+    )
+    effort = first_valid(
+        (
+            effort_from_event(event),
+            environment.get("CLAUDE_CONFIG_AGENT_EFFORT"),
+            cache.get("effort"),
+            thread.get("effort"),
+        ),
+        SAFE_EFFORT,
+    )
+    return {
+        key: value
+        for key, value in (("model", model), ("effort", effort))
+        if value
+    }
+
+
+def main(agent: str) -> int:
+    try:
+        event = json.load(sys.stdin)
+        if not isinstance(event, dict):
+            return 0
+        session_id = event.get("session_id")
+        if not isinstance(session_id, str) or not SAFE_SESSION.fullmatch(session_id):
+            return 0
+
+        environment = dict(os.environ)
+        state_dir = state_directory(agent, environment)
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = state_dir / f"{session_id}.env"
+        existing = read_existing(target)
+        if agent == "codex":
+            values = resolve_codex_metadata(session_id, event, environment)
+        else:
+            values = dict(existing)
+            model = event.get("model")
+            if isinstance(model, str) and model != "unknown" and SAFE_MODEL.fullmatch(model):
+                values["model"] = model
+            effort = effort_from_event(event)
+            if effort and effort != "unknown":
+                values["effort"] = effort
+        if not values or values == existing:
+            return 0
+
+        handle, temporary_name = tempfile.mkstemp(prefix=f".{session_id}.", dir=state_dir)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                for key in ("model", "effort"):
+                    if key in values:
+                        stream.write(f"{key}={values[key]}\n")
+            os.chmod(temporary_name, 0o600)
+            os.replace(temporary_name, target)
+        finally:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0
+
+
+def cli_main(arguments: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    if len(arguments) != 2 or arguments[0] not in {"--resolve-codex", "--resolve-claude"}:
+        print("usage: session_provenance_cache.py --resolve-codex|--resolve-claude <session-id>", file=sys.stderr)
+        return 2
+    if arguments[0] == "--resolve-claude":
+        model = claude_transcript_model(arguments[1])
+        if model:
+            print(f"model={model}")
+        return 0
+    for key, value in resolve_codex_metadata(arguments[1]).items():
+        print(f"{key}={value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())

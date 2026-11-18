@@ -1,0 +1,35 @@
+# claude-config scripts の python 依存 (optional: 使う script を使う時に必要)。
+# コアの doc validator 群 (generate-doc-index.py / check-inbound-refs.py /
+# check-office-automation-index.py / check-legacy-append-only.py) は標準ライブラリのみで動く。
+# CI (.github/workflows/checks.yml) は全 selftest を回すため全部 install する。
+
+# PDF 系 (pdf_form_fill.py / close-pdf-form-boxes.py / check-form-clipping.py / pptx-to-pdf.sh の verify)
+PyMuPDF>=1.28.0
+
+# xlsx 系 (diff-form-xlsx.py / scan-form-instructions.py / check-xlsx-integrity.py / check-form-clipping.py)
+openpyxl>=3.1.5
+
+# font の行の高さ・字の幅 (formcase の layout = 値の長さで決まる行高。 無ければ既定の幅で見積もる = 動くが粗い)。
+# selftest は合成 font を fontBuilder で作る (機械の font に依らない)
+fonttools>=4.40
+
+# docx 系 (diff-form-docx.py / docx_decl_patch.py / normalize-docx-decl.py / check-docx-integrity.py / short-answer-themes.py の --docx)
+python-docx>=1.2.0
+
+# YAML hazard lint (check-yaml-lint.py — conventions/yaml-hazards.md#yamllint-hazard-config)
+yamllint>=1.37
+
+# 図の読み戻し (read-plot-axes.py — conventions/matplotlib-figure-qa.md#read-back-published-figure)
+# numpy = 必須 (無いと script 自体が起動しない)。 Pillow = --image 経路のみ (--pdf は PyMuPDF)。
+# selftest は合成図を numpy だけで作るので描画 library は要らない。 scipy は在れば使う (無ければ
+# 純 Python の連結成分に fallback、 selftest の実測差は 0.2 秒未満)。
+numpy>=1.26
+Pillow>=10.0
+
+# 解答用紙の写真への赤入れ (annotate-scan.py — conventions/exam-grading-return.md#red-annotation)
+# Pillow = 必須 (上の行)。 matplotlib = 注記の $…$ を mathtext で組む (無いと $…$ を含む注記で止まる。 selftest は数式の検査を飛ばす)。
+matplotlib>=3.7
+
+# 会話記録の暗号化した共有 (transcript-share.py — conventions/multi-machine-state.md#transcript-share)。 AES-256-GCM。
+# 無い python では書き出し・検索が exit 3 で止まり、 selftest は理由を出して飛ばす。
+cryptography>=41

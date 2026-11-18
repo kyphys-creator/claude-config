@@ -1,43 +1,116 @@
 # SESSION — claude-config
 
-## 現在の状態
-**完了**: 公開リポ leak 防止システム全 5 セッション実装完了 (2026-04-09〜10)。Tier A regex hook + pre-commit Tier B literal check + audit + marker 12 repo 展開 + setup.sh Step 8 追加 + 週次 scheduled-task 登録。
+最終更新: 2026-11-12
 
-## 今セッションの変更（2026-04-09〜10）
+> 📌 **このファイル = 案件ごとの現在地 + Open items**。 entry は案件 (状態が進む単位) ごとに 1 つ、 進んだら置き換える。 経緯・commit・実測は正本 (DESIGN.md / conventions / docs) が持ち、 過去の索引は [`SESSION-archive.md`](SESSION-archive.md) (grep 専用)。 契約 = [CONVENTIONS.md#session-no-durable-record](CONVENTIONS.md#session-no-durable-record)、 止められたら [memory-file-slimming.md#session-shape-gate](conventions/memory-file-slimming.md#session-shape-gate)。
 
-### 公開リポ leak 防止 — 設計・実装・全 repo 展開
+## 現在地
+- **公開ベンチマークのモデル比較** — 比較方法を整理し、参照段階へ移る。再開時は [推論設定・課題費用・測定範囲](conventions/web-tools.md#model-benchmark-comparisons) を入口に、対象の評価表で条件を確認する。
+- **Git の版の本文を読む処理** — 方針調査を終え、実装の適用前で停止。次は方針の確認後に対象の読取を修正する。対象・原出力・適用前の再現コードの扱い = [棚卸しと方針](docs/git-blob-read-sweep.md)。
+- **Codex のチャットの wrap と archive** — 道具と規則を入れ、 試運転で済んだチャットを閉じた段階。 次はアプリが開いたままの盲検の窓を、 アプリが手放した後に `archive` で閉じる (雑用の指揮役)。 入口 = [`scripts/codex-thread-close.py`](scripts/codex-thread-close.py)・[規則と実測](conventions/multi-session-coordination.md#codex-thread-close)。
+- **層1 の手元の変更を PR に運ぶ道具と入口の配線** — 道具 [`scripts/upstream-pr.py`](scripts/upstream-pr.py) (段・所有者の判定・漏洩の検査の正本 = 冒頭) と、 共同研究者の点検の repo 行 ([`shared-repo.md#collaborator-check`](conventions/shared-repo.md#collaborator-check)) は入った。 turn の終わりの促しと session の開始の hook は保護された file で、 候補のまま当てる窓の手順を待つ。 規約・README の文書と backup の ref の片づけは未着手。
+- **Codex の upstream PR 案内** — 候補の検査を終え、保護対象の適用前で停止。次は提出候補への裁定後に適用・commit・push を行う。入口 = [PR の道具](scripts/upstream-pr.py)・[Codex の終了時検査](codex/PARITY.md#completion-git-gate-hook)・[裁定の手順](conventions/agent-rule-ownership.md#approval)。
+- **Code タブの数式の表示の hook** — 表示の前に式を直す hook と Stop の網の直しと試験は入った。 残り = 配線 (`hooks/settings-entries.json` の MessageDisplay、 card の点呼の Stop と両方入れた候補) を本人が話している窓で当てる (依頼元の番)。 正本 = [表示の前に直す hook](conventions/chat-math-rendering.md#code-tab-display-fix)・[MessageDisplay の一般形](conventions/hook-authoring.md#message-display-hook)。
+- **Codex app のチャット数式** — 層1の既定と入口・テンプレートの参照を揃え、通常利用へ移る段階。次に表示が崩れたときは、同じ画面で文中・独立式・ソース表示を分けて照合する。正本 = [画面別の既定](conventions/chat-math-rendering.md#by-surface)・[Codex app](conventions/chat-math-rendering.md#codex-app-katex)。
+- **動画の制作と納品前確認** — 描画の手順は [短い動画の制作](conventions/matplotlib-figure-qa.md#short-video-from-frames)、規格確認・全編デコード・静止画抽出は [`scripts/inspect-video.py`](scripts/inspect-video.py)。描画と検証記録の整理を終え、通常利用へ移る段階。次の制作では同じ入口から始め、納品版の検査と目視の記録を参照する。
+- **Remote Control の中身の報告と無人の起こし直し** — 設計 = [DESIGN.md#rc-detail-and-unattended-refresh](DESIGN.md#rc-detail-and-unattended-refresh)、 診断の手順 = [`remote-control-server.md#ts-session-no-reply`](conventions/remote-control-server.md#ts-session-no-reply)。 読む道具 = [`scripts/leveldb-grep.py`](scripts/leveldb-grep.py)。 起こし直しの実動は未確認 = 失敗すれば reader の 🟠 が出続ける。
+- **TeX の印字される部分だけを探す道具** — [`scripts/tex-printed-grep.py`](scripts/tex-printed-grep.py)、 規則 = [`latex.md#commented-out-not-present`](conventions/latex.md#commented-out-not-present)。 zsh の `echo` の壊れ方 = [`shell-env.md#zsh-echo-backslash`](conventions/shell-env.md#zsh-echo-backslash) と `hooks/known-errors.json` の 1 件。
 
-**契機**: LorentzArena (public) で組織環境を暗示する間接表現が 5 ファイル 16 行に累積していた (commit `ae25604` で修正済み)。Claude 側は catch できていなかった。
+- **共有 tree の stash・autostash の hook + 公開 commit message の校正の件数の検査** — [`hooks/shared-tree-stash-guard.py`](hooks/shared-tree-stash-guard.py) と Tier E の判定を入れ、 通常利用へ移る段階。 次は止まった実例で誤検出と打ち直しの手間を見る
 
-**設計**: `sensitive-repo-patterns.ja.md §3-3` 優先で構造制約 hook と情報配置分離の 2 本柱。5 セッションで段階実装。詳細は DESIGN.md §公開リポ leak 防止。
+- **ネット由来の file の取り込み検査** — 規約 [`downloaded-file-scan.md`](conventions/downloaded-file-scan.md)・道具 [`scripts/downloaded-file-scan.py`](scripts/downloaded-file-scan.py)・網の hook [`hooks/downloaded-file-import-guard.py`](hooks/downloaded-file-import-guard.py)・署名 scan の ClamAV の入れ方 [`scripts/install-clamav.sh`](scripts/install-clamav.sh) を入れ、 通常利用へ移る段階。 次に止められた取り込みで、 誤検出と射程外の経路 (curl で repo に直接落とす取得など) を見る
 
-**成果物 (主要)**:
-- `hooks/public-leak-guard.sh` — PreToolUse Tier A regex
-- `scripts/public-precommit-runner.sh` — pre-commit Tier A + literal ephemeral
-- `scripts/install-public-precommit.sh` — 冪等 stub installer
-- `scripts/audit-public-repos.sh` — 定期 sweep
-- `.claude/public-repo.marker` — 12 public repo に設置
-- `setup.sh` Step 2 + Step 8 更新
-- `odakin-prefs/sensitive-terms.txt` (gitignore + network-notes git-crypt symlink) + `work-network.md` placeholder 化
-- `odakin-prefs/leak-incidents.md` + `next-steps.md`
-- scheduled-task `public-repo-leak-audit-weekly` (毎週月曜 09:23)
+- **出力が変わっていないことの根拠 (PDF)** — 案件の driver を engine の helper 呼び出しに置き換えたときに、 描いた画素で同じかを比べる道具 [`scripts/pdf-render-equal.py`](scripts/pdf-render-equal.py) (低い dpi で丸める・描く側が違えば変わる・raster と vector を比べない の 3 つを docstring に、 selftest)。 入口 = [`office-automation.md`](conventions/office-automation.md) の早見表の行。 次に同じ置き換えをするときは、 置き換える前と後を同じ機械で描いて 1 回通す
 
-**初回 audit 結果**: 12 repo scan、hit 10 sections (全て既存、受容判断済み)、missing markers 0。`leak-incidents.md` に初回 audit エントリ追記済み。
+- **会議の候補の探し方** — 規約 [`conference-candidate-search.md`](conventions/conference-candidate-search.md) を新設 (探す口 3 つ・窓を先に決める・開催月は動く・資金と承認の〆が告知より前・落とした候補と理由まで残す)。 次は次回の sweep でこの doc から入り、 足りない罠を足す
+- **新規性の比較の規約** — [`novelty-comparison.md`](conventions/novelty-comparison.md) (規則 8 つ・5 つの判定の語・表の雛形・検収の側の段 (具体的な構成の行は代入が済んでいるかも見る)・投稿前の 2 体の立証。 規則 8 は但し書きつき = 比べる先は先行研究が陽に書き下した対象だけ、 代入できるなら必ず実行し (しなければ対象の行は「未判定」)、 一致の確かめは片方向にだけ使う)。 価値の読み・投稿前検査・文体・査読の各規約と ai-collaboration の検証サイクルから指す。 合成の例の式の検算 = [`scripts/check-novelty-example.py`](scripts/check-novelty-example.py)。 残り = 表の雛形を実際の論文に当てていない / 判定の語を見張る機械の検査は無い
+- **子の提出を受け取った後の畳み忘れの網** — `scripts/child-wrap-check.py` の `--finished`・`--hook-accept`・`--hook-stop`・`--wait-due` (判定・待ちの長さ・子が手放した依頼の数え方の正本 = file 冒頭の docstring)。 規約 = [`multi-session-coordination.md#tidy-after-child-turn-ends`](conventions/multi-session-coordination.md#tidy-after-child-turn-ends) の (3)(4)。 次 = 個人層の hook での本番の発火の確認 (carrier は個人層)。
+- **起こした worker が go 待ちで止まったときに依頼元を起こす** — worker の側 = 手順 0 の `scripts/session-model.py self --expect-model … --expect-effort …` が起こした session 宛ての「go 待ち」 の 1 行を出し、 送らずに止まる窓は `scripts/session-launch-check.py --hook-stop` が 1 回止める (本人が押す card はこの 1 行だけが依頼元を起こす)。 依頼元の側 = 自分の `start_session` で起こしたときの見張り `--wait-first-turn`。 規約 = [`#desktop-start-model-cap`](conventions/multi-session-coordination.md#desktop-start-model-cap)、 手順 0 の停止を本人待ちに数えない照合 = [`#tidy-after-child-turn-ends`](conventions/multi-session-coordination.md#tidy-after-child-turn-ends)。 次 = 子の 1 行で依頼元が起きて go まで回る実地と見張りの実地、 依頼元の側の Stop 用の記録を見て止める形にするかの判断 (carrier は個人層)。
 
-## 過去セッションの変更（2026-04-09 前半）
+- **重なる未 commit を解く道具の試走 + 無人の routine の log の全文** — 道具 `scripts/intersect-sync.py` は読むだけの試走として同期の sweep と fleet heartbeat に繋いだ。 自動の apply に繋ぐかは 1 週間の記録 (`--report`) を見て owner が決める (見直しの期日つき TODO は owner の台帳)。 skill の routine は stream-json の中継 (`scripts/claude-stream-log.py`) で全部の assistant の文を log に書き、 どの routine にも `CLAUDE_ROUTINE_ID` を焼く (各 machine の次の session 開始の `--ensure` が起動行を書き換える)。 正本 = [`multi-session-coordination.md#owner-gone-intersect-sync`](conventions/multi-session-coordination.md#owner-gone-intersect-sync) / [`scheduled-tasks.md#headless-log-full-report`](conventions/scheduled-tasks.md#headless-log-full-report)。
 
-docs: add sensitive-repo-patterns (ja/en) — 機密情報を含むリポの設計パターン集を `docs/` に追加。conventions: Substack 取得と Gmail MCP read_email の大容量出力パターンを `conventions/substack.md` に記録。
+- **Workflow の並べすぎ (fan-out) の対策** — 規約 [`multi-session-coordination.md#workflow-fan-out`](conventions/multi-session-coordination.md#workflow-fan-out)・道具 2 本 (`scripts/workflow-estimate.py` / `scripts/workflow-run-stats.py`)・hook `hooks/workflow-fanout-check.sh` (配線済み)・空回しの隔離 [`hook-authoring.md#dry-run-model-authored-script`](conventions/hook-authoring.md#dry-run-model-authored-script)。 再開の cache は試験済み (key は並びの位置でも決まる = [`#workflow-resume-prefix`](conventions/multi-session-coordination.md#workflow-resume-prefix))、 一度に走れる本数を越える並べ方は宣言で通さず起動の前に owner に聞く (enforce の機械)。 残り = もう 1 台の機械での実走の確認
 
-## 過去セッションの完了事項 (詳細は git log + DESIGN.md)
+- **安全停止後の worker への再送** — 実装と合成検査を済ませ、通常利用での観察に進む段階。次は実 harness の呼出しで発火した証拠と、配置だけの確認を区別して検収する。入口と境界 = [停止後の手順](conventions/tool-call-robustness.md#api-safety-filter-on-main-response)、[判定器](scripts/lib/worker_safety_stop.py)。
 
-- **2026-04-08**: git-state-nudge.sh に STALE_DIRT 検出追加 (porcelain-hash-age、5 シナリオ検証済)。arxiv-digest cron 根治 (b8f1539)。DESIGN.md に設計判断 90 行追記
-- **2026-04-07 夜**: git-state-nudge.sh 拡張 (orphan-tree 検出、noise 削減、update notifier、private リポ名 sanitize)
-- **2026-04-07 朝〜昼**: dropbox-refs convention 新規追加 + 3 ラウンド 4 軸チェック
-- **2026-04-06**: ARCHITECTURE.md / RUNBOOK 位置づけ決着、CONVENTIONS §2 表の個人層移管、DESIGN/EXPLORING 分離
-- **2026-04-03**: PATH 二層防御 (.zprofile + REQUIRED_PATHS snapshot patch)
+- **締めの数値照合の共通化** — 実装と参照統一を提出済みで、受領側の検収待ち。次は受領側が比較対象の記録を使って検収する。入口 = [Codex 統合の説明](codex/PARITY.md#wrap-workflow-integration)、照合規則の正本 = [output_numbers.py](scripts/lib/output_numbers.py)。
 
-## 残タスク
+- **音源からの採譜** — 参照譜の照合・コード表記・編集音源の時刻対応を含む共通手順を通常利用へ移す段階。次の採譜では参照小節と演奏順、未編集録音と編集後の時計、音響・聴覚の検証範囲を同じ入口から確認する。手順 = [music-transcription.md](conventions/music-transcription.md)。
 
-- [ ] **RUNBOOK 系ファイルの実例運用後再検討**: トリガーは「いずれかのリポで CLAUDE.md からランブックを切り出す具体的ニーズが出たとき」。詳細は DESIGN.md「RUNBOOK 系ファイル」セクション参照
-- [ ] **規約 rollout 原則の一般化の再検討**: case 2 発生 (RUNBOOK 導入 or 他 content-reorganization 系 convention 追加) で一般原則 (principles §7 新設など) に昇格するか再判断。1 データポイントでの formalize は YAGNI で defer 中
-- [ ] **principles.md 昇格候補 4 件の再判定**: 2026-04-08 の STALE_DIRT 関連作業で浮上した 4 原則 (Narrower-but-active、Generator owns commit、Event-driven vs time-driven safety net、Multi-commit workflow checkpoint) の再発時昇格。詳細と un-defer トリガーは `DESIGN.md` 末尾「検討事項: principles.md への昇格候補」参照。**最 strong** は Event-driven vs time-driven (既に対比表あり)、最新で 1 データポイントしかないが緊急性が高いのは Multi-commit workflow checkpoint (人間の指示無しで Claude 自身が横断 sweep を実行する習慣づくり)
+- **YouTube の音声取得** — 再利用する手順と音声転写側からの参照を整え、通常利用へ移る段階。次に取得が失敗したら、実行環境・配信形式・取得後の codec と尺を同じ入口で確かめる。手順・実測範囲 = [web-tools.md#youtube-audio-extraction](conventions/web-tools.md#youtube-audio-extraction)。
+
+- **ポッドキャストのフォロワー取得 CLI** — 通常利用へ移る段階。次に認証や応答が変わったときは、数値の非表示と取得失敗を分けて検証する。履歴の描画を調整するときは同じ engine の `render_history_chart` と呼び元の記録表を照合する。入口・取得値・合成データの検査は [podcast-followers.py](scripts/podcast-followers.py)。
+
+- **導入先での実測で見つかった問題の一式 (別 vendor の worker が担当)** — owner の裁定を受けて全部入った (委任の一節の文面・setup.sh の opt-in 群と招待の表示・貼り付け用コマンドの hook の誤検出・MCP の test・headless の fixture と YAML loader・個人層の作成・docx の patch の python・運用の注意・git-crypt-guide の push 前の確認)。 委任の一節は差し替えの後、 中身の無い依頼の Agent が Sonnet・Opus・Fable で安全フィルタに止まらず通ることを依頼元が確認済み。 worker の提出は受領済み。 規則保護 gate の `apply` は別件として下の entry で扱う。 扱い方 = [tool-call-robustness.md#api-safety-filter-on-main-response](conventions/tool-call-robustness.md#api-safety-filter-on-main-response)
+
+- **並列 session の用事の claim** — 一般形 = [`multi-session-coordination.md#pending-item-claims`](conventions/multi-session-coordination.md#pending-item-claims)、 参照実装は ai-collaboration `board/board_items.py`。
+- **履歴から個人の識別子を消す書き換えと再発防止** — 道具 (`git-scrub-history.py`)・commit 時の識別子の検査・検査を切る操作の hook・書き換えられた remote への追従・旧 sha を今の sha に引く `git-rewrite-follow.py map` は入った。 規約 = [confidential-repo-boundary.md#role-words-in-names](conventions/confidential-repo-boundary.md#role-words-in-names) / [agent-rule-ownership.md#guard-escape-hatch](conventions/agent-rule-ownership.md#guard-escape-hatch)、 手順 = [docs/sensitive-repo-patterns.ja.md#pattern-2-5](docs/sensitive-repo-patterns.ja.md#pattern-2-5)
+- **書き換えた履歴への追従を、 知らせが届いたかに依らせない** — push の検査 (別の pre-push hook が在る clone では、 その hook を残して先に通す)・`guard-head`・remote 側の検出・machine × repo の点呼・無人の追従 (heartbeat `--repos-follow`)・書き換える push の前の点呼 (`ready_gate`)・push 範囲の中身の検査・古い branch にしか無い中身の数え上げ → [multi-machine-state.md#rewrite-follow-without-notice](conventions/multi-machine-state.md#rewrite-follow-without-notice)、 一般則 = [convention-design-principles.md#hub-first-follow-by-courier](docs/convention-design-principles.md#hub-first-follow-by-courier)。 見送り = pre-commit の runner 2 本への `guard-head` の段。 残る穴 = hook の dir が track されていて pre-push を持たない clone
+- **SESSION / README の形の gate** — engine・書き込み hook・全 repo の pre-commit・規約・一括移行の道具 (`migrate-session-shape.py`) まで済、 既存 file は寄せた。 残り = 他の machine での hook と pre-commit の実走の観測 (bootstrap と pull で入る) → [DESIGN.md#session-shape-gate](DESIGN.md#session-shape-gate)
+- **規則保護 gate の echo flood + Stop の全文再送** — 修正を適用済み、 別 session の検収で確認済み (差し戻し後も照合 / 追記だけ求める / 他の session の分は file ごとに 1 行 / 同じ表示の行を畳む / 返事に書く行を先に渡す / 処理状態を lock で合わせる / 照合し直しは Stop と同じ消費の照合)。 残り = iMac-3 での観測 (次の session 開始の 📜 と、 `additive-log --audit` の ★ の件数)。 設計判断 = [DESIGN.md#additive-echo-bookkeeping](DESIGN.md#additive-echo-bookkeeping)、 実測の記録 = odakin-prefs/plans/2026-09-29-rule-change-echo-flood-results.md、 規則 = [agent-rule-ownership.md#additive-and-free-zones](conventions/agent-rule-ownership.md#additive-and-free-zones) / [hook-authoring.md#stop-hook-addendum-not-reemission](conventions/hook-authoring.md#stop-hook-addendum-not-reemission)
+- **規則保護の gate (agent-rule-guard)** — 運用中。 classifier が承認 CLI を止めたときの経路 = [tool-call-robustness.md#classifier-blocks-guard-approval-cli](conventions/tool-call-robustness.md#classifier-blocks-guard-approval-cli)、 配線 lock = [agent-rule-ownership.md#wiring-scope](conventions/agent-rule-ownership.md#wiring-scope)、 設計 = [DESIGN#wiring-lock-data-files-by-location](DESIGN.md#wiring-lock-data-files-by-location) / [DESIGN#rule-doc-change-by-vocabulary-not-form](DESIGN.md#rule-doc-change-by-vocabulary-not-form)。 承認 CLI を繋いだ形・相対 path で打つのは hook `guard-cli-form-guard.py` が classifier の前に止める。 残り = 下の Open items
+- **規則保護 gate の `apply` の内容・属性と再実行** — 新規 file の mode と、既に候補と同じ file の HEAD 差分を記録する修正を適用済み、 依頼元が差分を独立に読んで受領した (記録は従来どおり本人の発言の照合を通る・検査は厳しい側・権限を広げない)。 振る舞い = [agent-rule-ownership.md#approval](conventions/agent-rule-ownership.md#approval)、検査 = `scripts/manuscript-claim-guard.py --selftest`
+- **job health の死角 2 つ + 記録済み判定の読み手の述語** — fleet-heartbeat.py が `/bin/sh <wrapper>` 形の wrapper と、 launchctl の「継いだ環境」 の PATH も見るようにした (job 定義に PATH が無い daemon が package manager の python3 で依存を読めずにいた = 実測、 selftest 14/14)。 recorded_ids.py に `harvest_yaml_files` と「finding を落とすのは message の id、 thread の一致では落とさない」 の述語を明記 → [email-surface-pattern.md#drop-by-message-id](conventions/email-surface-pattern.md#drop-by-message-id) / [convention-design-principles.md#ledger-filter-on-the-reader](docs/convention-design-principles.md#ledger-filter-on-the-reader) / [shell-env.md#job-python-invisible](conventions/shell-env.md#job-python-invisible)。 残り = 他の機械での job health の初回観測 (下の Open item と同じ)
+- **共有リポへの切り替え + 招待した相手の手元の準備の点検 (collaborator-check)** — 規約 [`shared-repo.md#convert-owner-repo-to-shared`](conventions/shared-repo.md#convert-owner-repo-to-shared) / [`#collaborator-check`](conventions/shared-repo.md#collaborator-check)、 道具 `scripts/install-collaborator-check.py` (selftest つき)、 Overleaf の sync template も各自の token を `OVERLEAF_TOKEN_FILE` で取る形に。 残りは下の Open items
+- **repo の Python の版・venv・固定した依存 (入口 `tools/py`)** — 正本 = [`python-env.md`](conventions/python-env.md) (単独の規約 file に分けた。 `shared-repo.md#repo-python-env` は pointer)。 環境ごとに何を使い無いとき何を案内するかの表 = [`#python-env-environments`](conventions/python-env.md#python-env-environments) (macOS の Apple Silicon・Intel / Linux の glibc・musl / WSL / Windows の Git Bash / conda / CI / Docker)。 入口の雛形・installer と collaborator-check の `python` 行・下限と platform ごとの wheel の照合 (`python-pin-floor.py`)・test (`repo-python-env.test.sh` 54 件、 Linux・Windows は `REPO_PY_OS` で模した) まで入った。 残り = 実 repo への当てはめ (各 repo の判断)、 Linux・WSL・Windows・CI の実機・runner での実走は未確認
+- **desktop の session 一覧を account をまたいで写す (claude-app-account-mirror)** — engine・launchd 常駐の installer・app の版ごとの本体点検・selftest と mutant と installer の test まで済。 正本 = `scripts/claude-app-account-mirror.py` の冒頭 + [multi-account-machine-surface.md#session-list-per-account](conventions/multi-account-machine-surface.md#session-list-per-account)。 残り = 実 app での初回の実走 (Open items)
+- **Codex integration** — 正本 = [codex/PARITY.md#codex-integration-sot](codex/PARITY.md#codex-integration-sot) (SESSION には pointer だけ、 実装の語は書かない)
+- **book-lookup.py** — `amazon` (通販の商品ページの価格・在庫・形態) と OPAC の行の末尾保持を追加。 正本 = script の docstring + [book-purchase-lookup.md#price-source-outage](conventions/book-purchase-lookup.md#price-source-outage) / `#translation-check` / `#canon-sweep` / `#budget-cut`
+- **latexdiff-review-snapshot.sh の色外し** — 埋め込みの実装をやめ、 ai-collaboration の `review-markup-clean.py` を呼ぶ (`--strip-cmd` → `--macro` / `--strip-color` → `--color`、 CLI は不変)。 ⚠️ strip を使うには ai-collaboration が要る (探す順と、 無いときに止まること・群の外の `\color` を外さず警告することは script の docstring が正本)
+- **formcase / record-reply / SSO client / 通知 / 音声の道具** — 直近の変更は各 script の docstring と conventions が正本、 索引は SESSION-archive.md の 09-22〜09-28 の節
+
+## Open items（forward-looking）
+
+- [ ] **pdf-publish の pre-push が branch を選ばない** — 既定の branch 以外の push でも、 変わった文書の PDF を共有フォルダへ写す (実測、 今の回避 = [`shared-repo.md#pdf-publish-on-branch-push`](conventions/shared-repo.md#pdf-publish-on-branch-push))。 直す案 = 既定の branch への push だけ写す。 各 repo の写しの配り直しを伴う運用の変更なので、 本人の判断待ち。
+
+- [ ] **manuscript-claim-guard の commit の deny 文が、 同じ repo・file・領域の承認を持つ別の session を名指さない** — 受けた session が依頼元の `--session` で `apply` した後、 自分の commit が止まっても deny 文は「裁定が無い」 とだけ言う (実測、 [`tool-call-robustness.md#worker-apply-requester-commits`](conventions/tool-call-robustness.md#worker-apply-requester-commits))。 案 = deny 文に「この承認は session X の記録にある = X で commit する」 を足す (guard の code の変更 = 本人の裁定が要る、 作らずに queue)。
+
+- [ ] **manuscript-claim-guard の検収の照合が、 引き受けの前の無関係な command で長く続く検収の窓を承認できなくする** — 候補とその足した行は会話記録の全部で見るので、 読む形でない command の option の値の glob (`grep --include='*.sh' … | head`) が候補の file 名に当たる、 ありふれた足した行 (`import sys`) が前の `python3 -c` の文字にある、 のどちらでも「検収係が候補を書いた」 と断る (実測、 2 file とも)。 運用の注意 = [掲示板の契約の edit-approval](../ai-collaboration/board/CONTRACT.md#edit-approval)。 案 = option の値の glob を名指しに数えない / 足した行の照合を引き受けの後に絞るか最短の長さを上げる (guard の code の変更 = 本人の裁定が要る、 作らずに queue)。
+
+- [ ] **hook の試験の pipe の罠 ([`hook-authoring.md#hook-stdin-pipe-sigpipe`](conventions/hook-authoring.md#hook-stdin-pipe-sigpipe)) に機械の網が無い** — 節があっても、 新しい hook の試験の候補が同じ形 (`pipefail` の下で `writer | hook` の rc を `$?` で取る、 stdin を読まずに終わる経路) で書かれ、 時々だけ落ちた (実測、 2 回目の形)。 案 = `.test.sh` の足した行で、 `pipefail` の file の `… | … hook …` の直後に `rc=$?` を取る行を警告する検査を、 pre-commit の門 (`check-pipefail-grep-q.py` と同じ置き方) に足す (作らずに queue = 締めの中で、 門の配線は保護された file)。
+
+- [ ] **manuscript-claim-guard の Stop の照合が、 文脈圧縮の後の本人の turn の返事を読まない** — 圧縮の後の会話記録は、 圧縮の前の末尾を元の時刻のまま後ろに付け直すので、 本人の発言を含む turn の組の先頭が、 その発言より前の時刻になる。 `assistant_replies_since` は組の先頭の時刻で組ごと飛ばすため、 承認の行を書いた返事を見落とし、 後の event の turn (背景の task の通知など) で同じ行を再び求める (実測)。 直す案 = 組の entry が全部 since より前のときだけ飛ばす。 guard は保護された file = 本人の裁定待ち
+
+- [ ] **完了Git gateのリモート照会失敗の切り分け** — 自動照会の検査不能と直接照会の成功が食い違う条件を調べる段階。次は通常SSHと多重化を使わない照会を同時点で比較し、タイムアウトと起動失敗を区別する候補を作る。実装の入口 = [session_touch.py](codex/hooks/session_touch.py)。原因未特定のため検査の変更は未着手。
+
+
+- [ ] **claude-app-account-mirror の実 app での初回の実走** — 常駐は本人が 2 台に入れた。 実測済み = ③ 表示中の account の dir には書かない (`--status` の待ちの数) / app が写しの record を読み込む (切替の後の app の log に読み込みの失敗なし)。 未観察 = ① 写しが一覧に**見える形で**出る (元をアーカイブした session の写しはアーカイブ済みに入る = 元の isArchived を引き継ぐ。 扱いは今のまま = 推奨・異論なし。 探すときはアーカイブ済みの一覧も見る) ② 写しを開くと「インポートしたセッションを再開しますか？」 が出て、 会話記録が `projects/<slug>/<新しい cli id>.jsonl` に移る ④ launchd の log が変化の無い回は無音
+
+- [ ] **collaborator-check の未実走の面** — Claude Code の project hook は headless で発火を確認、 共同編集者の実機・Windows (Git Bash)・Codex (hook なし = CLAUDE.md の「1 回実行」 頼み) は未確認。 共同編集者の最初の session の報告で確かめる
+- [ ] **`cd-git-write-guard.py` が subagent に効かない案内を出す** — 子は cwd が呼び出しごとに戻るので「cd を単独で」 の案内が成り立たず、 複数の agent が同じ所で止まった ([conventions/claude-code-permissions.md#subagent-commit-route](conventions/claude-code-permissions.md#subagent-commit-route) に文は置いた)。 仕組みにするなら hook の入力の agent の印で子を見分け、 `commit-from-origin-worktree.py` を案内する。 hook は規則保護 = 候補を作って owner の裁定
+- [ ] **known-errors の台帳に `unknown field(s)` の 1 件** ([`multi-machine-state.md#config-field-needs-reader-first`](conventions/multi-machine-state.md#config-field-needs-reader-first) の (2)) — 設定 file に engine の知らない field が先に届いた機械の、 古い engine が出すエラー文。 候補 = match `unknown field(s)` / doc = 同節 / hint = 「設定を直さず、 engine の repo を pull してからやり直す」。 台帳は規則保護 = owner の裁定の後に `agent-rule-guard.py apply` で足す
+- [ ] **掲示板の effort の下限は、 起こした後の `set_session_effort` による引き下げを見ていない** ([`CONTRACT.md#launch-effort-floor`](../ai-collaboration/board/CONTRACT.md#launch-effort-floor) は request と `launch --request` だけ)。 塞ぐなら `session-launch-check.py` の PreToolUse(set_session_effort) で、 起動の記録の掲示板の下限より低い値を止める。 hook は規則保護 = 候補を作って owner の裁定
+- [ ] **新しい hook 2 つ (書き換えられた履歴への追従 / 検査を切る操作) と commit 時の識別子の検査の、 他の machine での初回の実走** — 配線は各 machine の次の session 開始で入る。 最初の session で、 追従が沈黙するか・解除の command が止まるか・commit が 0.3 秒程度で通るかを見る。
+- [ ] **SSO の入り直しの、 IdP が切れた状態からの実走** (exit 75 → `--wait-login`、 [DESIGN#sso-recovery-server-acceptance](DESIGN.md#sso-recovery-server-acceptance)) — 次に学内ログインが切れた状態で client を使う時、 `--trace` を付けて 1 回見る (selftest の偽の tab と時計でだけ通している)
+- [ ] **規則保護 gate の cwd 解決が `cd $VAR` を展開せず親へ上がって cwd の repo に当たる** (2026-09-22 実測: 一時 dir での `cd $T && git commit` が cwd の repo の未 commit 変更で deny、 fail-closed の誤停止)。 直すなら変数を含む cd は検査不能 (WorkingDirectoryUnavailable) に倒す。 記録 = [検証記録](docs/agent-rule-guard-verification.md) 残る境界。
+- [ ] **manuscript-claim-guard の `\[ … \]` の読み方の foil を spec にする** — 表の行送り・前の backslash の数・閉じの無い `\[` の selftest は、 誤った regex 6 種 (古い形・後読みだけ・1 対だけ数える・後戻りする中身・次の `\[` で打ち切らない形 ほか) で歯を見たが、 scratch でだけ = 次に直す人が再現できない。 [`hook-authoring.md#hook-test-foil-teeth`](conventions/hook-authoring.md#hook-test-foil-teeth) の spec にする前に解くこと: (1) `scripts/*guard*` は保護 = spec の追加も owner の裁定 (2) selftest が一つ上の dir の `conventions/` を読むので、 親 dir だけを写す `check-foil-teeth.py` の上では基準が赤 (3) selftest は 1 回 1〜2 分 = mutant の本数だけ run-all-checks が延びる
+- [ ] **Codex の hook の timeout 挙動は未測定** (Claude は素通り = 実測、 [manuscript-claim-ownership.md#limits](conventions/manuscript-claim-ownership.md#limits))。 層1 hook-authoring.md への一般形の追記候補 = owner 個人層の plans (保護 file なので承認待ち)。
+- [ ] **transcript を読む道具が、 user 役で入る背景 task の完了通知・別 session の連絡を本人の発言と数える穴** (承認の照合は `turnOrigin` を見て塞いだ、 [`agent-rule-ownership.md#approval`](conventions/agent-rule-ownership.md#approval) の 2)。 同じ見方で [`search-agent-transcripts.py`](scripts/search-agent-transcripts.py) (`isMeta` の別 session の連絡)・[`injection-reach-audit.py`](scripts/injection-reach-audit.py) (`user_first_mention`)・[`hooks/pasted-command-comment-guard.sh`](hooks/pasted-command-comment-guard.sh) を点検する。 重くない (検索は `<` 始まりを既定で除く) ので急がない
+- [ ] **逆向きの穴 = 本人の発言の頭の system-reminder を外さず本人の問いを落とす** (2 本で実測、 どちらも直した = `session-open-questions-report.py`・`session-reply-knowledge-report.py`)。 2 回目なので、 本人の言葉を返す述語を lib に 1 つ置き、 `"<system-reminder>"` を自前で扱う 6 本 (未点検) を移す ([`#transcript-human-vs-peer-message`](conventions/hook-authoring.md#transcript-human-vs-peer-message))。 並列の締めが無い時間に。 同じ述語で `session-reply-knowledge-report.py` に turn の途中に打った本人の発言 (queued_command) も入口として数えさせる (今は数えず、 turn の途中の本人の問いと依頼が候補から抜けた = 実測。 直すと既定の候補の番号が振り直され、 検収済みの処分の file が照合を通らなくなる = 直す時は番号を時刻で引き継ぐ形も一緒に)
+- [ ] **会話記録を読む締めの道具が、 API 送信の写しの行 (`api-request-blob`) の tool call も数える** ([`hook-authoring.md#transcript-request-copy-lines`](conventions/hook-authoring.md#transcript-request-copy-lines)) — `headless-worker-reports.py` は飛ばすよう直した。 二重を実測 = `search-agent-transcripts.py --tool-runs` (同じ tool call を時刻なし・`cd … &&` つきでもう 1 回出す)。 未確認 = `session-scripts-report.py` / `session-claims-report.py` / `subagent-reports.py` / `replay-session-scripts.py` / `permission-dialog-audit.py` / `calibrate-bash-command-pattern.py` / `hook-matcher-liveness.py` / `transcript-tool-result.py`。 直す形 = 写しかを決める述語を lib に 1 つ置き、 各道具がそれを使う (型名を道具ごとに書き写さない)。 締めの道具なので、 並列の締めが走っていない時間に 1 本の変更で。
+- [ ] **TeX の読み直しの道具の 2 案 (作らずに queue、 どちらも 1 回目の実測)** — (1) 別文書 (共著者へのノート) が論文を素の番号 (「Eq. (103)」「Sec. 5」) で引くとき、 論文の版の `.aux` と照合し、 版に無い書き方 (article の版を Roman の節番号で引くなど) と番号ごとの label を出す (`scripts/tex-label-shift.py` の aux の読み方を使い回す。 規則 = [physics-notes.md#no-internal-shorthand-in-deliverables](conventions/physics-notes.md#no-internal-shorthand-in-deliverables) の版依存の段)。 (2) `scripts/tex-prose-pass-invariants.py` の numbers は節番号や数式の中の数字と混ざり、 結果の値 (小数・10 の冪・単位つき・百分率) の増減が見えにくい = 値だけの class を足す。 作るなら selftest と foil つきで。
+- [ ] **`--since` の形の点検で残した 3 件** (形と比べ方の正本 = [`scripts/lib/time_bound.py`](scripts/lib/time_bound.py)) — どれも形の違う値・失敗で黙る
+  - [`scripts/session-launch-check.py`](scripts/session-launch-check.py) `--since`: 読めない値を既定の時刻に戻す (見張りなので、 error にするなら呼び元の渡す形を先に確かめる)
+  - [`scripts/actions-usage-estimate.py`](scripts/actions-usage-estimate.py) `_gh`: API の失敗 (network・認証) を空として扱い 0 回になる
+  - [`scripts/replay-public-gate.sh`](scripts/replay-public-gate.sh) `--since`: git の自由形のまま渡す = 読めない値は別の時刻、 日付だけはその日の今の時刻
+- [ ] **`--liveness` の実 session での観察**: 健全なら沈黙 / run-all-checks からの報告が 14 日途絶えると 🟡 (2026-09-22 配線、 この machine のみ確認)。
+
+- [ ] **job health の他マシンでの初回観測** ([`shell-env.md#job-python-by-capability`](conventions/shell-env.md#job-python-by-capability)) — 各マシンで claude-config を pull した後の heartbeat から reader に出る。 常駐機で session を開くまで旧形の beat
+
+- [ ] **macOS の exec kill の仕組みは推定のまま** ([`#killed-hook-stub`](conventions/hook-authoring.md#killed-hook-stub)): syspolicyd の scan 失敗が vnode に kill として残る・vnode の回収で消える・再起動で全部消える、 の 3 点は未確認。 次に起きたら kill される file を 1 本 hard link で控え (作り直しは元の path だけ新しくするので控えは古い inode のまま)、 再起動の後にその控えの exec が通るかを見る (見たら同節の「推定」 を「実測」 に直す)
+
+- [ ] **auto mode で Read / Edit の ask rule が実際に dialog を出すか実地未確認** (公式 docs 由来のみ = [`#protected-settings-edit`](conventions/claude-code-permissions.md#protected-settings-edit))。 次に ask rule の対象を触る auto session で確かめる。
+- [ ] **Codex の会話冒頭表示と prompt-time cache を end-to-end で 1 回観測する** — 次の新規 Codex task で (期待値 = [conversation-start stamp](codex/PARITY.md#conversation-start-stamp) / [provenance](codex/PARITY.md#git-session-provenance))。 lift 元 = archive の 2026-09-10/11 provenance entry と 09-11 の Codex provenance 段落。
+- [ ] **Claude desktop session の commit trailer で model 欄が unknown** (2d5cc14 / session f7ca7877) — その session の provenance cache が無かった原因 (起動時入力に model が無いのか、 cache を書く hook が走らないのか) は未切り分け。 lift 元 = archive の 09-11 set -e entry。
+- [ ] **CI red は走行中の session には次の session 開始まで届かない** — 定期実行 + OS 通知は未実装 (判断材料 = owner 個人層の CI red surface results §6)。 lift 元 = 同上。
+- [ ] **Remote Control 配下の whoami 表示 (`rc/<label>`) が実 RC session で未確認** — 次にスマホから入った session の冒頭 stamp で確認。 lift 元 = archive の 2026-09-05b entry。
+- [ ] **iMac の Codex integration audit が未検証** — iMac で audit を回して bootstrap 状態を判定 (手順 = owner 個人層の dev-environment.md §Codex personal-layer bootstrap)。 lift 元 = archive の 2026-09-01i entry。
+- [ ] **Windows ネイティブで `--selftest` 2 本が未実機検証** (= 45407fa で追加した [`scripts/check-inbound-refs.py`](scripts/check-inbound-refs.py) + [`scripts/generate-doc-index.py`](scripts/generate-doc-index.py))。 macOS で開発、 後者は in-memory string で OS 非依存だが前者は tempfile + `os.path.relpath` (backslash) と forward-slash literal の混在経路を持ち、 fallback の `os.path.exists` が mixed separator を resolve できれば通る理屈。 Windows 機会あれば実走 or 受領 PR で close。
+- [ ] **DESIGN.md の更なる縮減候補は owner 判断待ち** — archive-first 再編 (2026-07-10b) で残した live 要素含みの節 (= 「公開リポ leak 防止」 節の sub-doc 分割等) は候補列挙どまりで未着手。 候補 list は起票元 plan の results (個人層) 側、 判断基準は [`DESIGN.md #design-reorg-archive-first`](DESIGN.md#design-reorg-archive-first) の「迷ったら残す」 (経緯 = [`SESSION-archive.md`](SESSION-archive.md) の 2026-07-10b entry)
+- [ ] **dropbox-refs.md の narrative 量監視** — 類似 narrative style の convention が他に波及したら系統 pattern として review
+- [ ] **LorentzArena 2+1/CLAUDE.md ゲームパラメータ表の委譲は anti-value** (再訪禁止) — 再度検討しそうになったら [`docs/convention-design-principles.md` §10.8](docs/convention-design-principles.md#deletion-delegation-trap) 削除提案の self-correction 事例を先に読む
+- [ ] **RUNBOOK 系ファイルの実例運用後再検討** — トリガー: いずれかのリポで CLAUDE.md からランブック切り出しの具体ニーズが出た時。詳細は DESIGN.md「RUNBOOK 系ファイル」
+- [ ] **規約 rollout 原則の一般化** — case 2 発生 (RUNBOOK 導入 or 他 content-reorganization 系) で principles §7 新設昇格を再判断。1 データポイントでの formalize は YAGNI で defer 中
+- [ ] **principles.md 昇格候補 4 件の再判定** — Narrower-but-active / Generator owns commit / Event-driven vs time-driven safety net / Multi-commit workflow checkpoint。un-defer トリガーは DESIGN.md 末尾「検討事項: principles.md への昇格候補」。最 strong は Event-driven vs time-driven (既に対比表あり)、最新で 1 データポイントしかないが緊急性が高いのは Multi-commit workflow checkpoint
+- [ ] **CONVENTIONS.md §2 density audit** — un-defer トリガー: 100 行 or 15 KB 到達時に density check。現状 177 行 / 19 KB で trigger 発火済、次回セッションで `grep` 頻度が低い section の T1/T2 移動を検討
+- [ ] **外向け発信候補** — 詳細メモは個人層 `個人層の blog-ideas.md` 参照（public 側には具体内容を置かない方針）

@@ -16,9 +16,9 @@ git-crypt 等の暗号化ツールの**使い方**は [git-crypt-guide.ja.md](gi
 
 ---
 
-## Part 1: 暗号化の "外" を意識する
+## <a id="part-1-public-surface"></a>Part 1: 暗号化の "外" を意識する
 
-### パターン 1-1: 暗号化は中身だけ。それ以外は全部見える
+### <a id="pattern-1-1"></a>パターン 1-1: 暗号化は中身だけ。それ以外は全部見える
 
 git-crypt (及び類似ツール) が守るのは**ファイルの中身**だけ。以下は**全て平文のまま git 履歴に残り**、private repo でも collaborator 招待や誤 public 化で露出しうる:
 
@@ -36,7 +36,7 @@ git-crypt (及び類似ツール) が守るのは**ファイルの中身**だけ
 
 **含意**: ファイル中身以外の全ての要素を**「公開面 (public surface)」**として明示的に設計する必要がある。
 
-### パターン 1-2: 公開面のフルリストを持つ
+### <a id="pattern-1-2"></a>パターン 1-2: 公開面のフルリストを持つ
 
 リポを作るとき、以下を全て洗い出して「これ公開して大丈夫か?」を 1 つずつ確認する:
 
@@ -58,9 +58,9 @@ git-crypt (及び類似ツール) が守るのは**ファイルの中身**だけ
 
 ---
 
-## Part 2: 暗号化の設定
+## <a id="part-2-encryption"></a>Part 2: 暗号化の設定
 
-### パターン 2-1: Default-encrypt を第一選択に
+### <a id="pattern-2-1"></a>パターン 2-1: Default-encrypt を第一選択に
 
 暗号化対象を allow-list 方式で書くと、後でファイルを追加したときに `.gitattributes` 更新を忘れて**平文で push してしまう**事故が構造的に起きる。代わりに default-encrypt パターンを使う:
 
@@ -78,14 +78,14 @@ README.md !filter !diff
 3. **監査が楽**: plain 側は 3 ファイルしかないので、leak scan の対象が絞れる
 4. **コメント不要**: allow-list 方式では「なぜここを暗号化するか」のコメントを書きたくなるが、そのコメント自体が leak 源になる。default-encrypt では不要
 
-### パターン 2-2: `.gitattributes` と `.gitignore` は構造的に平文
+### <a id="pattern-2-2"></a>パターン 2-2: `.gitattributes` と `.gitignore` は構造的に平文
 
 - `.gitattributes`: git-crypt が「どのファイルを暗号化するか」を決めるために読む必要がある → 暗号化すると chicken-and-egg で破綻 → **必ず平文**
 - `.gitignore`: 一般的に平文で OK。中身が汎用的 (`.DS_Store`, `*.log` 等) なら leak なし。ただし実在サーバー名やカスタムツール名を含める場合は注意
 
 これらが平文であることを**前提として受け入れ**、中身を最小化・汎用化する。コメントは削除。
 
-### パターン 2-3: コメントは leak 源
+### <a id="pattern-2-3"></a>パターン 2-3: コメントは leak 源
 
 `.gitattributes` にコメントを書くと、そのコメントが leak する:
 
@@ -107,11 +107,68 @@ SESSION.md filter=git-crypt diff=git-crypt
 README.md !filter !diff
 ```
 
+### <a id="pattern-2-4"></a>パターン 2-4: 頻繁に書き足す台帳は 1 entry 1 file にする
+
+> 一般形 (生成物の PDF・hosting の上限・検出の道具を含む、 暗号化に限らない履歴の増え方) の正本 = [`conventions/repo-history-growth.md`](../conventions/repo-history-growth.md)。 本節は暗号化した台帳の移し方と、 履歴から旧 file を落とす手順を持つ。
+
+git-crypt は file を丸ごと暗号化するので、 **版ごとに全文の暗号 blob が積まれる** (差分圧縮が効かない)。 1 つの file の list に entry を書き足していく台帳 (タスク・受信記録など) は、 1 commit ごとに file の大きさだけ履歴が増える。 さらに暗号化された file は 3-way merge できないので、 並列の session が同じ file に書くと衝突し、 片方の追記が黙って消えることがある。
+
+→ entry ごとに file を分ける (例: `todo/<id>.yaml`、 1 file = 1 entry の mapping、 file 名 = id)。 1 commit の増分は触った entry の大きさになり、 別の entry は別の file なので `git commit -- <path>` で互いを巻き込まない。 open / closed で dir を分けない (閉じるたびに mv すると履歴が割れる。 読み手は status で選ぶ)。
+
+移行の手順 (実測):
+
+1. **暗号化の宣言を最初の file より先に**: allow-list 方式なら新しい dir の行 (`todo/** filter=git-crypt diff=git-crypt`) を先に足す。 足し忘れると新しい dir は平文で push される。 移行の道具は「旧 file に filter が付き、 新しい dir に付いていない」 を見て書かずに止まる。 push 前に `git-crypt status <dir>` で全部 encrypted、 push 後に origin の blob の先頭が `\0GITCRYPT` であることを確かめる
+2. **YAML を dump し直さない**: text を entry の境界 (`- id:`) で切ってインデントを外すだけにする。 dump し直すと引用符・block scalar・key の順・注釈が変わり、 書式に依存する読み手 (行単位の書き換え、 grep) が壊れる。 旧 file を消す前に、 各 file を parse した結果が元の list の要素と全件一致することを照合する
+3. **読み手を 1 つの loader に寄せてから移す**: 読み手が各自で `yaml.safe_load(<file>)` を持っていると、 置き場を変えるたびに全部を触る。 loader は新しい dir と旧 file の両方を読み (同じ id は新しい側が勝つ)、 移行の途中でも動く。 file の id と file 名の不一致・mapping でない file・暗号文のままの file は例外にする (黙って読み飛ばさない)
+4. **前後の出力は集合と順序を分けて比べる**: 読み込み順が「書き足した順」 から「file 名順」 に変わるので、 そのままの diff は並びの差で埋まる。 行を sort して diff を取れば集合の差だけが残る。 残った差が「上位 N 件だけ表示」 の同順位の入れ替わりなら、 並べ替えの key に安定な id を足して決定的にする
+5. **手書きの雛形も直す**: 手順書にある entry の雛形が list 形 (`- id:`) のままだと、 写した人が新しい形の file に list を書く。 雛形を mapping 形にし、 corruption 検査に「id ≠ file 名」「1 file に entry が 2 つ」 を足す。 ただし YAML は key 直下の sequence を同じ indent で書ける (`cross_ref:` の次の行が `- "…"`) ので、 「col 0 の `- `」 を全部 entry と見なすと誤検出する (`- id:` だけを見る)
+6. **並列 session に先に知らせる**: 旧 file の削除を index に stage している間に、 同じ repo の別 session が path 指定の commit をすると、 その削除を拾って先に push することがある (実測。 機構 = [`multi-session-coordination.md#staging-window-race`](../conventions/multi-session-coordination.md#staging-window-race))。 移行の直前に一声かけ、 stage から commit までを短くする
+
+分割しても、 それまでに積まれた旧 file の全版は履歴に残る (repo の大きさは減らない = 減るのは増え方)。 落とすなら**不可逆**なので人間の判断で ([`confidential-repo-boundary.md`](../conventions/confidential-repo-boundary.md) の履歴の書き換えの項)、 次の順で (実測):
+
+- **予行演習は remote からの mirror clone で**: 手元の checkout から clone すると stash などの手元の ref まで運んでしまう。 `git filter-repo --path <旧 file> --invert-paths` の後に、 旧 file が残る commit が 0 件で、 **既定 branch の先頭の tree が書き換え前と同じ** (= 中身は 1 byte も変わらない) ことを確かめる。 既定の filter-repo は旧 file だけを変えた commit を空として落とす = commit message に書いた判断の出所が消え、 commit 数も減る。 `--prune-empty never` で空 commit として残し、 commit 数が書き換え前と同じことも確かめる (大きさへの影響はほぼ無い = 落とすのは blob)。 filter-repo が書く旧 → 新 SHA の対応表 (`filter-repo/commit-map`) は保存する (記録に書いた旧 SHA を後から引くため)。 remote の ref 一覧も見る (pull request の ref など消せない ref が旧 object を抱え続ける)。
+- **本番は予行演習の後に何も進んでいないことを確かめてから**: remote の先頭が予行演習の時の値のままか (`--force-with-lease=<branch>:<旧 SHA>`)、 手元の checkout に未 push の commit が無いかを見て、 どちらかが違えば止まる。 手元は中身が同じなので `git reset --keep origin/<branch>` で ref だけ動かす (未 commit の変更は保たれる)。
+- **他の machine は後から 1 回追従する**: 手元の HEAD と「落とした file を除いて同じ中身」 の commit が新しい履歴に在れば、 未 push の仕事は無いので ref だけ動かす。 無ければ未 push の commit がある = 止めて人が見る。 追従しないと、 その machine の自動 pull は「分岐」 で止まり続ける。 追従は session 開始の自動設定に一度きりの段として載せる (人が覚えておく必要を無くす。 載せ方 = [`multi-machine-state.md#history-rewrite-follow`](../conventions/multi-machine-state.md#history-rewrite-follow))。
+- **agent には走らせられないことがある**: Claude Code の auto mode は `git filter-repo` を、 scratch の複製に対してでも破壊的な git 操作として止める (実測)。 予行演習と本番を別々の手順にし、 本人が terminal で走らせる。 3 段 (予行演習・本番・他 machine の追従) の道具 = [`scripts/git-drop-path-history.py`](../scripts/git-drop-path-history.py) (`rehearse` / `apply` / `follow`。 追従と本番の止まる条件は `--selftest` が合成 repo で確かめ、 書き換えそのものの確認 `--selftest-rewrite` は本人が走らせる)。
+- **remote がすぐ縮むとは限らない**: force-push の後も旧 object は host 側の gc まで残る (GitHub は数日〜数か月 = [`identity-in-config.md`](../conventions/identity-in-config.md)、 急ぐなら support に依頼)。 手元の clone も、 本番・追従の直後は旧 object を reflog が掴んだまま新しい object が増えるので書き換え前より**大きい** (実測)。 放っておけば 30 日後の自動 gc で縮み、 今すぐなら stash が無いことを確かめて届かない reflog を切って gc する (道具の `shrink`)。 書き換えの前に `git bundle create <file> --all` で全体の控えを取っておく。
+
+道具: [`scripts/lib/todo_ledger.py`](../scripts/lib/todo_ledger.py) (loader と分割の部品、 `python3` で selftest) / [`scripts/todo-ledger-split.py`](../scripts/todo-ledger-split.py) (分割、 既定 dry-run) / [`scripts/check-ledger-merge-loss.py`](../scripts/check-ledger-merge-loss.py) (merge・rebase の後に消えた entry を id で照合。 dir を渡すと file 名で照合)。 履歴に残った旧 file の全版は、 移行が landed した後に別途 (履歴の書き換えは不可逆、 全 clone の再取得が要る)。 file を残したまま path 名・中身・message の識別子だけを消すなら [パターン 2-5](#pattern-2-5)。
+
+### <a id="pattern-2-5"></a>パターン 2-5: 履歴の中の識別子を、 改名と置換で消す (path 名・平文の版・commit message)
+
+> 消す一覧の作り方と、 検証を一覧から独立させる理由 = [`conventions/confidential-repo-boundary.md#history-scrub-identity-from-all-versions`](../conventions/confidential-repo-boundary.md#history-scrub-identity-from-all-versions)。 file の全版を丸ごと落とすなら [パターン 2-4](#pattern-2-4) の後半 ([`scripts/git-drop-path-history.py`](../scripts/git-drop-path-history.py))。 本節の道具 = [`scripts/git-scrub-history.py`](../scripts/git-scrub-history.py) (設定 1 つ、 `--selftest` = filter-repo を使わない部分、 `--selftest-rewrite` = filter-repo を通す経路)。
+
+暗号化した repo でも、 file 名と commit message は平文で、 暗号化を入れる前に平文で積んだ版も履歴に残る ([パターン 1-1](#pattern-1-1))。 人を指す識別子 (学籍番号のような ID・氏名) が path・平文の版・message に入っていたら、 file は残して識別子だけを置き換える書き換えになる。 不可逆なので人間の判断で、 次の順に (実測):
+
+1. **今の tree を先に、 通常の commit で直す** (`plan-current` → `refs`): 書き換えと同じ規則の改名と平文の中身の置き換えを、 path を明示した commit にする (道具は 1 本 2400 byte 以下の commit の command を印字し、 改名の旧と新を同じ command に入れる)。 他の repo と同じ repo の暗号化 file の中の参照 (旧 path・改名した file の名前 = id) も置き換えて commit する。 こうしておくと書き換えは最新の tree を 1 byte も変えない = 他の clone は追従で差分が出ず、 追従は tree の一致だけで揃えられる。 履歴の識別子の順位で番号を振る規則は、 今の tree には使わない (履歴が伸びると番号がずれる) = 今の path には明示の規則を書く (道具は番号に落ちる今の path で止まる)
+2. **予行演習** (`rehearse`): remote から mirror clone し、 origin を外す (素の `git push` で mirror の全 ref を押さないため)。 1 段目 = `--filename-callback` で改名だけ。 2 段目 = `--file-info-callback` で平文の版の中身 (暗号化 blob と binary は触らない) と、 今は暗号化と宣言した path の平文だった版の暗号化し直し (unlock 済みの clone の `git-crypt clean` を、 鍵を読むだけで使う) + `--message-callback`。 旧先頭と 2 段の `commit-map` を残す。 やり直しは同じ 1 行
+3. **検証** (`verify`、 予行演習が呼ぶ): commit 数が同じ / 全 commit の tree = 旧 tree を規則で写したもの / 旧先頭と新先頭の差が規則どおり / blob の集合 (暗号化 blob は減らない) / 識別子・氏名・旧 path が全 path・全 message・全平文 blob に残らない / fsck / 暗号化し直した版が元の平文に戻る / 姓を含む path が改名済みか判定済み / 規則が変えた code の file の構文
+4. **push は本人が terminal で** (`push-command` が印字): remote が予行演習のときのままか・検証が PASS か・設定と識別子の一覧が検証の後に変わっていないかを確かめてから、 控えの bundle と、 URL と `refs/heads/<branch>:refs/heads/<branch>` を明示した `--force-with-lease=refs/heads/<branch>:<旧先頭>` を出す。 lease が拒んだら (予行演習の後に誰かが push した) 予行演習からやり直す
+5. **push の後** (`after-push`): remote の branch が新しい先頭かを確かめ、 旧履歴を抱えたままの ref を `git ls-remote` で列挙する。 main 以外の branch (dependabot など) は消すか、 新しい main の上に作り直す (merge すると旧履歴が戻る)。 pull request の ref (`refs/pull/*/head`) は利用者から消せない = host の support に削除と gc を頼む。 GitHub では support の窓口 (無料 plan でもチケットは作れる) に、 repo 名・影響を受ける PR の数 (filter-repo の `changed-refs` の `refs/pull/*/head`)・First Changed Commit (同 `first-changed-commits` の旧側)・LFS の object が出たかを書く (公式文書 "Removing sensitive data from a repository")。 support は PR 以外の参照 (branch・fork) が片付いていることを条件にする = 旧履歴の上の Dependabot の branch が残る repo は、 作り直させた後に頼む。 窓口の選択肢の「削除」 は repo 自体の削除・パージの流れなので選ばない。 旧 object は host の gc まで sha で取れる。 **support の完了の連絡の後に確かめる** (`ls-remote` の件数だけで完了と判定しない): (a) 書き換え前の commit (First Changed Commit の旧側) を host の API で引き、 取れないことを見る (GitHub = `gh api repos/<owner>/<repo>/commits/<sha>` が 422 "No commit found")。 同じ書式で今の commit を 1 つ引いて取れることを対照にする (取れない原因が書式でないことの確認。 短い sha でも引ける) (b) まだ残っている PR の ref は、 新しい main との merge-base を見て、 書き換えた後の履歴から分かれたものかを確かめる (書き換えの後に作られた PR の ref は旧履歴を抱えない = 残っていてよい)。 PR の ref の sha を手元に fetch して調べると旧 object を手元に戻すことになる = 手元にある commit だけを `git cat-file -e` で選んで merge-base を取る
+6. **追従**: 他の machine は [`scripts/git-rewrite-follow.py`](../scripts/git-rewrite-follow.py) が揃える (道具が書く対応表 = `<name>.final.commit-map`。 filter-repo は同じ repo の 2 回目の実行で前回の表と合成する = 2 段目の表は元 → 最終。 旧世代にしか無い blob = `<name>.final.commit-map.forbidden-blobs`、 追従の pre-push が読む。 file 名は [パターン 2-4](#pattern-2-4) の道具の `<name>.commit-map` と分けてあり、 同じ work・同じ name に印の無い mirror があれば予行演習は消さずに止まる)。 共同作業者の clone も旧履歴を持つ = pull せず取り直してもらう (pull や merge で旧 commit が remote に戻る)
+
+教訓 (実測。 道具の selftest と検証が機械で見る):
+
+- **改名は `--filename-callback` で**: `--file-info-callback` で改名すると、 後の commit の削除は旧名のまま流れ、 消えたはずの file が最新の版に復活する。 filter-repo は 2 つの callback を同じ実行で受け付けないので、 改名と中身を 2 段に分ける
+- **検証は置き換えの一覧から独立させる**: 識別子は**形** (正規表現) で、 姓は台帳の全ての版の**全部の姓**で、 全 file・全 message・全 path に当てる。 置き換えと同じ一覧で検証すると、 一覧が見落としたものは検証も見落とす (0 件は当然になる)。 姓だけは置き換えない (同じ姓の別人を巻き込む) = 数えて人が見て、 識別子でない path は判定済みの一覧に理由つきで足す
+- **git の短い hash は識別子の形に当たる**: a-f の文字を含む 16 進だけの token は形から外す。 ただし一覧に在る識別子は外さない (16 進に見える識別子もある)。 **数字だけの token は外さない** = 数字は 16 進の部分集合なので、 外すと 7 桁以上の番号 (受付・口座・納付) が message に残る (実測。 道具の検証も同じ除外を共有するので、 残っても PASS する。 数字だけの短い hash が置き換わる方へ倒す)。 英字の接頭辞に続く番号 (照会番号の形) は形の境界に当たらない = `message_rules` に `(?<=[A-Za-z])\d{7,}` を足す
+- **書き換えの後に、 道具と独立の正規表現で message を 1 回引く** (金額・7 桁以上の番号・メールの形、 trailer の行を除く)。 道具の検証は置き換えと同じ除外 (16 進・既知の一覧) を共有するので、 除外の穴は検証にも穴として出る。 残りがあれば規則を足して予行演習からやり直す (push 済みなら 2 回目の書き換え = 対応表を 2 つ置く)
+- **code が読む file の中身を置き換えると code が壊れる** (label・key): 規則が変えた `.py` / `.sh` / `.json` / `.yaml` を構文検査し、 JSON / YAML の key の集合が変わったら、 その file を読む code を確かめる
+- **文字だけの 1 語の旧 token (姓と同じ dir 名など) は、 中身と message では自動で置き換えない**: 同じ語の別人を巻き込む。 要るものだけ対を明示する
+- **識別子と氏名の一覧は repo に入れない**: machine-local に置く (道具は git の work tree の中に在る一覧を拒む)。 規則の設定も旧 path の literal を含みうるので repo の外に置く
+- **他の repo に書いた旧 sha は黙って効かなくなる**: 検査の ack・台帳の commit 欄など、 機械が sha で引く設定は、 書き換えの後も旧 sha のまま残る (commit 付き ack が効かなくなることは [`scripts/check-doc-truncation.py`](../scripts/check-doc-truncation.py) が `ACK_COMMIT_NOT_IN_HISTORY` で知らせる)。 対応表で新 sha に引き直す。 対応表は手元の控えだけに置かず、 push の後に repo の `.rewrite-follow/commit-map*` に通常 commit で置く = 他の machine と後の読み手が引ける。 同じ repo を 2 回書き換えたら表を 2 つ置く (追従の道具は表を最後まで辿る)。 記録 (掲示板の投稿・受信の記録) の中の旧 sha は書き換えず、 [`scripts/git-rewrite-follow.py`](../scripts/git-rewrite-follow.py) `map --repo <repo> <旧 sha>` で今の sha に引く。 同じ作業 dir でやり直すと前の回の表が上書きされる = 回ごとに別の dir にする (失った 1 段は、 前後の履歴の commit を作者・日時・親の数で 1 対 1 に照合して作り直せる。 重複が無いことを確かめてから)
+- **開いた Dependabot の PR は旧履歴の上に残る**: 書き換えより前に作られた PR の branch は旧履歴の上にあり、 書き換えた commit より前の履歴は共通なので merge できる形で残る (試しの merge = `git merge-tree --write-tree origin/main <branch>` が衝突で止まれば画面の 1 クリックでは入らないが、 止まらなければ旧 commit が main に戻る)。 PR に `@dependabot rebase` を書いて新しい main の上に作り直させる (閉じると Dependabot はその version の PR を作り直さない)。 作り直しを待たずに片付けるなら、 PR の commit (多くは lock file 1 つ) を新しい main に cherry-pick して push し、 PR を閉じて branch を消す (cherry-pick は差分だけを写す = 旧 commit は入らない。 題名より新しい版に PR が更新されていることがあるので、 版は lock file で見る)。 git-crypt の repo では `git worktree` の checkout で復号が失敗するので、 鍵を通さない一時 clone で行う (平文の lock file だけを変える限り、 暗号化 file は暗号のまま運ばれる)。 書き換えの前に、 開いた PR と PR の ref (`git ls-remote origin 'refs/pull/*'`) の数を本人に見せておく (PR の ref は旧履歴を抱えたまま host に残る = 上の 5)
+- **lease は予行演習の後の push を拒む**: 並列の session が書く repo なら、 予行演習の前に一声かけて止めてもらう。 拒まれても安全 (何も書き換わらない) で、 やり直しは 1 行。 書き手の多い repo では、 一声かけた相手のほかの書き手が予行演習の間に push する (実測) = 予行演習・`push-command` の確認・控えの bundle・印字した push・`after-push`・手元の追従を 1 本の script で続けて回し、 lease が拒んだら予行演習からやり直す (印字した行を人が読んで打つ間にも上流は動く)
+- **消す値が履歴の後ろにしか無いなら、 範囲を `base` で限る**: 署名つきの commit (GitHub の画面で merge した commit など) は fast-export で署名が落ち、 中身が同じでもその commit から先の sha が全部変わる (実測: 消す値は最後の数十 commit にしか無いのに、 全履歴の 9 割の sha が変わる形だった)。 設定の `base` = 消す値が最初に入った commit の親。 base より下に消す値が残れば verify が落ちる
+- **agent が push する (本人の OK の後) ときは、 mirror からでなく手元の clone から押す**: `git -C <mirror> push` は commit・push の承認の規則に当たらず止められることがある。 新しい先頭を手元の clone に一時の ref で取り込み (`git fetch <mirror> refs/heads/<branch>:<一時の ref>`)、 clone から `git push --force-with-lease=refs/heads/<branch>:<旧先頭> origin <一時の ref>:refs/heads/<branch>` で押す = clone の pre-push の検査 (追従の点呼・旧世代の object) も通る。 押した後に一時の ref を消す
+- **branch の保護で force push を止めている repo は、 push の間だけ許可を入れて戻す**: 前の値を `gh api repos/<o>/<r>/branches/<branch>/protection` で取って控え、 force push の許可だけを変えた値で PUT → push → 前の値で PUT → もう一度取って前と同じかを確かめる (push が失敗しても戻す側は必ず走らせる)
+- **開いている PR の試しの merge の ref (`refs/pull/<N>/merge`) は、 書き換えの後もしばらく旧履歴の上に残る**: PR の base は新しい先頭に変わっても、 試しの merge の commit は古い親のまま (実測: 30 分以上、 PR の mergeable を読んで促しても変わらない) = その間は旧履歴の object をこの ref から取れる。 作り直させるには PR を閉じて開き直す (PR の作者に通知が行く) か、 待つ
+
 ---
 
-## Part 3: 公開面の最小化
+## <a id="part-3-minimize"></a>Part 3: 公開面の最小化
 
-### パターン 3-1: slug 設計 — 識別情報をファイル名に入れない
+### <a id="pattern-3-1"></a>パターン 3-1: slug 設計 — 識別情報をファイル名に入れない
 
 複数の機密対象 (顧客・組織・環境・インシデント) を 1 リポで扱うとき、対象識別名をファイル名に入れたくなる。しかし git-crypt はファイル名を暗号化しないので、**ツリー構造だけで内部が推定可能**になる。
 
@@ -126,7 +183,7 @@ notes/                        notes/
 
 **slug → 実名のマッピングは暗号化された INDEX ファイル 1 つに集約**する。slug 自体は単一文字の連番 (`a`, `b`, ...) か、意味を持たない識別子 (`n1`, `env3` 等) にする。意味のある略語 (`ac`, `tok`, `bnk`) は組合せで特定されうるので避ける。
 
-### パターン 3-2: commit message は汎用ラベルのみ
+### <a id="pattern-3-2"></a>パターン 3-2: commit message は汎用ラベルのみ
 
 commit message は**永続に git log に残る**。後から rewrite しても GitHub の pack/reflog に痕跡が残る可能性がある。**具体的な環境・組織・調査結果・観測事実を書かない**:
 
@@ -144,11 +201,11 @@ commit message は**永続に git log に残る**。後から rewrite しても 
     "Update meta"
 ```
 
-**中身の変更の詳細は、暗号化されているファイル内部 (例えばそのノート自体か `SESSION.md`) に書く**。commit message には「ノートを追加した/更新した」という操作種別だけを残す。
+**中身の変更の詳細は、暗号化されているファイル内部 (例えばそのノート自体か、 暗号化された案件の記録・DESIGN.md) に書く**。commit message には「ノートを追加した/更新した」という操作種別だけを残す。
 
 変更が複数ある場合も、具体を出さない汎用ラベルで統一する。これは「何を commit したか分からなくなる」トレードオフを生むが、中身の変更履歴はファイル内部のセクション追記で残せる。公開面の簡潔さを優先する。
 
-### パターン 3-3: 平文 README を構造的に守る
+### <a id="pattern-3-3"></a>パターン 3-3: 平文 README を構造的に守る
 
 clone 直後の reader (別マシンの自分、新規 collaborator) のために、**unlock 方法を伝える最小限の README** が必要。しかし README は平文なので、そこに書いた内容は全て公開される。
 
@@ -201,9 +258,9 @@ exit 0
 
 ---
 
-## Part 4: ブートストラップの設計
+## <a id="part-4-bootstrap"></a>Part 4: ブートストラップの設計
 
-### パターン 4-1: 新マシンから zero → readable の経路を全て文書化
+### <a id="pattern-4-1"></a>パターン 4-1: 新マシンから zero → readable の経路を全て文書化
 
 別の端末で初めてこのリポを開くときの手順を、**最初の authn からノート閲覧可能になるまで**、途切れなく書く。よくある抜け:
 
@@ -230,7 +287,7 @@ exit 0
 
 各ステップを**平文 README か別の cross-reference 可能な場所**に書く。暗号化側にだけ書いてあると 6 に到達できない reader が詰む。
 
-### パターン 4-2: "X は here ではない" と書いたら必ず "X は there" も書く
+### <a id="pattern-4-2"></a>パターン 4-2: "X は here ではない" と書いたら必ず "X は there" も書く
 
 「個人鍵はこのファイルには記録しない」とだけ書いてあると、reader は「じゃあどこ?」と迷う。
 
@@ -254,7 +311,7 @@ exit 0
 
 negative pointer (X はここではない) と positive pointer (X はそこ) は必ずセットにする。**単独の negative pointer は reader を迷子にする antipattern**。
 
-### パターン 4-3: Cross-machine vs machine-local の軸を意識する
+### <a id="pattern-4-3"></a>パターン 4-3: Cross-machine vs machine-local の軸を意識する
 
 以下のものは**マシンローカル**になりがち:
 
@@ -276,9 +333,9 @@ negative pointer (X はここではない) と positive pointer (X はそこ) �
 
 ---
 
-## Part 5: 運用規律
+## <a id="part-5-discipline"></a>Part 5: 運用規律
 
-### パターン 5-1: Forcing functions > discipline
+### <a id="pattern-5-1"></a>パターン 5-1: Forcing functions > discipline
 
 人間 (あるいは AI) が繰り返し同じミスをする領域には、**規律 ("気をつけよう") ではなく構造的な forcing function を置く**。以下の事象が観察されたら規律の限界を疑う:
 
@@ -298,7 +355,7 @@ Forcing function の例:
 
 Forcing function 自身が leak 源にならないよう注意 (hook script 本体は暗号化側に置く等)。
 
-### パターン 5-2: 新規ルールと既存違反の同日 sweep
+### <a id="pattern-5-2"></a>パターン 5-2: 新規ルールと既存違反の同日 sweep
 
 新しいルールを追加したとき、**既存の違反を audit して同日に修正する**。そうしないと:
 
@@ -308,7 +365,7 @@ Forcing function 自身が leak 源にならないよう注意 (hook script 本�
 
 作業単位は「新規ルール設置 → 既存違反 audit → 一括移行 → commit」を 1 セットとする。例: 新規に「機密は暗号化側」ルールを作ったら、その場で既存の平文機密を grep して全部移動する。
 
-### パターン 5-3: 実装直後の 4 軸レビュー
+### <a id="pattern-5-3"></a>パターン 5-3: 実装直後の 4 軸レビュー
 
 実装 (新規作成・大規模変更) の直後に、以下の 4 軸で自己レビューする:
 
@@ -321,7 +378,7 @@ Forcing function 自身が leak 源にならないよう注意 (hook script 本�
 
 「実装して完了」ではなく、「実装 + 4 軸レビュー + 指摘事項の修正 = 1 単位」として扱う。レビューを省くと、上記 4 項目のいずれかに必ず drift が残る。
 
-### パターン 5-4: DESIGN と examples の co-aging
+### <a id="pattern-5-4"></a>パターン 5-4: DESIGN と examples の co-aging
 
 ルールを書いた文書 (DESIGN.md 等) に具体例を入れると、**後日ルールが refine されたときに example だけが古くなる** ことがある。古い example は新ルールから見ると「ルール違反」として読めてしまい、自己矛盾になる。
 
@@ -335,7 +392,7 @@ refinement を書き加えるときには、**古い section の example が新�
 
 ---
 
-## Appendix A: リポ新設時チェックリスト
+## <a id="appendix-a-new-repo"></a>Appendix A: リポ新設時チェックリスト
 
 ```
 □ repo name / description / topics に固有名詞を含めない
@@ -352,7 +409,7 @@ refinement を書き加えるときには、**古い section の example が新�
 □ 4 軸レビュー (整合性・無矛盾性・効率性・安全性)
 ```
 
-## Appendix B: 新規ノート追加時チェックリスト
+## <a id="appendix-b-new-note"></a>Appendix B: 新規ノート追加時チェックリスト
 
 ```
 □ ノートのファイル名は既存の slug 命名規則に従う (新規環境なら INDEX も更新)
@@ -362,7 +419,7 @@ refinement を書き加えるときには、**古い section の example が新�
 □ push 前に git-crypt status で当該ファイルが encrypted 表記であることを確認
 ```
 
-## Appendix C: 定期監査チェックリスト
+## <a id="appendix-c-audit"></a>Appendix C: 定期監査チェックリスト
 
 ```
 □ 平文ファイルの grep 監査: 固有名・IP・URL・非 ASCII が混入していないか
@@ -384,3 +441,4 @@ refinement を書き加えるときには、**古い section の example が新�
 ## 更新履歴
 
 - **2026-04-09**: 初版。私的な暗号化ノートリポの実装経験から抽出したパターンを公開共有可能な形に汎化
+- **2026-09-23**: パターン 2-4 (頻繁に書き足す台帳は 1 entry 1 file) を追加。 同日、 履歴から旧 file を落とす節に空 commit を残す指定と道具 (`scripts/git-drop-path-history.py`) を追記

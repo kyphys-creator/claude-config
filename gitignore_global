@@ -10,11 +10,30 @@ Thumbs.db
 *.swo
 
 # === Claude Code ===
-# .claude/ の中身は基本 ignore だが、public-repo.marker だけは tracked
-# (leak 防止 hook の visibility 正本)。詳細は
-# claude-config/DESIGN.md §公開リポ leak 防止。
+# .claude/ の中身は基本 ignore だが、以下のファイルだけ tracked にする。
+# 注: gitignore は inline コメント不可 (`!pattern  # comment` だと
+# pattern が `pattern  # comment` になり negate が無効化する)。
+# 説明は各 ! 行の上に書く。
+#
+# - public-repo.marker: leak 防止 hook の visibility 正本
+#   (詳細: claude-config/DESIGN.md §公開リポ leak 防止)
+# - git-crypt-backup: Dropbox-relative encrypted key backup の指定
+#   (private リポのみ、setup.sh 5b-pre が読む)
+# - launch.json: VS Code dev server 設定
+# - pre-commit-extra.sh: public-precommit-runner の repo-local extension
+#   (詳細: claude-config/DESIGN.md §2026-04-28 追補)
+# - preamble-aliases.json: LaTeX の preamble alias 検査の対象・例外、
+#   かつ「この repo を gate する」 opt-in switch。repo と一緒に travel する
+#   必要がある (詳細: conventions/latex.md#macro-alias-forcing-function)
+# - tex-engine-decided-by.txt: engine を owner 以外が決める .tex の一覧
+#   (scripts/check-tex-engine.py が読む、 詳細: conventions/latex.md#lualatex-compat)
 .claude/*
 !.claude/public-repo.marker
+!.claude/git-crypt-backup
+!.claude/launch.json
+!.claude/pre-commit-extra.sh
+!.claude/preamble-aliases.json
+!.claude/tex-engine-decided-by.txt
 
 # === LaTeX intermediates (NOT pdf — PDFs are tracked) ===
 *.aux
@@ -33,6 +52,10 @@ Thumbs.db
 *.nav
 *.snm
 *.vrb
+# REVTeX's apsrev/aps bst writes an empty <jobname>Notes.bib beside the
+# document on every run. Hand-written bibliographies are unaffected: the
+# pattern is case-sensitive, so `mynotes.bib` and `refs.bib` do not match.
+*Notes.bib
 
 # === Python ===
 __pycache__/
@@ -46,3 +69,7 @@ venv/
 
 # === Node ===
 node_modules/
+
+# === Cloudflare wrangler ===
+# wrangler writes local state / cache (e.g. the account cache) into whatever directory it runs in; machine-local, never tracked.
+.wrangler/

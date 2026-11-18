@@ -1,0 +1,438 @@
+<!-- doc-meta
+when: Discord Bot を運用・実装するとき + 第三者の bot・連携 service が侵害されたと報じられ、 自分の server・bot への影響を確かめるとき (#third-party-bot-breach-triage) + bot が 403 Missing Access で channel に入れないとき・招待リンクで bot を入れようとしたとき (#missing-access-triage) + 外の新着を定期 job で channel に中継するとき (#channel-as-ledger) + 人が保つ出どころ (担当表・予定表・世話役のメール) から bot が定期の案内を出すとき (#scheduled-reminder-from-sources) + bot に人へ DM を送らせる前・bot の持ち主にもやりとりを見せたいとき (#owner-visible-bot-conversation)
+category: infra
+summary: Discord Bot 運用 (権限ポリシー・private channel 加入・持ち主に見せたいやりとりは 1:1 DM でなく bot が作る非公開 channel で・per-channel error non-fatal な fetcher・Token 取扱・組織 NW での API ブロック・グループへの呼びかけの個別 mention と user ID の根拠つき引き方・第三者の bot の侵害時の点検と token 漏洩時の @everyone の絞り方・人が保つ出どころからの定期の案内の止める線と二重送りの防ぎ方)
+-->
+# discord-bot: Discord Bot を運用するときの規律
+
+Bot を Discord API 経由で動かす場合の一般則。具体的な server / channel / Bot ID は個人層 (private リポ) に置き、本ファイルには generic pattern のみ。
+
+## 権限ポリシー: Token 漏洩時の被害想定で決める
+
+Bot に付ける channel-level / server-level 権限は「Token が漏れた時にどこまで被害が広がるか」を逆算して最小化する。以下は **「中立 (Allow しない、Deny もしない、= グレー)」がデフォ推奨**:
+
+| 権限 | 中立にする理由 |
+|---|---|
+| Administrator | 絶対 NG (= 全権限相当) |
+| Manage Channel | Token 漏洩時に channel 削除が可能 |
+| Manage Permissions / Manage Roles | 他人の権限改変が可能 |
+| Manage Webhooks | 外部にデータ流出経路を作れる |
+| Manage Messages | 他人のメッセージ削除が可能 |
+| Manage Threads | 他人のスレッド削除が可能 |
+| Mention @everyone, @here, all roles | annoyance 源、本当に必要になったら個別追加 |
+| Send TTS Messages | bot 用途で意味なし、ノイズ源 |
+
+通常の posting bot に必要十分な権限セット (これらを Allow):
+
+- 読み取り: View Channel, Read Message History
+- 投稿: Send Messages, Embed Links, Attach Files, Send Voice Messages, Create Polls, Pin Messages
+- インタラクション: Add Reactions, Use External Emojis, Use External Stickers, Use Application Commands, Use Embedded Activities, Use External Apps
+- スレッド: Create Public Threads, Create Private Threads, Send Messages in Threads
+- メンバーシップ: Create Invite (任意)
+
+### <a id="guild-role-vs-overwrite"></a>Guild-level role 権限は overwrite の無い channel 全部に効く (= 「overwrite 1 件だけ」 は被害範囲の見積もりにならない)
+
+invite URL の `permissions=` bitfield は **bot 専用 role の guild-level 権限**として付与される。 その後 1 つの private channel にだけ overwrite を足しても、 **overwrite の無い public channel には guild-level 権限がそのまま効く** (= View / Send / Read History 等)。 「この bot は overwrite が 1 channel 分しか無いので他 channel は touch 不可」 という見積もりは誤り — Token 漏洩時の被害範囲は **guild-level 権限が届く全 channel** で数える。
+
+確認は API 1 発: `GET /users/@me/guilds` の該当 guild `permissions` (= 実効 guild-level bitfield。 `1<<10` VIEW_CHANNEL / `1<<11` SEND_MESSAGES / `1<<16` READ_MESSAGE_HISTORY) + `GET /channels/{id}` の `permission_overwrites` が空なら guild-level がそのまま効く。 被害範囲を本当に 1 channel に絞りたいなら **guild-level 権限を 0 で招待し、 channel overwrite だけで allow する** (= 上の「中立がデフォ」 を guild-level にも適用)。
+
+(観測 2026-09-05: 個人運用 bot を 3 者 private channel 用に招待した際、 規約に「他 channel は touch 不可」 と書いていたが、 別用途で public channel への `--check` が通って誤りが判明。 見積もりが甘い方向に外れていた = 被害範囲の過小評価)
+
+### <a id="bot-identity-persona"></a>Bot identity = 発言主体 (= 組織名義と個人名義を bot で分ける)
+
+同じ server に**組織・自動系の名義** (= fetcher / 告知 / リマインダー / 集計) と**個人の一人称発言** (= 事務職員・メンバーへの返信 / 相談) が混在するとき、 1 つの bot で両方を出すと読者は「誰が言っているか」 を本文から推測させられる (= 組織 bot が「私は〜」 と書くと、 組織の公式見解か個人の判断か区別できない)。 bot の表示名は読者に発言主体を伝える最も安い signal なので、 **投稿の主語が組織か個人かで bot を分ける**:
+
+- 主語 = 組織 / system (「研究室セミナーのお知らせ」 「明日のリマインダー」) → 組織名義 bot (= fetcher と同居してよい)
+- 主語 = 個人 (「〜と考えております」 「〜については私から照会済です」) → 個人名義 bot (= 名前に個人を示す語を含める、 例 `<handle>-secretary`)
+
+判別は投稿ごとでなく「この投稿の一人称は誰か」 の 1 問。 迷う例: 事務職員への回答 = 個人 (組織 bot で出すと組織回答に見える) / 会場変更の周知 = 組織 / **組織のメンバー全員への呼びかけ (募集・希望集め) = 組織** — 本文に「頼んでみます」 のような個人の一人称が混ざっていても、 宛先が組織全体なら組織 bot で出し、 末尾に発信者名を 1 行添える (= 一人称の有無でなく宛先の範囲で決める。 個人 bot は特定の相手とのやり取り用)。 trade-off: 個人名義 bot を同 server に足すと Token surface が 1 つ増える (= 上の権限ポリシーで被害範囲を見積もる、 前節の guild-level 注意も込み)。 過去に組織 bot で出した個人名義投稿は遡及修正しない (= 履歴は履歴、 以後の routing を変えるだけ)。
+
+<a id="org-post-byline"></a>末尾の 1 行の書き方 (発信した人の名 / 文面を起草した AI の文責表記、 例 `（文責　<AI 名>）`) は owner が決め、 その選択は個人層に置く。
+
+## Private channel への Bot 追加手順
+
+`@everyone` の View Channel が deny された private channel では、server-level role による View Channel allow も override される。Bot を入れる手順:
+
+1. **Bot user 自身、または Bot 用 role** を channel の「アクセス可」リスト (permission overwrite の allow 側) に追加
+2. これで View Channel が channel-level で allow され、Read Message History 等の他権限は server-level role から継承される
+3. 詳細権限 (Send Messages, Pin, Polls など) を追加で個別に Allow したい場合は、追加した role/member の詳細 toggle 画面で個別 ON
+
+### Bot 自身が UI 操作の代行をできない理由
+
+**既存の** channel の permission overwrite を API 経由で変更するには `Manage Roles` 権限が必要。これを持たない bot は **既存の非公開 channel に自分自身の allow を API で追加できない** → server admin (人間) が UI で 1 度だけ操作する必要がある。これを最初に踏まえずに「API で全自動」と思い込むと、最後の 1 ステップで詰まる。 **channel を新しく作るときの overwrite は `Manage Channels` だけで付けられる** (bot 自身と人の user overwrite の allow を作成の request に入れる。 allow できるのは bot が guild で持っている権限だけ、 実測 = `Manage Roles` を持たない bot で通った) = bot に作らせれば人の操作は要らない (下の [#owner-visible-bot-conversation](#owner-visible-bot-conversation))。
+
+### <a id="owner-visible-bot-conversation"></a>持ち主にも見せたいやりとりは、 bot の 1:1 DM でなく非公開 channel で
+
+- bot と人の 1:1 DM は bot とその人にしか見えない。 bot に送らせている持ち主の Discord には出ず、 相手の返事も bot にしか届かない = 持ち主は bot の側の記録 (fetch・読み出し) を通してしか見られない (実測)。
+- bot はフレンドになれず、 グループ DM にも入れない (Discord の仕様)。 持ち主・相手・bot の 3 人の場は、 server の非公開 channel しか無い。
+- 作り方: 相手と bot が両方いる server (持ち主が管理する server) に、 @everyone の View Channel を deny し、 持ち主・相手・bot に user overwrite で allow した text channel を作る。 bot が `Manage Channels` を持っていれば作成の request 1 本で済む (上の段落) = 道具 [`scripts/discord-private-channel.py`](../scripts/discord-private-channel.py) (既定 = 送らずに中身を出す、 `--create` で作って読み戻す)。 相手と bot が同じ server に居るかは [`scripts/discord-post.py`](../scripts/discord-post.py) `--member-probe <USER_ID>` で引く。
+- 1:1 DM で始めてしまった相談は、 channel で相手を名指しして同じ内容を書き直し、 「こちらで」 と添える (DM に返事が来た分は bot の側で拾う)。
+- bot が読み書きしない、 持ち主と相手の 2 人の場なら、 持ち主のアカウントから DM すれば server は要らない。
+
+### <a id="missing-access-triage"></a>Missing Access (403 / code 50001) は 2 つの場合を区別しない — 所在を引いてから人に頼む
+
+`Missing Access` は「bot がその server に居ない」 と「server には居るが、 channel が非公開で bot (の role) が channel の許可に無い」 の両方で返る。 直し方が違うので、 人に頼む前にどちらかを決める:
+
+- **見分け方**: bot が在席する guild ごとに `GET /guilds/{guild}/channels` (+ `/threads/active`) を引き、 channel id を探す。 この一覧は bot が開けない非公開 channel も名前つきで返す (実測) = 見つかれば後者、 どの guild にも無ければ前者。 [`scripts/discord-post.py`](../scripts/discord-post.py) は 50001 のときこれを自動で引いて `located:` の 1 行を出す (`--check` / `--recent` / 送信のどれでも)
+- **後者 (非公開 channel)**: server admin が channel の「編集 → 権限」 で bot か bot の role を足す (上の追加手順)。 **招待リンクを送ってもらっても効かない**
+- **前者 (server に居ない)**: OAuth2 の authorize URL (`discord.com/api/oauth2/authorize?client_id=…&scope=bot&permissions=…`) で server に入れる。 ⚠️ **`discord.gg/<code>` の招待リンクで bot は参加できない** (招待の受理 〔`POST /invites/{code}`〕 は user 用で、 bot は使えない)。 人が招待リンクを渡してきたら、 リンクの行き先を `GET /invites/{code}` (認証なし) で確かめ、 bot が既にその server に居るなら後者の手順を頼む
+- 文面の見本 (人に頼むとき): 「その channel は非公開で、 bot はサーバーには居るが channel に入れない。 channel の編集 → 権限 → メンバーまたはロールを追加 で bot を足して、 『チャンネルを見る』『メッセージを送信』『メッセージ履歴を読む』 を許可してほしい」
+
+## 複数 channel から data を fetch するときの error handling
+
+複数 channel を巡回する fetcher は **per-channel error を non-fatal に**。1 channel の権限欠如 (`Missing Access`) で全体を kill すると、他の正常 channel の data まで止まってしまう (= 1 channel の問題が全 channel の data 鮮度を巻き込む)。
+
+```python
+def fetch_channel(channel_id, name):
+    # ...
+    if not isinstance(msgs, list):
+        if first_call:
+            print(f'ERROR: {name}: ...', file=sys.stderr)
+            return None  # ← sys.exit(1) ではなく None
+        break
+    # ...
+
+failed = []
+for name, cid in channels.items():
+    msgs = fetch_channel(cid, name)
+    if msgs is None:
+        failed.append(name); continue
+    # ... write to file ...
+
+if failed:
+    print(f'NOTE: failed channels skipped: {", ".join(failed)}', file=sys.stderr)
+    sys.exit(1)  # ← 末尾で non-zero exit して UI failure を維持
+```
+
+GitHub Actions の workflow 側で **後続 step に `if: always()`** を付け、partial failure でも commit/push を走らせる:
+
+```yaml
+- name: Commit if changed
+  if: always()  # partial-failure でも successful channels は commit
+  run: |
+    git add ... && (git diff --cached --quiet || (git commit ... && git push))
+```
+
+これで「UI failure を見て修復する signal を保つ」+「正常 channel の data は反映される」を両立。1 channel が permission 系で死んでいても他の data 鮮度は守られる。
+
+## <a id="bot-token-handling"></a>Bot Token の取り扱い
+
+- canonical 配置: `~/.secrets/<bot>-token` の形 (チーム / project 単位、`secrets-config` 規約と整合)
+- リポ内 backup を持つ場合は **git-crypt 暗号化必須**。平文 commit は禁止
+- chat / public リポ / メール本文への literal 貼付は禁止
+- GitHub Actions では `${{ secrets.<NAME> }}` 経由で env var に注入し、log で `***` mask されることを確認 (`echo $TOKEN` のような直接出力をしない)
+- **Token を初回 `~/.secrets/<bot>-token` に配置する手順は [`secret-handoff.md`](secret-handoff.md) を参照** — user に実行させるコマンドに `pbpaste` 系を入れる案は clipboard 上書きの罠で確実に破綻するため厳禁。user に実行させるなら stdin-wait 先行 pattern (`cat > file` または `read -rs`)、agent が同じ機械の clipboard を自分で読めるなら [`secret-handoff.md#agent-side-paste`](secret-handoff.md#agent-side-paste)
+
+## <a id="token-sharing-protocol"></a>Token 共有プロトコル: owner 単独運用 vs. collaborator 共有
+
+Bot Token を **誰が持つか** を明示的に判断する。Token を持つ人だけが Bot 操作 (ローカル API call / Bot 投稿 script のテスト等) でき、持たない人は GitHub Actions 経由でのみ動かせる (= `workflow_dispatch` で trigger)。
+
+**owner 単独運用** (推奨デフォルト): Token は owner のみが持つ。共同編集者は workflow yaml の編集 + push で Bot を間接実行 (workflow_dispatch も可)。Token 漏洩リスクが最小、信頼境界が明確。collaborator は iterative なローカル開発はできず owner がボトルネックになるが、Bot 運用が daily fetcher 中心なら問題ない。
+
+**collaborator 共有**: 信頼できる共同編集者にも Token を渡す。共有手段:
+- 同じ git-crypt 鍵を持つ collaborator → リポ内 `secrets/<bot>-token` に git-crypt 暗号化 commit、setup.sh 等で各マシンに展開
+- 鍵未共有の collaborator → out-of-band (Signal / 1Password 等) で個別配布
+
+判断軸: collaborator 数 (2-3 名以下で全員強い信頼関係なら共有 OK) + ローカル開発頻度 + Bot の権限範囲 (Manage 系を持つなら単独運用必須、read/write 程度なら共有許容)。
+
+**shared リポの CLAUDE.md は方針を明記**: 「Token 必要な操作は owner に依頼」 or 「Token は `secrets/<bot>-token` の暗号化 backup から取得 (setup.sh 自動展開)」 — どちらかを書いて共同編集者の「Token どこ?」 の行き止まりを解消する。書いていないと collaborator が場面ごとに owner に問い合わせる手間が発生する。
+
+## <a id="discord-api-user-agent"></a>Discord API call の User-Agent header 必須
+
+Discord Bot API (`discord.com/api/v10/...`) を curl / Python urllib / requests から叩く場合、**Discord 仕様で User-Agent header 必須**。 default UA (= `Python-urllib/3.x` 等) は Cloudflare で **error 1010 (Access denied) で reject** される。
+
+正しい format (Discord 公式仕様):
+
+```
+User-Agent: DiscordBot (<source URL>, <version>) [optional 説明]
+```
+
+例:
+
+```python
+import urllib.request, json, os
+token = open(os.path.expanduser('~/.secrets/<bot>-token')).read().strip()
+req = urllib.request.Request(
+    f'https://discord.com/api/v10/channels/{cid}/messages',
+    data=json.dumps({'content': '...', 'allowed_mentions': {'users': [...]}}).encode(),
+    headers={
+        'Authorization': f'Bot {token}',
+        'Content-Type': 'application/json',
+        'User-Agent': 'DiscordBot (https://github.com/<org>/<repo>, 1.0)',
+    },
+    method='POST',
+)
+```
+
+公式 SDK (discord.py / discord.js 等) は自動で正しい UA を付けるため、 SDK 経由なら気にする必要なし。 **生 HTTP request を書く時だけ落とし穴**。 ad-hoc な one-shot post script (= odakin が CLI からメッセージ送信する典型ユースケース) で頻発する。
+
+**添付の CDN URL (message JSON の `attachments[].url` = `cdn.discordapp.com/attachments/...`) も同じ**: 既定 UA の Python urllib は 403 Forbidden で落ちる (実測)。 curl に `-A '<UA>'` を付けるか、 urllib に User-Agent header を渡す。 URL は期限つきの署名入りなので、 古い取得結果の URL は UA を付けても通らない = 最新の取得から引く。
+
+**⚠️ 2026-07-10 に「本節はあったのに再発」した**: 送信 session は運用 doc (= ID・token 表) を grep で読むため、 別 doc の本節が発火面にならない (= 文末 pointer は grep 到達者に届かない)。 design-out として **canonical 送信 script [`scripts/discord-post.py`](../scripts/discord-post.py)** に規則を焼き込んだ (= 正しい UA / エラー code 解読 hint / **既定 dry-run + 明示 `--send`** 〔= claude-code-permissions.md #ask-pattern-action-anchor 準拠〕 / **`--preview` = token を読まず Discord にもつながずに、 送る文・引用の照合・添付を dry-run と同じ形で見せる** (`--send` と読み取りの option は断る。 `--token-file` は渡さない = `--token-file` つきの dry-run は auto mode の classifier に外部への書き込みとして止められ、 この形は通った = 実測) / `--dm-user` で DM channel 開設 / `--check` で read-only 疎通 / **`--recent N` で直近 N 件を古い順に読む** (= channel の会話を確かめるための使い捨ての API 読み取りを書かない。 送信 flag を持たないので投稿 guard の確認も出ない。 各行に書き手の user id を出し、 通常の投稿でも返信でもない message に `[type N]` の印を付ける = 参加の通知 〔type 7〕 の書き手は参加した本人なので、 Server Members Intent を切った bot でも新しく入った人の id がここで引ける) / **`--guilds` で bot のいる server の一覧、 `--channels <guild id>` でその server の channel と active thread の一覧** (id・type・名前・親。 bot が開けない非公開 channel も出る = 読めるかは `--check`。 3 つとも GET だけ) / **`--message <id> --full` で 1 件の本文の全文と添付の一覧、 `--save-attachments <新しい dir>` で添付を保存** (`--recent` は 1 件 1 行に畳む = 長い本文や共著者の添付を読むたびに API を叩く使い捨ての code を書かない。 保存先は新しい dir か空の dir にする 〔中身のある dir は道具が断る〕。 取り込む前に [`downloaded-file-scan.md`](downloaded-file-scan.md) の検査) / **`--attach` でファイル添付 (repeat 可、 下記 §「ファイル添付付き送信」)** / **@everyone・@here が効いたかを送信後に読み戻す** (下記 [`#mass-mention-silently-dropped`](#mass-mention-silently-dropped)) / `--selftest` 内蔵)。 **ad-hoc な curl / urllib を書く前にまずこれを使う。**
+
+## <a id="send-attachments"></a>ファイル添付付き送信 (= multipart/form-data)
+
+Discord API で message に**ファイル添付**を付けるには、 通常の `Content-Type: application/json` 単発 POST では**不能** (Discord は attachment part を認識しない)。 `POST /channels/{id}/messages` を **`multipart/form-data`** で送る必要がある:
+
+```
+Content-Type: multipart/form-data; boundary=<BOUNDARY>
+
+--<BOUNDARY>
+Content-Disposition: form-data; name="payload_json"
+Content-Type: application/json
+
+{"content": "本文", "allowed_mentions": {...}}
+--<BOUNDARY>
+Content-Disposition: form-data; name="files[0]"; filename="doc.pdf"
+Content-Type: application/pdf
+
+<binary bytes>
+--<BOUNDARY>--
+```
+
+`payload_json` part が message body (JSON)、 `files[i]` part が各添付 (i=0,1,...)、 その他 header 規則 (Authorization / User-Agent = 上記 §「User-Agent header 必須」) は JSON path と共通で multipart にも適用される (= UA 欠落は multipart でも Cloudflare 1010)。 参考: [Discord Docs — Uploading Files](https://discord.com/developers/docs/reference#uploading-files)。
+
+**canonical usage** = `discord-post.py --attach`:
+
+```bash
+python3 ~/Claude/claude-config/scripts/discord-post.py \
+  --token-file ~/.secrets/<bot-token> \
+  --channel <CHANNEL_ID> --content-file msg.txt \
+  --attach path/to/doc.pdf [--attach path/to/img.png ...] [--send]
+```
+
+- `--attach` は**繰り返し可** (順序保持で `files[0]`, `files[1]`, ... に割当)
+- 存在 check + size soft-warn (単ファイル > 25 MB = Discord unboosted cap `40005` を preflight で警告、 実 send は API 判断)
+- 既定 dry-run で attach path + size を pretty print、 承認後 `--send` で multipart 送信
+- filename の `"` は header injection 防止のため strip、 UTF-8 filename は Discord が accept する
+
+**Discord ファイルサイズ上限** (= `40005 Request entity too large`):
+- unboosted server + free user = **25 MB / file**
+- 一部 boosted server (level 2+) や Nitro 有効時は 50 MB〜 (= 実 send 時に channel/user 依存で判定される)
+- **多ファイル同時添付でも各ファイル単位で判定される** (合計サイズ cap は別 concern、 通常 100 MB 前後)
+
+⚠️ **本節を書く前は `discord-post.py` に `--attach` が無く**、 送信 session は raw curl / Python `requests` の multipart を毎回手書きしていた (2026-07-16 実測)。 canonical script に焼き込んだ (= §「User-Agent header 必須」 で hoist した design-out 原則を「添付」 領域にも適用)。 test = `scripts/discord-post.py --selftest` に multipart body 構築 + Content-Type header + boundary 閉じ + attachment bytes 含有 の 5 case を追加。
+
+## <a id="shown-draft-is-sent-file"></a>承認を取る下書きは、 送る file そのものを道具に出させる
+
+外部へ送る文面の承認は、 user が最後に見た版に対して出る。 chat に下書きを手で打ち直して見せると、 送る file と見せた版がずれる (実測: 直しの途中で chat の版から末尾の 1 段落が落ち、 file にはその段落が残ったまま送信の承認が出た)。
+
+- 直すたびに、 file を直してから `discord-post.py` の dry-run (または file の全文) をそのまま見せる。 chat の側で文面を組み立てない。
+  auto mode では `--send` の無い dry-run も外への書き込みと見なされて止まることがある (実測) = そのときは dry-run を別の形で通さず、 file の全文と添付の一覧と channel を chat に出して承認を取り、 承認の後に `--send` を 1 回打つ ([`claude-code-permissions.md#classifier-blocks-send-dry-run`](claude-code-permissions.md#classifier-blocks-send-dry-run))。
+- 送る直前の確認 (channel の新着を読む手) で file の全文も出し、 最後に見せた版と同じかを確かめる。 違っていたら送らずに見せ直す。
+- 一般の送信 (メール・投稿) でも同じ: 承認の対象は「送る file の中身」 で、 説明の文ではない。
+
+## <a id="mass-mention-silently-dropped"></a>@everyone / @here は権限が無いと黙って効かない (= 投稿の成功は通知の成功ではない)
+
+本文に `@everyone` / `@here` を書いても、 bot にその channel の **Mention Everyone** 権限 (bit `1 << 17`) が無ければ、
+Discord は投稿を受け付けたうえで**通知だけを落とす** (HTTP 200、 本文には文字列が残る)。 API は error を返さないので、
+「送れた」 の確認では気づけない。 全員に知らせたい告知ほどこの形で失敗する。
+
+- **確かめ方**: 投稿の応答 (`POST /channels/{id}/messages` の返り値) の `mention_everyone` が `true` か。
+  [`discord-post.py`](../scripts/discord-post.py) は本文に mass mention があると、 送信後にこれを読み、 立っていなければ警告して **exit 3** で終わる (dry-run でも前もって注意を出す)
+- **前もって確かめたいとき**: bot の member の role 権限を OR し、 channel の overwrite (`@everyone` role → bot の role → bot 本人の順に deny を落として allow を足す) を当てた結果に bit 17 があるか (`ADMINISTRATOR` なら全部あり)。 読むだけの API で済む
+- **足りなかったとき**: server の管理者が bot の role か channel の overwrite に Mention Everyone を足す。 足せないなら別の経路 (メール等) で知らせる
+- <a id="mass-mention-inherited"></a>**bot の role に付けていなくても効くことがある**: server の `@everyone` role 自体が Mention Everyone を持つ server では、 overwrite の無い channel で bot もそれを継ぐ。 上の権限表の「付けない」 は bot の role の話で、 その channel で効くかは計算で決まる。 運用の台帳に「中立」「付けていない」 とあっても「bot は @everyone を飛ばせない」 と読まず、 下の道具の 1 行で確かめる (実測: 台帳の「中立」 を「権限が無い」 と読み違え、 不要な権限付与を提案しかけた)
+- <a id="mass-mention-precheck"></a>**道具**: 上の事前の計算は [`discord-post.py`](../scripts/discord-post.py) が行う。 `--check` と、 本文に `@everyone` / `@here` がある dry-run が、 読むだけの API (channel / thread なら親 channel / guild の role / bot 本人の member) から `mass mention: ALLOWED` / `DENIED` を出す。 使い捨ての API script を書かずにこの 1 行を読む。 送信後の `mention_everyone` の確認 (exit 3) も残す (= 事前の計算は権限の読み違い、 事後の確認は Discord 側の実際を見る)
+- <a id="mass-mention-deny-for-leak"></a>**token が漏れたときに @everyone を飛ばさせないなら、 bot の role から外すだけでは足りない**: role の権限は足し算なので、 `@everyone` role が Mention Everyone を持つ server では bot の role から外しても残る。 止めるのは channel の overwrite で bot の role に deny を置く形 (overwrite の deny は `@everyone` role から来た分にも効く。 channel ごとに置くが、 category に置いて同期すれば配下の channel に効く) か、 `@everyone` role から外して必要な人の role にだけ付ける形。 置いた後は `--check` の 1 行が `DENIED` になるかで確かめる (実測: 被害の見積もりの返事で「bot の role から外せば」 と書いた = 足し算を忘れた形)
+
+## <a id="third-party-bot-breach-triage"></a>第三者の bot・連携 service が侵害されたと報じられたとき
+
+自分の server・自分の bot に影響があるかを、 次の順に確かめる。
+
+1. **何が破られたかを分ける** — platform 本体 / 第三者の bot・連携 service の運営側 / platform のサポート委託先。 見出しは「Discord で漏洩」 とまとめがちなので、 運営の報告・platform の声明・漏洩 DB の登録で主体を確かめる。 第三者の bot の侵害なら、 影響はその bot が入っている server と、 その bot の認証ページを通った利用者に絞られる
+2. **その bot が自分の server に居るか** — `discord-post.py --token-file <自分の bot の token> --member-probe <その bot の user id>` (読むだけ。 user id は bot の掲載ページや招待 URL の `client_id`)。 member の一覧は Server Members intent が無いと 403 / code 50001 で読めないが、 1 人を引く GET は通る。 404 / code 10007 だけを「居ない」 と読み、 道具は bot 自身を対照に引く (対照が present でない guild があれば exit 4)。 居ると分かっている他の member (別の bot・本人) も一度並べて present と出るのを見ると、 「居ない」 に重みが出る。 ⚠️ 見えるのは自分の bot が入っている server だけ = 本人が個人で入っている他の server は見えない
+3. **利用者の側** — 認証ページを通った人の ID・IP などは自分の bot からは分からない。 本人の account の登録アドレスに platform・運営からの通知が来ているかと、 漏洩 DB の照会 (Have I Been Pwned など。 1 アドレスの照会 API は有料の鍵が要ることが多いので、 本人が web で引く) で確かめる
+4. **自分の token への波及** — 他の bot の token が盗まれても自分の token は無関係。 一方「盗まれた token で入っている server に宣伝を流す」 は自分の bot にも起こる形 = 上の権限ポリシーと [#mass-mention-deny-for-leak](#mass-mention-deny-for-leak) で被害を絞る
+
+## Cloudflare 1010 error の鑑別: User-Agent vs 組織 NW egress filter
+
+`discord.com` への request が Cloudflare 1010 で reject されたら、 まず **どちらの原因か** を鑑別する:
+
+| 原因 | 切り分け方 | 対処 |
+|---|---|---|
+| **User-Agent header 欠落** | request header に上記 format の `User-Agent` を付けて再送 | header 修正で即解決 |
+| **組織 NW の egress filter** | UA を修正しても 1010、 別 NW (= 自宅 / モバイルテザリング) からだと通る | Bot operations を GitHub Actions / 自宅環境から実行する設計に倒す |
+
+順序が重要: **まず UA を疑う** (= 即修正可能、 NW 経路に責を着せる前に自分の request を直す)。 UA 修正で通れば NW は無罪。 通らなければ NW egress filter を疑い、 自宅 / GHA で再現テスト。 NW 起因と確定したら、 組織 NW で API 動作を当てにしない設計 (= 動かないのが default と考える)。
+
+## Developer Portal: application 名に AI provider 名を入れない
+
+Discord Developer Portal (= https://discord.com/developers/applications) で new application を作るとき、 **名前に "claude" を入れると create が拒絶される** (= 2026-06-20 user 報告 で観測、 odakin が `odakin-claude-secretary` で create 試行 → invalid)。 対処は名前から AI provider 識別子を抜く (例: `odakin-secretary`)。
+
+**推定メカニズム** (= 観測から逆算、 Discord 公式 docs に明文の AI 命名規約は確認できていない):
+- (a) Anthropic trademark policy への配慮 (= 「Claude」 は Anthropic の trademark、 Discord 側の自動 filter)
+- (b) 広義の AI provider 名 filter (= "openai" "gpt" "gemini" "anthropic" 等も同じ filter で reject される可能性、 個別 reproduce はしていない)
+
+**規律**: bot の **役割** に AI 駆動である事実を name で expose したい (= transparency) ケースでも、 application 名は AI provider 識別子を避けて命名する。 user-visible な「AI 駆動である」 announcement は bot の About 文 (Developer Portal の application Description field) や server 内 introduction post で代替する。
+
+## Developer Portal: Message Content Intent は **message content fetch 用途では必須**
+
+Discord Developer Portal の `Bot` page 下部に **`Privileged Gateway Intents`** という 3 toggle section があり、 default は全部 OFF:
+
+- `Presence Intent` — member の online status を receive
+- `Server Members Intent` — guild の member 一覧 + join/leave event を receive
+- **`Message Content Intent`** — message の **`content` field を REST + Gateway 両方で受け取る**
+
+2022 年 8 月の Discord 仕様変更で、 **`Message Content Intent` を OFF のままだと `GET /channels/{id}/messages` の response で全 message の `content: ''` (空文字) が返る** (= attachments / embeds / flags は普通に来るが本文だけ blank)。 bot 自身が mention された message と bot 自身が送信した message は intent 無くても content が返るが、 それ以外は不可視。
+
+**fetch bot (= <lab>-bot / qm-textbook-bot / odakin-secretary catch-all 等) では必須**: 1 個目の toggle (Message Content Intent) を ON、 Save Changes。 他 2 つ (Presence / Server Members) は OFF のまま (= 用途上不要、 blast radius 最小化)。
+
+100 server 未満なら toggle で即有効化可能 (= App Verification 不要)。 100 server 超え配布なら App Verification が要る (= 個人 bot は射程外、 上記 §「アプリ認証」 節参照)。
+
+**観測 (2026-06-20)**: odakin-secretary を作成 → 招待 → fetch 試行で 100 message 全 content が `''` だった。 原因 = step 1 の私の誤指示「Privileged Gateway Intents は全部 OFF のまま」 (= 当時「fetch は intent 不要」 と誤認)。 Save Changes 後の retry で content 取得確認。 過去の <lab>-bot / qm-textbook-bot 立ち上げ時にもこの toggle 操作は行われていたはずだが、 institutional knowledge として落ちていた (= 上記「アプリ認証」 節と同型の記録漏れ)。
+
+## Developer Portal: アプリ認証 (App Verification) は 100+ server 拡大用、 個人 bot は無視可能
+
+Discord Developer Portal の左 sidebar には **`アプリ認証`** (英: `App Verification`) という entry があり、 click すると未達 checklist に ⚠️ アイコンが並ぶ画面が出る (例: チーム所属 / ToS link / Privacy Policy link / 全メンバー 2FA)。 これは **「アプリケーションを 100 件を超えるサーバーに拡大する」** ための opt-in 認証で、 個人運用 bot (= 数 server に invite するだけの用途) では **完全に無関係 + 無視可能**。 ⚠️ アイコンは「100+ server 配布を目指すなら N 件足りない」 の pre-flight checklist の意味であって、 「bot が動かない」 ではない。
+
+**観測 (2026-06-20)**: odakin が `odakin-secretary` application 作成直後にこのページに行き当たり、「以前にも同じエラーを見た記憶があるが記録がない」 と flag。 検索の結果、 当 convention にも personal layer の `discord.md` にも記録なし = 過去 2 回の bot 作成 (<lab>-bot / qm-textbook-bot) の際に同 page を踏んでいたが institutional knowledge として落ちていた。 本節で記録化。
+
+**規律**:
+- Application 作成直後に sidebar `アプリ認証` を click しない (= 個人 bot 用途では用無し、 ⚠️ で動揺するだけ)
+- Token 発行は sidebar **`Bot`** (= `OAuth2` の 1 つ下) に直行
+- もし誤って `アプリ認証` page を開いて ⚠️ が並んでも、 そのまま閉じて `Bot` に移動して OK
+
+## <a id="bot-dm-surface"></a>Bot DM channel の未記録 message surface (= 死角の埋め方)
+
+Discord bot が **DM channel** で会話を受け取ると、 daily fetcher (= `GET /channels/{id}/messages` を回す cron) は JSON を更新し続けるが、 **読み手側に「未読返信が来た」 を知らせる surface 経路がデフォルトで存在しない**。 mail (= Gmail / IMAP) なら inbox / unread が natural surface だが、 bot DM の JSON は静かに更新されるだけで、 user は Discord 通知に気付くか chat client を能動的に開くかしないと catch できない。 これは fetch (= ingest) と surface (= 未処理を出す) が別物であるという §「複数 channel から data を fetch するときの error handling」 の延長で、 後者の不在は具体的な事故 (= 重要返信の長期放置) を生む。
+
+### 標準的な surface 構造 (= 2 段)
+
+**段 1 — daily fetcher** (既存):
+- bot Token + `GET /channels/{id}/messages` で各 channel (DM 含む) の message を JSON で保存
+- 出力命名規約: `discord_<channel_key>_dm.json` (= DM channel は **`_dm` suffix** で識別) を推奨。 普通の server channel は `_dm` を付けず `discord_<channel_key>.json` (= 区別が glob で取れる、 下記 engine の `--json-glob` default も `discord_*_dm.json`)
+- 取得先 repo は private + git-crypt 推奨 (= DM 内容は personal communication)
+
+**段 2 — surface engine** (= 本節で hoist):
+- JSON を読み、 bot 自身の send を除外、 user 側 ledger (= inbox/threads/notes 等の text/YAML record) に messageId が既に書かれているかで diff
+- 未記録 = CRITICAL surface (dashboard / SessionStart hook 経由)
+- 「読んだ」 ことを ledger に messageId 記録した瞬間 silent 化 = **intake で encode する原則**
+
+<a id="dm-snapshot-staleness"></a>⚠️ **surface が見るのは段 1 の最後の snapshot まで** = daily fetcher なら最大 1 日遅れる。 「Discord でも返事は来ていない」 と言う前に snapshot の取得時刻を見て、 相手に聞いたのがそれより後なら **fetcher を一時 dir に出力させて今の状態を読む** (実測: 朝の snapshot の後に届いた返事は、 surface にも JSON にも無かった)。 一時 dir にするのは、 cron が commit する snapshot を手で上書きしないため。 報告は「snapshot M/D HH:MM 時点」 か「今 fetch した」 かを添える。
+
+### Engine (layer 1): `scripts/surface-discord-bot-dm.py`
+
+汎用 CLI engine。 個別環境への依存ゼロ、 引数で全 config を渡す。
+
+```
+surface-discord-bot-dm.py
+    --bot-id <DISCORD_USER_ID>          # bot 自身の send を除外 (repeated, ≥1)
+    --json-dir <PATH>                    # daily fetcher の output 先
+    --ledger-dir <PATH>                  # messageId 記録 ledger の dir
+    [--json-glob "discord_*_dm.json"]    # JSON file pattern (default)
+    [--ledger-glob "*.yaml"]             # ledger file pattern (default)
+    [--counterpart <ID>:<NAME>]          # display name mapping (repeated 可)
+    [--title <TITLE>]                    # surface header title
+    [--selftest]                         # 内蔵 5 検証
+```
+
+検出 logic:
+- json-dir/json-glob 配下の各 JSON 内 message について:
+    - `author.bot == True` → skip
+    - `author.id ∈ --bot-id` → skip (= API field 不在時の明示 fallback)
+    - `message.id ∈ ledger 内で text として書かれた Discord snowflake (17-19 digit)` → skip
+    - 残り → 未記録 = surface
+
+⚠️ **ledger からの ID 抽出は regex (= snowflake 17-19 digit) で text を grep する loose match**。 user ID / channel ID も同 range だが Discord snowflake は globally unique なので message ID と collide せず、 false positive を harvest set に入れても harmless (= 不要 ID が混ざっても message ID の skip 漏れにならない、 skip 過剰のみ起きる)。
+
+### 個別環境への接続 (= layer 3 thin wrapper の template)
+
+各 user の personal layer に薄い wrapper を 1 つ置いて engine を呼ぶ:
+
+```python
+#!/usr/bin/env python3
+"""<bot-name> DM channel の未記録 message surface (thin wrapper)."""
+import subprocess, sys
+from pathlib import Path
+
+HOME = Path.home()
+ENGINE = HOME / "Claude" / "claude-config" / "scripts" / "surface-discord-bot-dm.py"
+
+BOT_IDS = ["<DISCORD_BOT_USER_ID>"]
+JSON_DIR = HOME / "Claude" / "<fetcher-output-repo>" / "src" / "_data"
+LEDGER_DIR = HOME / "Claude" / "<inbox-repo>" / "inbox"
+COUNTERPARTS = ["<USER_ID>:<DISPLAY_NAME>"]
+TITLE = "<bot-name> DM channel の未記録 message"
+
+args = [sys.executable, str(ENGINE)]
+for bid in BOT_IDS: args += ["--bot-id", bid]
+args += ["--json-dir", str(JSON_DIR), "--ledger-dir", str(LEDGER_DIR)]
+for cp in COUNTERPARTS: args += ["--counterpart", cp]
+args += ["--title", TITLE] + sys.argv[1:]
+sys.exit(subprocess.call(args))
+```
+
+`unified-dashboard.py` 等から呼ぶ (= 標準の subprocess pattern)。 layer-1 engine 不在時は wrapper が silent 0 exit (= dashboard 連鎖を止めない) するのが堅牢。
+
+### 効果限定 (= 正直 framing)
+
+- **latency 最大 = daily fetcher の cron 周期** (= 即時 push は別機構が要る)
+- **ledger 記録規律が前提** (= 「読んだ」 を ledger に messageId として encode しない限り、 同じ message を surface し続ける)
+- **fetcher 側の access path 必須** (= git-crypt unlock 等)
+- **bot ID の手動追加** (= 新規 bot 採用時は wrapper の BOT_IDS に追記)
+
+### 設計の参照点
+
+- fetcher 側 (= 段 1) の non-fatal error handling = 上記 §「複数 channel から data を fetch するときの error handling」
+- ledger に何を書くかは personal layer own preference (= ledger format は text/YAML どれでも snowflake が grep できれば OK)
+- 「intake で encode する原則」 (= 「読んだ」 を text に書く discipline) は inbox / email surface 全般に共通する設計指針
+
+## <a id="group-call-mentions"></a>グループへの呼びかけ: 個別 mention・宛名の行・ID の引き方
+
+募集・希望集め・締切つきの問い合わせを server に出すときの規律。
+
+1. **@everyone でなく、 宛てたい人を個別に mention する**。 @everyone は全員の前提が変わる事実のためのもので、 bot の標準権限にも含めていない (上の権限表)。 募集や意見集めは対象者を並べる。
+2. **mention していない人にも読んでほしい一言は、 mention を並べた行に書く**。 通知や一覧のプレビューに出るのは先頭だけなので、 本文の途中に「〇〇の人もどうぞ」 と書いても、 mention されていない人は開かない。
+3. **user ID を推測で入れない** (= 表示名は変わり、 ユーザー名は本名と無関係なことが多い。 間違った ID は ping が黙って届かないだけで、 投稿は成功する)。 取得済みの message log から、 根拠の強い順に引く:
+   - ① 本人の自己紹介 (「〜です」) や名札の投稿
+   - ② 他のメンバーが名前と並べてその ID を mention した投稿
+   - ③ ユーザー名・表示名の一致 (弱い。 本人確認前として扱い、 記録にもそう書く)
+
+   道具 = [`scripts/discord-member-lookup.py`](../scripts/discord-member-lookup.py) `find <名前> --alias <別表記> <log...>`。 ⚠️ 「`<@相手>` への挨拶に続けて自分が名乗る」 投稿では、 名前と mention が隣り合っていても名前は**投稿者本人**のもの (= 挨拶の相手に付けると誤帰属する。 script はこの形を本人の自己紹介として扱う)。 引いた ID は根拠と一緒に owner の private な ID 表に記録する (= 次は表から引く)。
+4. **投稿直前の新着確認は、 送信と別のコマンドで行う** (`discord-post.py --recent N` → 結果を読む → `--send`)。 1 つのコマンドに束ねると、 新着を読む前に投稿が出る。 文面を直した後の再承認も同じで、 前の承認は直す前の文面に対するもの。
+
+## <a id="webhook-personas"></a>Webhook persona: bot 1 体で複数の「社員」 を演じる (2026-09-08)
+
+役割ごとに bot (application + token) を立てると、 token・招待・権限が役割数だけ増える。 **channel に webhook を 1 本作り、 execute 時に `username` (と `avatar_url`) を message ごとに切り替える**と、 読み手には別々の名前の社員が返事しているように見える。 組織図 (部 = category、 課 = channel、 係 = persona) を YAML に書き、 [`scripts/discord-org-build.py`](../scripts/discord-org-build.py) が category / channel / webhook を冪等に生成する。 使い分けと限界:
+
+- **要る権限**: webhook 作成は `MANAGE_WEBHOOKS` (0x20000000)。 標準の posting セット (invite `permissions=2248473465835089`) には**含まれない** → その server だけ Manage Webhooks を足して再認証 (`2248474002706001`)。 401/403 `Missing Permissions` (50013) はこれ。
+- **webhook message は reply (`message_reference`) が使えない** → 本文だけで文脈が分かる形 (題・伝票 id を含める) にする。 逆に webhook message への **reaction は bot が読める** (`GET /channels/{c}/messages/{m}/reactions/{emoji}`) ので、 ✅ を人間の受領信号に使える。
+- persona はメンバーではない (= @mention 不可、 DM 不可、 メンバー一覧に出ない)。 それが要る役割だけ本物の bot に昇格する (組織図はそのまま、 出口の token を差し替える)。
+- 上限: webhook は channel あたり 15 本。 1 channel 1 webhook + username 切替なら実質無制限。
+- webhook token = その channel への投稿権そのもの。 bot token と同じ扱い (git-crypt 経路、 chat / 平文 repo に貼らない、 file は 0600)。
+- channel topic には**禁止語 filter** がある (`50035 CHANNEL_TOPIC_INVALID: Field contains at least one word that is not allowed`)。 どの語かは返らない → 短く言い換える。
+
+instance (組織図 YAML / ids / 人名) は owner の private layer。 一般則の側 = [`multi-session-coordination.md#chat-board-bridge`](multi-session-coordination.md#chat-board-bridge) 原則 6。
+
+## <a id="channel-as-ledger"></a>外の新着を channel に中継するとき、 書いたかどうかは channel 自体に持たせる
+
+外の service の新着 (コメント・レビュー・通知) を定期 job が channel に書く形。 書いたかどうかの状態を repo にも機械にも持たず、 channel の投稿に持たせる。
+
+- **印**: 投稿の最後の行々に `-# id: <経路>:<id>` (Discord の `-# ` は小さい字で出る)。 1 通に印を複数置ける (後から組になった知らせの印を足す)
+- **読む**: 次の回は channel の履歴を読み、 **bot 自身の投稿の、 行頭の印だけ**を数える。 人が書いた印と、 引用 (`> `) の中の印は数えない = 外から来た本文に印を仕込まれても騙されない
+- **止める**: 履歴を読めない回はその channel に何も書かない (読めないまま書くと、 前に書いたものを全部書き直す)。 1 回に書く件数に上限を置く (印の読み違いで洪水にしない)
+- **利点と限界**: 動かす機械が替わっても二重に書かない (状態が channel にある)。 人がその投稿を消すと、 次の回にまた書く
+- **書き方**: `allowed_mentions: {"parse": []}` で誰も名指ししない (外から来た本文に `@everyone` があっても鳴らない = [#mass-mention-silently-dropped](#mass-mention-silently-dropped) の逆向き)、 `flags: 4` (SUPPRESS_EMBEDS) でリンクの埋め込みを出さない。
+  後から分かったこと (別の経路の知らせ) は `PATCH /channels/{c}/messages/{m}` で同じ投稿に足す = 編集は通知を鳴らさない。 本文の行は最初の印の前に足し、 印は最後に足す (実測: 書く → 追記 → 3 回目は何もしない、 を試しの channel で確かめた)
+- bot が channel や category を作るには Manage Channels が要る (標準の posting の権限の組に入っている)
+
+## <a id="scheduled-reminder-from-sources"></a>人が保つ出どころから、 bot が定期の案内 (前日の知らせ) を出すとき
+
+会の担当表・予定表・世話役の案内メール・channel の「次回は…」 の投稿のような、 人が手で保つ出どころを読んで、 bot が開催の前日に案内を出す形。 出どころは人が直すたびに遅れて揃うので、 揃っていない日に送らない線が要る。 [#channel-as-ledger](#channel-as-ledger) との違い = あちらは外の新着の中継で、 書いたかどうかを channel の印に持たせる。 こちらは送るかどうかが人の出どころに依るので、 送った記録と止める線を持つ。
+
+- **送る文は出どころの値を型に入れるだけ** — 人が書いた句は語を変えずに写す。 紹介の 1 文を AI に書かせるなら、 渡す材料 (題・要旨・世話役の文) を決め、 材料に無いことを書かせない指示と形の検査 (1 行・長さ・URL や mention が無い) を通った文だけを使い、 文と材料 (id・hash) を送った記録に残す。 送る日より前に書いて cache すると、 試しの実行で見せた文と送る文が同じになる
+- **止める線 = 休み・変更の語とその日の日付** (M/D、 前日の投稿なら「明日」) が同じ投稿にあれば、 送らずに人に知らせる (送るのは人の「送って」 の後)。 個人の「欠席」 は語に入れない (一人の欠席の連絡で会ごと止めない)。 世話役の台帳に変更の日付が書いてあれば、 その日より前の投稿は反映済みとして止めない (実測: 担当の交換を頼む投稿は、 交換が台帳に入った後も日付と変更の語を持ち続ける = 見ないと交換した 2 回分を止めた)。 1 つの channel に会が 2 つあるなら、 会の名を含む投稿はその会だけに、 含まない投稿は両方に効かせる
+- **出どころどうしの食い違いも止める** (世話役のメールの担当・題・日付と台帳、 「次回」 の投稿の時刻・曜日と予定表、 世話役の返信)。 読めない出どころがあれば送らない
+- **二重に送らない** — 送った記録に加えて、 送る直前に channel を読み、 前日以降にその会の案内 (会の名と日付か「明日」) があれば、 誰の投稿でも出さずに記録する (人が手で出した分を拾う)。 同じ日・同じ channel に会が 2 つあれば 1 通にまとめる (mention を 2 回鳴らさない)
+- **送った後も見る** — 当日の回でもう一度止める線を当て、 送った後に出た休み・変更の知らせを人に出す。 訂正の投稿は自動で出さない
+- **有効にする前に過去の流れに当てる** — 過去の数週間の各日を、 その時刻までの投稿・メールだけを見て空回しし、 送る日・止める日・本文を確かめる。 止める語の一覧と「反映済み」 の扱いは、 実際の流れに当てて、 止めるべき日だけが止まるのを見てから決める
+
+## <a id="guild-creation-user-only"></a>Bot は server (guild) を作れない = 器は人間が作る
+
+`POST /guilds` は bot token では **`20001 Bots cannot use this endpoint`** (実測、 在席 5 guild の bot でも不可 = 「10 guild 未満なら可」 は効かない)。 手順は **user が UI で server を作る → invite URL で bot を入れる**。 その後は invite 時の `MANAGE_CHANNELS` で category / channel / webhook (要 Manage Webhooks) を bot が全部作れる。 screen drive (browser 拡張 / computer-use) で代行しようとしない = user の 1 分の手作業が最短 (machine-route-first.md の ladder で「user 依頼」 が「画面 drive」 の上にある実例)。
+
+## 関連
+
+- `identity-in-config.md`: Discord user ID 等を config に書くときの PII レイヤ判定
+- `mcp.md`: MCP 経由の Discord 連携を組む場合 (現状は Discord 用の標準 MCP がないため Bot Token + curl/SDK の直接 API call が一般的)

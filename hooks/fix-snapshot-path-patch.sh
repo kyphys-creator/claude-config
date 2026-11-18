@@ -1,6 +1,7 @@
 #!/bin/zsh
+# fix-snapshot-path-patch.sh — PATH スナップショット自動パッチ（REQUIRED_PATHS 方式、launchd WatchPaths から呼ばれる）
 # Claude Code のシェルスナップショットの PATH を自動パッチ
-# launchd WatchPaths から呼ばれる（~/.claude/shell-snapshots を監視）
+# launchd WatchPaths から呼ばれる（設定フォルダごとの shell-snapshots を監視 = scripts/install-snapshot-path-fix.sh が plist を作る）
 #
 # 問題: Claude Code がスナップショット生成時に shell init を走らせるが、
 # .zprofile の brew shellenv 二重実行等で PATH が不完全になることがある。
@@ -18,15 +19,27 @@ sleep 1
 # subshell で cd してから ls することで basename だけ扱う:
 # フルパスを sort -t- すると親ディレクトリの "shell-snapshots" の '-' で
 # フィールドがずれて -k3 が zsh を指してしまうため。
-SNAPSHOT_DIR="$HOME/.claude/shell-snapshots"
+#
+# snapshot は設定フォルダごとに作られる: ~/.claude と、 CLAUDE_CONFIG_DIR で分けた ~/.claude-<name>。
+# ~/.claude だけを見ると、 分けた設定フォルダの session の Bash は Homebrew 等の PATH を欠いたまま動く
+# (正本 = conventions/shell-env.md#snapshot-fix-per-config-dir)。
+# bash の構文でも読める形で書く (CI の bash -n が全 shell script に掛かる = zsh 固有の glob 修飾子は使わない)。
+setopt null_glob 2>/dev/null
+SNAPSHOT_DIRS=("$HOME/.claude/shell-snapshots")
+for d in "$HOME"/.claude-*/shell-snapshots ${CLAUDE_CONFIG_DIR:+"$CLAUDE_CONFIG_DIR/shell-snapshots"}; do
+  [ -d "$d" ] || continue
+  case " ${SNAPSHOT_DIRS[*]} " in *" $d "*) continue ;; esac
+  SNAPSHOT_DIRS+=("$d")
+done
 SNAPSHOT_KEEP=20
-if [ -d "$SNAPSHOT_DIR" ]; then
+for SNAPSHOT_DIR in "${SNAPSHOT_DIRS[@]}"; do
+  [ -d "$SNAPSHOT_DIR" ] || continue
   (cd "$SNAPSHOT_DIR" && ls -1 snapshot-*.sh 2>/dev/null) \
     | sort -t- -k3 -nr \
     | tail -n +$((SNAPSHOT_KEEP + 1)) \
     | sed "s|^|$SNAPSHOT_DIR/|" \
     | xargs rm -f 2>/dev/null
-fi
+done
 
 # 必須 PATH エントリ（存在チェックして追加）
 # Intel Mac (/usr/local) と Apple Silicon (/opt/homebrew) の両方を列挙。
@@ -37,20 +50,36 @@ fi
 #   1. システム特殊 (X11, TeX) → 配列の前 = PATH の末尾近く
 #   2. brew (homebrew/local) と Python 系 → 配列の中
 #   3. ユーザー個人 bin (~/.local/bin) → 配列の最後 = PATH の頭
+#
+# brew の 2 つの prefix は、 この Mac の arch に合う側を後ろ (= PATH の前) に置く。
+# Intel から移行した Apple Silicon 機の /usr/local には Intel 版の CLI が残りうるので、
+# 固定順だと Intel 版が arm64 版を覆い隠す (正本 = conventions/macos-cpu-arch.md#homebrew-prefix-by-arch)。
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+  BREW_NATIVE=/opt/homebrew; BREW_OTHER=/usr/local
+else
+  BREW_NATIVE=/usr/local; BREW_OTHER=/opt/homebrew
+fi
 REQUIRED_PATHS=(
   "/opt/X11/bin"
   "/Library/TeX/texbin"
   "/opt/homebrew/opt/python@3.12/libexec/bin"
   "$HOME/Library/Python/3.9/bin"
   "$HOME/.npm-global/bin"
-  "/opt/homebrew/sbin"
-  "/usr/local/sbin"
-  "/opt/homebrew/bin"
-  "/usr/local/bin"
+  "$BREW_OTHER/sbin"
+  "$BREW_OTHER/bin"
+  "$BREW_NATIVE/sbin"
+  "$BREW_NATIVE/bin"
   "$HOME/.local/bin"
 )
 
-for f in ~/.claude/shell-snapshots/snapshot-*.sh; do
+SNAPSHOT_FILES=()
+for SNAPSHOT_DIR in "${SNAPSHOT_DIRS[@]}"; do
+  for f in "$SNAPSHOT_DIR"/snapshot-*.sh; do
+    [ -f "$f" ] && SNAPSHOT_FILES+=("$f")
+  done
+done
+
+for f in "${SNAPSHOT_FILES[@]}"; do
   [ -f "$f" ] || continue
 
   current_path=$(grep '^export PATH=' "$f" | sed 's/^export PATH=//' | sed 's/\\:/:/g')

@@ -1,6 +1,11 @@
+<!-- doc-meta
+when: PATH 消失・shell 環境変数まわりを触るとき + **user に貼り付けて実行してもらうコマンドを chat に書く瞬間** + **Claude が Bash tool で複数の対象を loop で走査する 1-liner を書く瞬間** (= zsh は未 quote の変数を単語分割しない、 `#claude-issued-shell-commands`) + **Bash tool の `grep -r` で網羅を主張する瞬間** (= ugrep として `.gitignore` を読む、 `#bash-tool-grep-ignores-gitignore`) + **変数の直後に `:` を書く瞬間** (= `"$c:path"` は zsh の修飾子になる) + **macOS の unified log を `log show` で読む瞬間** (= zsh の組み込みに取られる、 `#zsh-log-builtin`) + **同じ message に Bash を並べる瞬間** (= `cd` が効かず別の場所で走る、 `#same-message-bash-cd-dropped`) + **本人に Claude の入力欄の `!` で打ってもらう 1 行を渡す瞬間** (= 端末では履歴展開で別の command が走る、 `#bang-line-not-for-terminal`) (= 行内 `#` / `~` の zsh 固有罠。 コマンドを 1 行でも提示するなら該当)
+category: macos
+summary: シェル環境（PATH 二層防御: .zprofile 修正 + スナップショットパッチ、macOS deny ルール） + ユーザーに貼り付けさせるコマンドの zsh 固有罠 2 件 (= 行内 # はコメントにならない / `env VAR=~/x` は tilde 展開されず literal `~` dir が cwd 配下に生える、 どちらも bash では踏まない非対称。 framework は paste-destined-plain-text.md) + 受け手側の保険 = `.zshrc` に `setopt interactive_comments` (= 1 行で行内/行頭 # とも直るが、 提示先の環境を選べない以上 出し手の規律の代替にはならない) + Claude が発行するコマンドも zsh (= 未 quote の変数は単語分割されず、 cd 失敗後も loop が別の対象を走査して結果を返した 2026-09-11 の 2 件目で規約化。 対象の解決に失敗したら止め、 何を走査したかを印字する。 3 件目 = `"$c:path"` の `:s` が置換修飾子として残りを飲み込み別の object を表示した、 `${c}:path` と書く) + `#ambiguous-identifier-in-issued-commands` = 受け手は shell とは限らない — コマンドに埋める識別子が**受け手の別構文と一致**すると違う対象を指す (= short sha が全桁数字だと `git stash show <N>` が stash index と解釈。 確率的にしか落ちないので CI の flaky に化ける → test には性質そのものを固定する)
+-->
 # シェル環境（Claude Code + macOS）
 
-## 問題
+## <a id="path-loss-problem"></a>問題
 
 Claude Code（デスクトップ版）は起動時にシェルスナップショット（`~/.claude/shell-snapshots/`）を生成し、Bash ツール実行のたびにそれを source する。スナップショットには `export PATH=...` が含まれ、シェル init で設定した PATH がここで確定する。
 
@@ -26,7 +31,7 @@ Claude Code（デスクトップ版）は起動時にシェルスナップショ
 | `settings.json` の `env.PATH` | スナップショットが優先される |
 | LaunchAgent plist | 同上 |
 
-## 実態: 第2層が主対策 (2026-04-07 検証)
+## <a id="layer2-main-fix"></a>実態: 第2層が主対策 (2026-04-07 検証)
 
 当初は「第1層 (`.zprofile`/`.zshenv` 修正) で根治、第2層 (snapshot patch) は防御的措置」という設計だったが、Intel Mac での実証で **第1層は Claude Code Bash tool には届かない**ことが判明:
 
@@ -36,7 +41,7 @@ Claude Code（デスクトップ版）は起動時にシェルスナップショ
 
 **したがって実態は: 第2層 (snapshot patch) が Claude Code 用の主対策、第1層は terminal/login shell 用の補完**。以下の見出しでは「第1層 = 根本対策」と書いているが、これは「terminal 系での根治」の意味で、Claude Code には届かない。
 
-## 解決策: 二層防御
+## <a id="two-layer-defense"></a>解決策: 二層防御
 
 ### 第1層: `.zprofile` の修正（terminal 用の根本対策）
 
@@ -85,7 +90,7 @@ REQUIRED_PATHS リストで管理。各スナップショットをスキャン�
 
 **REQUIRED_PATHS の更新:** 新しいツール（例: Ruby, Go）をインストールしたら、スクリプトの REQUIRED_PATHS 配列に追加すること。
 
-**Intel Mac / Apple Silicon の両対応:** REQUIRED_PATHS には Apple Silicon の `/opt/homebrew/{bin,sbin}` と Intel の `/usr/local/{bin,sbin}` の **両方を併記**する。各エントリは `[ -d ]` で実在チェックされるので、該当しない側は自動的にスキップされ無害。Intel Mac で `/usr/local/bin` が抜けていると `jq` 等の brew インストール CLI が `command not found` になる事故が発生した（2026-04-07）。
+**Intel Mac / Apple Silicon の両対応:** REQUIRED_PATHS には Apple Silicon の `/opt/homebrew/{bin,sbin}` と Intel の `/usr/local/{bin,sbin}` の **両方を併記**する。各エントリは `[ -d ]` で実在チェックされるので、該当しない側は自動的にスキップされ無害。Intel Mac で `/usr/local/bin` が抜けていると `jq` 等の brew インストール CLI が `command not found` になる事故が発生した（2026-04-07）。**並び順は機械の arch で決める** (判定の仕方 = [`macos-cpu-arch.md#detect`](macos-cpu-arch.md#detect)。 Apple Silicon 機なら `/opt/homebrew` を、 Intel 機なら `/usr/local` を PATH の前に): Intel から移行した Apple Silicon 機の `/usr/local` には Intel 版の CLI が残りうるので、 固定順だと Intel 版が arm64 版を覆い隠す (実測)。 dotfile 側の書き方と移行で壊れるものの一覧 = [`macos-cpu-arch.md`](macos-cpu-arch.md)。
 
 **post-merge hook での即時反映:** REQUIRED_PATHS を更新して `git pull` した場合、新規スナップショットは launchd WatchPaths が捕捉するが、**既に生成済みのスナップショットには反映されない**。post-merge hook (`setup.sh` Step 4 で生成) が pull 後に `fix-snapshot-path-patch.sh` を一度実行することで既存スナップショットも即時更新される。
 
@@ -95,9 +100,20 @@ REQUIRED_PATHS リストで管理。各スナップショットをスキャン�
 
 **snapshot bloat 対策:** Claude Code は古いスナップショットを削除しないので無限に蓄積する。patch script 冒頭で **最新 20 個だけ保持**する cleanup ロジックを実行する。判定はファイルの mtime ではなく**ファイル名に埋め込まれた unix_ms** (`snapshot-zsh-<unix_ms>-<random>.sh`) を使う — patch script 自身が書き換えで mtime を更新してしまうため。sort は subshell `cd` で basename だけを対象にする (フルパスだと親ディレクトリ名 `shell-snapshots` の `-` でフィールド分割がずれて壊れる)。
 
+<a id="snapshot-fix-per-config-dir"></a>**設定フォルダを分けた session の snapshot も直す:** snapshot は設定フォルダ (`CLAUDE_CONFIG_DIR`、 例 `~/.claude-<name>`) ごとの `shell-snapshots/` に作られる。 修正係が `~/.claude/shell-snapshots` しか見ていないと、 分けた設定フォルダの session の Bash には Homebrew の bin と `~/.local/bin` が無いままになる (実測 = `gh` と `git-lfs` が見えず、 LFS の pre-push が `This repository is configured for Git LFS but 'git-lfs' was not found on your path` を出して push を止めた)。 同じ session の中でも新しく起こした `zsh -c` では `.zshenv` が PATH を揃えるので、 shell の設定を見ても異常が見えず見落としやすい。 確かめ方 = 設定フォルダごとに最新の snapshot の `export PATH=` 行に brew の bin があるかを見る (Apple Silicon の例、 0 の行が直っていない):
+
+```bash
+for d in ~/.claude ~/.claude-*; do s=$(ls -t "$d"/shell-snapshots/snapshot-*.sh 2>/dev/null | head -1); [ -n "$s" ] && echo "$d $(grep -c /opt/homebrew/bin "$s")"; done
+```
+
 #### launchd エージェント
 
-`~/Library/LaunchAgents/com.user.claude-snapshot-fix.plist`:
+`~/Library/LaunchAgents/com.user.claude-snapshot-fix.plist` は [`scripts/install-snapshot-path-fix.sh`](../scripts/install-snapshot-path-fix.sh) が作る (手で書かない)。
+WatchPaths には `~/.claude` と `~/.claude-<name>` (settings.json・`projects/`・`shell-snapshots/` のどれかを持つ dir) の `shell-snapshots` を全部並べ、
+今の plist と中身が違うか agent が読み込まれていないときだけ入れ直して、 修正係を 1 回走らせる (揃っていれば何もしない)。
+呼び元は setup.sh Step 2b と `scripts/sync-hook-settings.sh` (setup.sh・pull の post-merge・個人層の session 開始の bootstrap から呼ばれる) なので、
+設定フォルダを新しく作っても次の session 開始か pull で見張りに入る。 揃っているかの確認 = `bash scripts/install-snapshot-path-fix.sh --check`。
+できる plist の形 (設定フォルダが 2 つある機械なら WatchPaths の `<string>` が 2 行になる):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -111,6 +127,7 @@ REQUIRED_PATHS リストで管理。各スナップショットをスキャン�
     <array>
         <!-- plist は $HOME を展開しない。フルパスで記述する -->
         <string>/Users/YOUR_USERNAME/.claude/shell-snapshots</string>
+        <string>/Users/YOUR_USERNAME/.claude-work/shell-snapshots</string>
     </array>
     <key>ProgramArguments</key>
     <array>
@@ -120,9 +137,7 @@ REQUIRED_PATHS リストで管理。各スナップショットをスキャン�
 </plist>
 ```
 
-`launchctl load ~/Library/LaunchAgents/com.user.claude-snapshot-fix.plist` で有効化。
-
-## macOS システムコマンドの deny ルール
+## <a id="macos-deny-rules"></a>macOS システムコマンドの deny ルール
 
 settings.json の `deny` に以下を設定し、破壊的な macOS システムコマンドをブロックする:
 
@@ -137,3 +152,279 @@ settings.json の `deny` に以下を設定し、破壊的な macOS システム
 `Bash(*)` パターンはコマンド文字列全体にマッチするため、文字列中に含まれるだけでもブロックされる。正当な用途（grep 等）は専用ツール（Grep, Read）で代替可能なので実害なし。
 
 **背景:** `tccutil reset Calendar` を実行して全アプリのカレンダー権限が消失する事故が発生（2026-04-03）。PreToolUse フックの `exit 2` ではブロックできなかったため、deny ルールで対応。
+
+## <a id="no-inline-comments-in-pasted-commands"></a>ユーザーに渡すコマンドに行内 `#` コメントを付けない (zsh)
+
+macOS の既定 shell は zsh (= 本節と次節は「貼り付け先が terminal のとき」 の ① authoring 規律。 framework 全体 = [paste-destined-plain-text.md #same-framework-other-paste-targets](paste-destined-plain-text.md#same-framework-other-paste-targets))。 **interactive zsh は `interactive_comments` が既定で OFF** なので、対話プロンプトに貼り付けた行の `#` は**コメントにならない** — `#` 以降が glob 修飾子や `claude` 等への余計な引数として解釈され、 コマンドが壊れる / 誤動作する。 bash の interactive は同オプションが既定 ON なので bash ユーザーは平気 = これは zsh 固有の罠 (= macOS 既定 shell なので最も踏みやすい)。
+
+→ **Claude が「ターミナルで実行して」 とユーザーにコマンドを提示するときは、 行内 `#` コメントを付けない**。 説明はコマンドの前後に**散文**で書く。
+
+✅ 安全 (説明は散文、 コマンドは素のまま):
+
+```sh
+CLAUDE_CONFIG_DIR="$HOME/.claude-alt" claude auth login
+```
+（↑ ブラウザで alt アカウントにサインイン、 のように説明はコマンドの外に出す）
+
+❌ 壊れる (貼り付けると `#` 以降が `claude` への余計な引数 / glob になる):
+
+```sh
+CLAUDE_CONFIG_DIR="$HOME/.claude-alt" claude auth login   # alt にサインイン
+```
+
+例外: **script ファイル内**の `#` は常にコメント (= 非対話 parse なので問題ない)。 本ルールは「ユーザーが対話プロンプトに貼り付ける用に提示するコマンド」 にのみ適用。 ユーザーが `setopt interactive_comments` を `.zshrc` に入れていれば行内 # も通るが、 提示側は「既定 OFF + 環境差」 を前提にできないので、 常に行内 # なしで出す。
+
+### 実測 (2026-09-09、 pty 上の対話 zsh で再現) — 3 つの補強
+
+**(1) 決定的であって確率的でない。** 「短い注釈なら」 「ASCII だけなら」 「1 行だけなら」 は全部誤り。 貼れば必ず argv に化ける:
+
+| 提示した行 | 対話 zsh が実際に渡す argv |
+|---|---|
+| `git status <SP><SP>#<SP>"rebase in progress"` | `[status, #, rebase in progress]` |
+| `git rebase --continue<SP><SP>#<SP>todo 残り 0 なので完了` | `[rebase, --continue, #, todo, 残り, 0, なので完了]` |
+
+2 行目は `git rebase` が余計な引数で **usage error** になって停止し、 続く `git push` が detached HEAD のまま走って `fatal: You are not currently on a branch.` を出した (= 注釈が原因で 2 段の失敗になる典型)。
+
+**(2) 行頭 `#` の単独行でも壊れる。** 「注釈を独立行に逃がせば安全」 は成り立たない — 対話 zsh は `#` をコマンド名として探し `zsh: command not found: #` を出す。 実害は小さい (= その行が失敗するだけ) が、 **エラー出力が増えて本物の失敗を覆い隠す**。 ∴ 貼り付け用ブロックは **`#` を 1 文字も含めない**。
+
+**(3) 第一選択は「注釈を消す」 でなく「script 経路にする」。** 説明を書きたい欲求と貼り付け安全性は**両立できる** — script ファイル内の `#` は正しくコメントになるので、 2 行以上 or quote/glob を含むなら **script を書いて起動 1 行だけを渡す**。 注釈を捨てずに済み、 quote 崩れ・行の取りこぼし・部分実行も同時に消える (= [machine-route-first.md](machine-route-first.md#route-ladder)「経路を先に作る」 の最小 instance)。
+
+```sh
+sh "$HOME/Claude/<repo>/scripts/fix-rebase.sh"
+```
+
+⚠️ **この失敗は Claude 自身の道具では原理的に観測できない**: Claude の Bash tool は**非対話** zsh なので `#` が正しくコメントとして効く。 Claude は日常的に「`#` は動く」 という体験だけを蓄積し、 壊れる場面は「user の対話プロンプト」 = 自分が一度も立ち会えない場所にしかない。 ∴ **自分の実行経験を根拠にしてはならない**規約 class (= 経験的反証が構造的に得られない)。 とくに **Claude が Bash を失っていて user に手打ちを頼む状況**でこそ発火すべきなのに、 その状況は認知負荷が高く規律が緩む — 発火条件と緩み条件が一致する悪い形をしている。
+
+### 受け手側の保険 — `.zshrc` に `setopt interactive_comments` を 1 行
+
+上は**出し手 (= コマンドを提示する側) の authoring 規律**だが、 **受け手 (= 貼る側) にも 1 行で効く保険**がある。 zsh を対話で使う人は `~/.zshrc` に入れておくとよい:
+
+```sh
+setopt interactive_comments
+```
+
+実測 (2026-09-09、 pty 対話 zsh): これで**行内 `#` も行頭 `#` も正しくコメントになる** (= 事故行 `git rebase --continue  <SP><SP>#<SP>…` が argv `[rebase, --continue]` に復帰、 行頭 `#` の `command not found: #` も消える)。 bash の既定挙動に揃うので、 bash から来た人の直感とも一致する。
+
+⚠️ **保険が入っても出し手の規律は緩めない** (= 二重防御であって代替ではない)。 理由:
+
+1. **提示したコマンドは提示先の環境を選べない** — 別マシン・別ユーザー・同僚への転送・issue への貼り付け・CI の再現手順に流れる。 `.zshrc` は**その 1 台の 1 ユーザーにしか効かない**
+2. **sibling の `~` 罠は直らない** (= `magicequalsubst` は別オプション、 次節)。 「貼り付けコマンドの罠」 は `#` だけではない
+3. **script 経路の利点は `#` 以外にもある** — quote 崩れ・glob 展開・行の取りこぼし・部分実行は `interactive_comments` では 1 つも直らない
+
+∴ 保険は「事故の最後の 1 枚」 であって、 第一選択は依然 §「実測 (3) 第一選択は script 経路」。
+
+機械 backstop: Stop hook [`hooks/pasted-command-comment-guard.sh`](../hooks/pasted-command-comment-guard.sh) が「貼り付け指示語 ∧ fence 内の `#` (実行系コマンド行の行内 `#` か、 行頭 `#` の行)」 で block する (= `setup.sh` が Stop に登録、 selftest = 同名の `.test.sh`)。 言語名なし・未知の言語名の fence は、 実行系の行 (既知のコマンド語・`VAR=値` の前置・path の起動・`$ ` の prompt・語 + flag) を 1 行も持たなければ見ない = 別の場所に貼る文面 (SNS の投稿文・メールの文面) の行頭 `#` (ハッシュタグ・見出し) を拾わない (実測: 投稿文の末尾のハッシュタグの行を止めた)。 shell の言語名の fence は全部の行を見る (次の段落)。 日本語 cue は 2026-07-22..09-09 の 49 日 transcript で校正済 (真陽性 3 / FP 0)、 **英語 cue は推定なので FP 監視対象**。 ⚠️ Claude Code desktop は hook の model 向け出力を honor しないと観測されていた ([hook-authoring.md](hook-authoring.md#frontend-dependent-cowork)。 2026-09-11: 少なくとも一部は root 限定の `disableAllHooks` が原因 = [#disableallhooks-kill-switch](hook-authoring.md#disableallhooks-kill-switch)) ので、 desktop で効く保証は無い — desktop 側の floor は本規約と script 経路の既定化。
+
+<a id="file-content-not-in-shell-fence"></a>**実行させない code (file の中身・差分・review に見せる script) は shell の言語名の fence (`bash` / `sh` / `zsh`) に入れない**: desktop app は shell の fence に Run ボタンを付け、 上の Stop hook も shell の fence の中を貼り付けるコマンドとして読む (実測: hook の案の全文を `bash` の fence で見せ、 冒頭の `#` comment で止められた)。 新しい file の全文は `diff` の fence に `+` 行で、 または `text` の fence で見せ、 file への link を添える (言語名なしの fence も、 中に実行系の行があれば hook は貼るコマンドとして読む)。 貼って実行させる command だけを shell の fence に入れる。 別の場所に貼る文面 (SNS の投稿文・メールの文面) は、 言語名なしか `text` の fence に入れる (実行系の行を持たない言語名なしの fence を hook は見ない)。
+
+## <a id="no-tilde-in-pasted-commands"></a>ユーザーに渡すコマンドに `~` を書かない (zsh は `env` 前置で展開しない)
+
+上の兄弟ルールと同じ「zsh 固有 × 貼り付け用コマンド」 の罠。 zsh は **assignment prefix** (`VAR=~/x cmd`) なら tilde を展開するが、 **`env VAR=~/x cmd` では展開しない** (= コマンド引数中の `=` 以降を tilde 展開する `magicequalsubst` が既定 OFF)。 bash は同等挙動が既定 ON で両方展開するため、 bash で書いて zsh で壊れる非対称になる。
+
+展開されないと `~` が **literal な dir 名**として使われ、 cwd 配下に `./~/…` が生える。 とくに設定 dir を渡す env var (`CLAUDE_CONFIG_DIR` 等) だと、 **誰も見ない場所に状態が書かれる一方で本物の `~/…` は空のまま** = 「認証したのに効いていない」 「設定が反映されない」 という debug しにくい症状になり、 生えた `./~/` は後続の tree scan にも noise として残る。
+
+→ **ユーザーに提示するコマンドでは `~` を使わず `"$HOME/…"` (or 絶対パス) を書く**。 危険が顕在化するのは **`env -u FOO …` のような prefix を足す瞬間**: prefix を足す側は既存の `~` 表記をそのまま残すので、 その 1 手で silent に壊れる。
+
+✅ 安全 (どんな prefix を足しても壊れない):
+
+```sh
+env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR="$HOME/.claude-alt" claude auth login
+```
+
+❌ 壊れる (`env` 前置で `~` が literal → `<cwd>/~/.claude-alt/` が生える):
+
+```sh
+env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=~/.claude-alt claude auth login
+```
+
+**背景 (2026-07-02)**: alt アカウント用 config dir の初回 auth 手順で、 script 自身は絶対パスを印字していた (= script は正しかった) のに、 chat に手順を書き直す段で `~` 表記へ置き換え + `env -u ANTHROPIC_API_KEY` 前置を併記した。 ユーザーがそれを貼って 3 コマンド実行 → `$HOME/~/` と `<base>/~/` の 2 箇所に literal `~` dir が生成され、 6 MB の空 config dir が 4 週間残置した (= 本物の dir は別途正しい手順で auth し直して復旧)。 **script が正しくても chat での書き直しで壊れる** = 提示する文面そのものが検査対象 (= 共通 kernel と他 domain の instance は [paste-destined-plain-text.md #same-framework-other-paste-targets](paste-destined-plain-text.md#same-framework-other-paste-targets)、 4 週間気付かれなかった構造は [debugging-discipline.md #recovery-ends-investigation](debugging-discipline.md#recovery-ends-investigation))。 検出は `find "$HOME" -maxdepth 4 -name '~' -type d`。
+
+### <a id="claude-issued-shell-commands"></a>scope の拡張 — Claude が Bash tool で発行するコマンドも zsh (2026-07-30 に 1 件目、 2026-09-11 の 2 件目で規約化)
+
+本節と兄弟節の scope は当初「**user に貼り付けさせる**コマンド」 に限定していた。 だが同じ「**zsh の pattern/parse semantics が bash 前提の想定と違う**」 class は、 **Claude 自身が Bash tool で発行するコマンド**にも及ぶ。 1 件目 (2026-07-30、 上記 incident の検証中):
+
+```sh
+l="pre(post)"; print -r -- "${l##*(}"    # zsh: bad pattern: *(  /  bash: post)
+l="pre(post)"; print -r -- "${l##*\(}"   # zsh でも通る (= ( を escape)
+```
+
+`##` の pattern 内の `(` を zsh は glob 構文として厳しく parse する (= bash は literal 扱い)。 兄弟 2 節と同じ非対称 (bash で書いて zsh で壊れる) だが、 **貼り付けを経由せず Claude 自身の 1 コマンドが失敗するだけ**なので事故 mode が違う (= 即 error・実害なし。 上記 1 件は同 turn に python で書き直して完了)。
+
+**当初 (n=1) は規約化しなかった** (= 「incident 無しで規約を書かない」)。 **un-defer trigger = 同 class の 2 件目** — Claude 自身が発行した shell コマンドが zsh 固有 semantics で壊れる事例を再度観測したら、 本 family の scope を「貼り付け用」 から「Claude が発行する全 shell コマンド」 へ広げる判断に入る (= 現状は「pattern を含む 1-liner は python で書く」 が実務上の回避策で、 規律化する価値があるかは 2 件目まで保留)。 症状 token: `bad pattern:` (= 観測済)、 `no matches found` (= **2026-09-12 に観測、 規則 10 へ**)、 近縁で未観測 = `unmatched`。 この記録自体が trigger の成立条件 (= 記録しなければ次の観測者は 1 件目を知らず永遠に n=1 のまま = [debugging-discipline.md #recovery-ends-investigation](debugging-discipline.md#recovery-ends-investigation) の「記録されない残骸は trigger を持たない」 と同型)。
+
+**2 件目 (2026-09-11) で trigger 成立 → Claude が発行する全 shell コマンドへ scope を広げる**。 公開 commit 3 本の追加行を私的な名前で走査する 1-liner を `for spec in "repo hash" …; do set -- $spec; cd ~/Claude/$1; git show … $2 | grep …; done` と書いた。 zsh は未 quote の `$spec` を単語分割しない (bash は分割する) ので `$1` が `"repo hash"` 全体になり、 `cd` は失敗したが loop は続き、 `git show` は直前の cwd にある別 repo の HEAD を走査した。 出力は「168 行、 hit N 件」 というもっともらしい形で、 取り違えは cd の error 行と、 3 対象の行数が同じだったことからしか分からなかった。 1 件目 (即 error) と違い、 **検査が別の対象を検査して結果を返す** = 気付かなければ誤った 0 件や誤った hit が報告に載る mode。
+
+→ **規則**:
+1. 複数語を 1 変数に入れて分割に頼らない (command の位置も同じ: `B="python3 x.py --flag"; $B sub` は zsh では 1 語の command 名になり `command not found`、 実測 = 配列 `B=(python3 x.py --flag); $B sub` にする。 ⚠️ 背景で回す連鎖の終わりに無条件の `; echo DONE` を置くと、 全段がこれで落ちても完了の印が出て成功に見える (実測) = 完了の印は `&&` でつなぐか、 各段の終了値を印字する)。 zsh で分割するなら `${=var}`、 そうでなければ配列にする。 対象を列挙して走査する検査は python (`subprocess.run(["git", "-C", path, …])`) で書く。 コマンドの出力を行ごとに回すなら `cmd | while read -r x; do …; done` (変数に溜めてから `for x in $v` しない)。 zsh 5.9 の実測: `for x in $(cmd)` と直接書けば分割されるが、 `v=$(cmd); for x in $v` は分割されない (出力全体が 1 語)。 コマンドの引数 (`printf '%s\n' $v`) も分割されない。 6・7 件目 (2026-09-12、 CI の完了待ちの使い捨て loop): `for pair in "repo sha" …; do set -- $pair; cd ~/Claude/$1` (2 件目と同形 → `cd` 失敗・sha の filter が空になり全 run を待った) と `ids=$(gh run list … -q …); for id in $ids` (2 つの ID が 1 引数 → `gh run watch` が失敗) を同じ session で書いた。 どちらも「結果が出た」 形で終わるので、 出力が対象 (repo・sha・件数) と合っているかを読むまで気付かない = 規則 2 の「何を走査したかを印字」 が効いた。 → **2026-09-12 に機械化** = [`hooks/zsh-word-split-guard.py`](../hooks/zsh-word-split-guard.py) (PreToolUse Bash、 実行 shell が zsh のとき `for … in $V` / `set -- $V` / `-- $V` / `git … $V` / command の位置の `$V …` を、 `$V` が複数語だと同じ command 内で見えるときだけ deny + 直し方を返す)。 校正 = 手元 transcript の Bash に当てると、 止まるのはほとんどが実例の誤用で、 誤検出は同名変数の再利用 (誤検出のコストは書き直し 1 回)。 command の位置は 2026-10-07 に足した (規則 1 の括弧の形を規則を読んだ後にも書いた実測。 空白入りの文字列・loop 変数のときだけ止め、 `$(…)` の 1 語の値は止めない)。 校正 = 新たに止まるのはどれも同じ形の実際の誤用 (`R="python3 x.py"; $R …`)、 誤検出 0 件。 引数の位置は、 回す語に option (空白の後の `-`) がある loop 変数のときだけ止める (実測 = `for t in "a.py --selftest" …; do python3 $t` で `--selftest` 付きの 4 本が file 名の誤りで走らず、 末尾の echo が成功に見せた)。 校正 = 手元の Bash で止まるのはどれも同じ形の実際の誤用 (`$(…)` を回す loop と、 空白入りの file 名を回す loop は止めない = 後者は zsh の方が正しい)。
+2. 対象を解決する段 (`cd`、 path・commit の存在) が失敗したら止める。 `cd` せず `git -C <path>` を使い、 解決できなければ `exit 1`。 使い捨ての worktree / 一時 dir に `cd` して試すときは特に `cd "$W" || exit 1` (実測: git-crypt の repo で worktree の作成が失敗し、 `;` で繋いだ `cd` も失敗して、 試験用の変更が live の checkout で走った。 worktree が落ちる理由 = [`multi-session-coordination.md#foreign-wip-scratch-worktree`](multi-session-coordination.md#foreign-wip-scratch-worktree))。 結果には**何を走査したか** (repo・commit・行数) を印字し、 対象ごとの行数が同じなどの不自然さを見る。 <a id="var-from-stopped-chain"></a>`&&` の鎖の中で代入した変数も同じで、 鎖が手前で止まると変数は空のまま次の行に渡り、 `$S/x` は `/x` になる (実測: 確かめの段で鎖が止まり、 次の行の `export GIT_INDEX_FILE=$S/tmp-index` が root の直下を指した。 読み取り専用で書けずに止まった)。 代入は鎖の前の独立した行に置き、 鎖が止まったら残りの行も走らせない (`… || exit 1` で shell を終えるか、 全部の行を 1 本の鎖にする)。
+3. pattern を含む 1-liner は python で書く (1 件目の回避策)。
+4. 変数の直後に `:` を続けるときは `${var}:` と書く (3 件目、 下記)。 機械 = [`hooks/zsh-word-split-guard.py`](../hooks/zsh-word-split-guard.py) の 5 つめの述語 (`:` + 修飾子の文字 + word 文字の形を deny)。 非 ASCII の文字 (かな・漢字) を続けるときも `${var}` (UTF-8 の locale では zsh が文字を変数名に取り込む = [`shell-multibyte-truncation.md#unbraced-var-before-multibyte`](shell-multibyte-truncation.md#unbraced-var-before-multibyte))。
+5. <a id="path-list-literal"></a>path の列は literal に並べるか zsh の配列 (`F=(a b c); git commit -- $F`) にする。 文字列変数 1 つに入れない。 4 件目 (2026-09-11 夜、 規則 1 を書いた当日): commit する path を `F="a b c"` に入れて `git commit -q -- $F` と書き、 zsh が分割しないので 1 つの pathspec になって 2 repo の commit が落ちた (`did not match any file(s) known to git`、 実害なし)。 5 件目 (2026-09-12): 本規則が在るのに `P="a b c"; git commit -- $P` と書いて同じ error (実害なし、 literal で打ち直した)。 規則を知っていても、 書く瞬間には効かなかった = 次に再発したら PreToolUse Bash hook で `git … -- $VAR` の形を止める機械化に入る (un-defer trigger)。 → 同日の規則 1 の再発 2 件と合わせて機械化済 (規則 1 末尾の guard が `-- $V` と `git … $V` も見る)。
+6. <a id="guard-condition-and-chain"></a>guard の `if` 条件は全部 `&&` で繋ぎ、 `;` を入れない。 `if A && B; C; then` の条件は C の終了値だけになる。 同日、 leak 検査を `if [ … ] && ! cmd1; git diff … | grep -qiE '<漏れ語>'; then commit` と書いて反転させた (commit は else 側で止まったが、 同じ行の後続 `pull --rebase --autostash` は走った → [`multi-session-coordination.md#autostash-foreign-wip`](multi-session-coordination.md#autostash-foreign-wip))。 guard つきの 1 行は、 guard が落ちる入力で 1 度走らせてから本番に使う。 **複数行の script も同じ**: `set -e` が無ければ、 途中の検査段 (python の `assert` 等) が落ちても後続が走る。 2026-09-12: 自分の hunk だけを入れた blob を作る python が assert で落ちたのに、 後続の `update-index` (引数が空で失敗) → `commit` → `push` まで走り、 **前段の成果を主張する message のまま、 中身が一部だけの commit** が public でない repo に push された (履歴は書き換えず、 事実を後続の記録に残した)。 commit message が前段の成果を主張する chain は、 前段を `&&` で繋ぐか先頭に `set -e` を置く。
+7. <a id="equals-word-expansion"></a>行頭が `=` の語を quote する (zsh の equals 展開)。 zsh は語の先頭の `=` を **command path 展開**として解釈するので、 区切りの見出しに使う `echo ====SECTION` が `zsh:1: ===SECTION not found` で **rc=1** になる (bash は literal)。 `A && echo ====X && B` でも `A; echo ====X; B` でも **そこで止まり B が走らない** (展開の失敗は glob の nomatch と同じく、 その行の残りの command を打ち切る。 実測 = `zsh -c 'echo a; echo ===; echo b'` は a だけ出して rc=1)。 2026-09-12: 外部 API を 4 本取得する chain の途中に区切りの `echo ====ABSTRACTS` を入れ、 以降の取得と parse が丸ごと走らず、 出力には前半だけが正常に出た (= 失敗が「取得できなかった」 ではなく「その話題が無い」 形で出る)。 → 見出しは `echo "=== SECTION ==="` と quote するか `printf` を使う。 実測 (zsh 5.9): `echo ====X` は rc=1、 `echo "====X"` は literal。 再発 (実測): 2 つの記録 command の間に `echo =====` を挟み、 2 つ目の command が走らないまま 1 つ目の出力だけが返った (= 走らなかったことが出力からは分からない)。 区切りは `echo -----` (`-` で始める) にする。 未 quote の `=` 始まりの語 (`[ a == b ]` の `==` も同じ形で止まる) は、 zsh で実行される Bash の発行前に hook [`zsh-word-split-guard.py`](../hooks/zsh-word-split-guard.py) が扱う (再発が重なったので機械化。 quote・heredoc・`[[ … ]]`・`(( … ))` の中は見ない): 語が全部 `==` で始まるなら (`======`・`[ a == b ]`) その語を single quote で囲んで通し (意味は変わらない = zsh と bash で実測。 打ち直しが要らない)、 `=X` のように `=cmd` を意図しうる語があれば deny する。
+8. <a id="cwd-persists-across-calls"></a>相対 `cd` を書かない — Bash tool の cwd は **call をまたいで持続する** (2026-09-12)。 tool の 1 call は独立した shell script ではなく、 cwd は session の状態なので、 相対 `cd` は「前の call が終わった場所」 からの相対になる。 同じ 1-liner を 2 回発行すると 2 回目が落ちる: `cd scratch && curl …` を繰り返して 2 回目が `cd:1: no such file or directory: scratch` (= 既に scratch の中に居る)。 封じた review sandbox で 2 回踏み、 うち 1 回は**別 file 群を作りかけた後**に気付いた。 症状は harness の `Primary working directory: … (was …)` 行に出るが、 出力の末尾なので読み飛ばしやすい。 → **常に絶対 path で書く** (`cd /abs/path && …`、 あるいは `cd` せず `git -C <path>` / `python3 /abs/script.py`。 同じ message に Bash を並べるときは `cd` を使わない後者 = 規則 20)。 規則 2 の「対象を解決する段が失敗したら止める」 の cwd 版で、 違いは**失敗が次の call に持ち越される**こと (= 1 call の中で完結しない)。
+
+   Claude の Bash の cwd を変える `cd` と、その cwd を使う command は別々の並列 tool call にしない。`cd` の完了を待ってから次を順に実行する。Codex のように tool ごとに作業ディレクトリを指定する面では `workdir` や絶対 path を使い、別 call の `cd` の状態を引き継ぐと仮定しない。
+
+9. <a id="test-gate-no-pipe"></a>test を通ったら commit する chain で、 test を pipe に通さない。 `bash x.test.sh | tail -3 && git commit …` の終了値は `tail` のものなので、 test が落ちても commit が走る。 2026-09-12: 漏れ検査 hook の自己 test が 3 件落ちていたのに commit・push し、 CI が赤くなった。 出力は file に落として `rc=$?` で見るか、 `set -o pipefail` を先に置く。逆向きもある: 表示のためだけの `grep` を `&&` の途中に置くと、表示が 0 件なだけで後段の commit が走らず、`;` の後ろの出力だけが成功のように見える (2026-09-13、C locale で一致しなかった grep = [shell-multibyte-truncation.md#bracket-expression-c-locale](shell-multibyte-truncation.md#bracket-expression-c-locale))。表示は chain の外に置き、commit できたかは `git log -1` の hash で確かめる。`git commit … | tail -2 && git push` も同じ形で、並行 session の git 操作と `.git/index.lock` がぶつかって commit が失敗しても push は走る (2026-09-14: 自分の変更は working tree に残ったまま、相手の commit だけが push された)。commit の後は `git status --short -- <path>` で自分の file が消えたことを見てから push する。
+
+10. <a id="unquoted-glob-nomatch"></a>コマンドの**引数**に書く glob も quote する (zsh の nomatch)。 zsh は glob が 1 つも一致しないと **そのコマンドを実行しない** (`(eval):1: no matches found: <pattern>`、 bash は pattern をそのまま渡す)。 踏みやすいのは file 名の glob でなく **flag の値**: `grep -rn --include=*.md pat .` は**一致する `.md` が在っても grep 自体が走らず** (zsh は語全体 `--include=*.md` を pattern にするので、 `--include=` で始まる file 名が無い限り一致しない = zsh 5.9 で実測)、 `;` で繋いだ前後の出力だけが残る (= 「検索したが 0 件」 と見分けがつかない)。 `&&` で繋いでいれば chain がそこで止まる (= 規則 7 と同じ mode)。 2026-09-12 に 2 回: `--include=*.md` と `ls -d ~/…/*<語>*`。 → glob は quote する (`--include='*.md'`)。 機械 = [`hooks/zsh-word-split-guard.py`](../hooks/zsh-word-split-guard.py) の 6 つめの述語 (option の形の語と、 `-name` / `--include` など pattern を取る option の値の未 quote の glob を deny。 `ls -d ~/…/*語*` のような path の glob は、 hook に渡る cwd と shell の実際の cwd が食い違うので射程外 = [#cwd-persists-across-calls](#cwd-persists-across-calls))。 ⚠️ 失敗の痕跡は stderr の 1 行だけで、 見た目が「検索して 0 件」 と同じなので**不在の断定に直結する** — 層1 の検索 null nudge がこの形を拾う (その検出器が素の部分文字列 match で自己発火した件 = [`convention-design-principles.md#detector-fires-on-its-own-signal`](../docs/convention-design-principles.md#detector-fires-on-its-own-signal))。 ⚠️ 一致しないかもしれない glob を loop で回すとき、 zsh の修飾子 `(N)` (一致 0 件で空) や `(D)` (隠し file も) は **Claude の Bash tool では効かない**: 実行前の shell snapshot が `setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL` を立てるので、 `for x in dir/*(DN)` は修飾子ごと 1 つの pattern になり nomatch で止まる (実測)。 dir の中身を全部 (隠し file を含めて) 回すなら `find <dir> -mindepth 1 -maxdepth 1` か Python の `os.listdir`。
+
+11. <a id="python-file-long-nonascii-line"></a>非 ASCII を含む**長い行**の python を coding cookie 無しで走らせない (file でも heredoc でも。 = zsh でなく macOS 標準 python3 の罠、 本 family に置くのは「file に逃がした結果」 の罠だから)。 `python3 <file>.py` は、 **非 ASCII を含む 1 行が約 1 KB を超える**と偽の `SyntaxError: Non-UTF-8 code starting with '\xe3' … but no encoding declared` で落ちる。 file 自体は正しい UTF-8 で、 **同じ bytes を `compile()` に渡すと通る**ので「encoding が壊れた」 と読むと迷走する。 実測 (2026-09-12、 system python 3.9.6、 二分探索): 1 行 **1014 bytes まで OK / 1017 bytes で FAIL**、 ASCII だけなら 4000 文字でも OK、 先頭に `# -*- coding: utf-8 -*-` を置けば通る。 ⚠️ **heredoc (`python3 - <<'PY'`、 stdin) でも同じ閾値で起きる** (2026-09-13 実測、 同 python 3.9.6: stdin も file も 1 行 ~1023 bytes まで OK / ~1026 bytes で FAIL、 error は `in file <stdin>`、 cookie で両方通る。 前日の 1014/1017 と数 byte ずれるのは行の中身が違うため = 境界は「約 1 KB」 として扱う。 前版はここに「heredoc では起きない」 と書いていたが、 長い日本語の置換文を heredoc で流した patch が実際に落ちて反証された = 短い行でしか試していなかった)。 (境界が ~1 KB なので読み取り buffer が multibyte 文字を割っている、 と読めるが機構そのものは未確認 = 説明であって観察ではない。) ⚠️ **長い Bash command を file に逃がす**規律 ([`claude-code-permissions.md#long-command-falls-back-to-ask`](claude-code-permissions.md#long-command-falls-back-to-ask)) に従うと、 日本語の長い散文を含む patch script はまさにこの形になる = **一方の規律の remedy が他方の罠に入る**。 → 日本語を含む python は、 file に書くときも heredoc で流すときも **coding cookie を先頭に置く**。 **版依存** (2026-09-13 実測): 同じ machine の Homebrew python 3.14.4 は 20 KB の行まで落ちない = 罠は古い system python (3.9.6) のもので、 `python3` が PATH でどちらに解決するかで決まる。 python を更新したら [`scripts/probe-python-nonascii-line.py`](../scripts/probe-python-nonascii-line.py) `--python <path>` で測り直し、 数字か規則を直す。
+12. <a id="bash-tool-grep-ignores-gitignore"></a>網羅を主張する検索に、Bash tool の素の `grep -r` を使わない。Claude Code の shell snapshot は `grep` を shell 関数として定義し、Claude の実行 file を `ugrep` として `-G --ignore-files --hidden -I --exclude-dir=.git …` 付きで起動する (`whence -f grep` で確かめられる)。`--ignore-files` は `.gitignore` を読むので、**ignore された path は再帰検索から黙って外れる**。出力の path に `./` が付かないのが見分ける手がかり。2026-09-13: 親 repo が `external/` を ignore し、その下に原稿の別 clone を置いた構成で、`grep -rl` の結果から clone 内の file だけが抜けた (同じ検索で関数経由 4 件、`command grep -rl` 8 件)。0 件ではなく一部が抜けるだけなので、検索 null を見張る hook も鳴らない。網羅には関数を迂回する `command grep -r` か `/usr/bin/grep -r` を使う。`-I` で binary も飛ばされるので、走査した範囲は結果と一緒に書く。 **NUL を含む text も binary 扱い**: PDF から抜いた text の cache は、 妥当な UTF-8 でも、 ページ送りの制御文字などで NUL が混じると飛ばされ、 `grep -c` は 0 でなく何も出さない (実測 = 関数経由は空、 `command grep -c` と `grep -a -c` は同じ件数を返す)。 空の出力を 0 件と読まない。 **不正な UTF-8 も binary 扱い**: file の先頭 256 KiB の中に多バイト文字の途中で切れた行が 1 行あるだけで、 全部の行が飛ばされる (実測 = 関数経由は 0 行で rc 1、 `command grep` と `grep -a` は正しい件数を返す。 NUL も同じ範囲で、 それより奥のバイトでは飛ばさない)。 Bash tool の環境は `LANG` が空なので、 macOS の `cut -c` はバイト単位で切る = `… | cut -c1-200 > out.txt` が日本語の出力でこの file を作る。 保存する出力は `cut -c` で切らない (切るなら `LC_ALL=en_US.UTF-8 cut -c1-200`)。 素の grep が指す file がこの形なら、 検索 null の hook ([`bash-search-zero-result-nudge.sh`](../hooks/bash-search-zero-result-nudge.sh) の detector C) が出力の有無に関わらず知らせる。 pipe で渡した分と再帰検索の中の file は見ない。 **pipe で渡した binary も同じ**: `head -c 9 f | grep -q GITCRYPT` (magic header の判定) は関数経由だと rc 1、 `command grep -q` と script の中の bash では rc 0 = Claude が手で確かめた結果だけが「一致しない」 側に倒れる (実測、 [`hook-authoring.md#locked-engine-interpreter-rc`](hook-authoring.md#locked-engine-interpreter-rc))。
+13. <a id="pipefail-expected-failure-grep"></a>**終了値 1 を期待するコマンドの出力を `| grep -q` で確かめない** (`set -o pipefail` 下)。 pipeline の終了値は「どれかが非 0 なら非 0」 なので、 grep が一致しても前段の exit 1 で偽になる (実測: `--check` が finding を出して exit 1 する検査の出力を `| grep -q '<期待文>'` で確かめた test が、 正しい出力なのに落ちた)。 出力を変数に取ってから、 here-string で grep する: `out="$(cmd 2>&1)"; grep -q … <<< "$out"`。 規則 9 の逆向き (失敗を隠す pipe) と対。
+   <a id="pipefail-grep-q-sigpipe"></a>⚠️ **変数を `printf '%s' "$out" | grep -q …` / `echo "$out" | grep -q …` で確かめるのも同じ罠** (前段が成功するコマンドでも)。 `grep -q` は最初の一致で読むのをやめて終わるので、 書き終わっていない `printf` / `echo` が閉じた pipe に書いて SIGPIPE で死に (rc 141、 SIGPIPE を無視する親からは `write error: Broken pipe` で rc 1)、 `pipefail` の下では一致したのに偽になる。 **変数が pipe の容量 (macOS で約 64 KB) より小さいうちは書き手が先に書き終わるので再現せず、 大きな入力でだけ黙って外れる**。 実測: 公開 repo の漏洩検査の照合器がこの形で、 commit 1 本の差分では効き、 tree 全体を 1 回で渡す棚卸しでは非公開 repo 名の一致を落として「0」 と記録した (20 KB では拾い、 100 KB では落ちた)。 同じ runner の「engine の出力に BLOCK の見出しがあれば止める」 判定も、 出力が大きいと止めずに通る形だった。 → here-string (`grep -q … <<< "$out"`) か、 file に書いてから `grep -q … "$f"` にする (どちらも書き手が pipeline に入らない)。 `grep` から `-q` を外して `>/dev/null` にしても直る (最後まで読む)。 見張る側の検査の判定ほど入力が大きくなる (tree 全体・会話記録・ログ) ので、 そこから直す。 **書き手が file を流す `tail -c +N "$f" | grep -q …` / `cat "$f" | grep -q …` も同じ** = 一致した行の後ろに pipe の容量を越える残りがあると落ちる (実測: 会話記録の前に読んだ位置から後を `tail` で流して語を探す hook が、 語の後ろに 30 KB 以上の出力が続くと拾わなかった)。 → `grep -q … < <(tail -c +N "$f")` (process substitution = 書き手が pipeline の外)。 1 行の入力 (hook の入力の JSON など) は grep が行の終わりまで読むので落ちないが、 改行のある大きな入力では同じく落ちる。 機械 = [`scripts/check-pipefail-grep-q.py`](../scripts/check-pipefail-grep-q.py) が全 repo の pre-commit (pre-commit-bib と公開 repo の runner) で、 pipefail を立てる script と読み込まれる部品 (`lib`) に足した行のこの形 (変数を `printf` / `echo` で流す・file を `cat` / `tail +N` で流す) を止め、 それ以外のコマンドの出力を流す形は警告だけ出す (既にある行は止めない = 触ったときに直す。 棚卸し = `--tree <dir>`、 1 file = `--paths <file>`)。 当たりは `\` で継いだ 1 つの command の全体なので、 その中の 1 行を足す・直すと、 同じ command に既にある流し込みも止まる (実測: 4 行の `if` の 1 行を直すと、 残りの行の `printf '%s' "$out" | grep -q` で止まった) = その command の中を全部 here-string に揃える。 **先頭だけ読む `head -c N` / `head -n N` を後段に置くのも同じ** = 書き手 (取得の command・`cat`) が N より多く書くと閉じた pipe に書いて死に、 `pipefail` の下で偽になる (実測: 取得した blob の先頭 9 byte を `… | head -c 9 | grep -qa …` で見た script が、 大きい file だけを外れと数えた)。 → 先頭を変数に取ってから値で比べる (`h="$(cmd | head -c 9 | xxd -p || true)"`)。 この形は上の検査の外。
+14. <a id="zsh-log-builtin"></a>macOS の unified log は **`/usr/bin/log show`** と full path で書く。 zsh では素の `log` が組み込み (login の監視用) に取られ、 `log show ...` は `log: too many arguments` で失敗する (bash では起きない)。 層1 の規約・script で 3 度書かれていた罠 (= [`macos-app-crash-triage.md`](macos-app-crash-triage.md) / [`macos-claude-app-notifications.md`](macos-claude-app-notifications.md) / [`macos-exec-policy-kill.md#log-reading`](macos-exec-policy-kill.md#log-reading)) をここに集めた。 script から呼ぶときも full path にする。 ⚠️ `2>/dev/null` を付けて素の `log show` を打つと、 この失敗は黙って空の出力になり、 「該当する log が無い」 と読み違える (実測)。 log を読んで 0 件だったら、 結論の前に full path で書いたかを見る。 機械 = PreToolUse の [`hooks/zsh-word-split-guard.py`](../hooks/zsh-word-split-guard.py) が、 command の位置の素の `log show` / `log stream` などを直し方つきで止める。
+15. <a id="zsh-pipestatus-lowercase"></a>pipeline の各段の終了値は zsh では **`$pipestatus`** (小文字、 添字は 1 始まり)。 bash の `${PIPESTATUS[0]}` は zsh では空で、 `[ "${PIPESTATUS[0]}" -eq 0 ]` のような検査は常に成立して失敗を通す (実測)。 規則 9 と同じ mode (失敗が成功に見える) なので、 前段の終了値が要る chain は `set -o pipefail` か出力を file に落として `rc=$?` で見る。 機械 = hook [`hooks/zsh-word-split-guard.py`](../hooks/zsh-word-split-guard.py) が、 zsh で実行する Bash の `${PIPESTATUS[N]}` を `${pipestatus[N+1]}` に書き換えて通す (意味が決まらない形は止める)。
+16. <a id="no-stacked-heredocs"></a>1 つの command に heredoc を 2 つ重ねない (`python3 - <<'PY' … PY` の後に `--summary "$(cat <<'MSG' … MSG)"` を続ける形)。 2 つ目の本文が 1 つ目の program に読まれて壊れた (実測、 再現条件は未確定)。 長い文面・code は先に file に書き (Write tool)、 `"$(cat <file>)"` で渡す = 長い command を止める guard (3000 字) にも掛からない。
+17. <a id="zsh-special-param-names"></a>loop や `read` の変数に zsh の特殊な変数名を使わない。 `path` は `PATH` と連動する配列 (代入すると PATH が書き換わる)、 `status` は読み取り専用 (代入で失敗する)。 `argv` / `cdpath` / `fpath` / `manpath` も同類。 `… | while read -r path; do …; done` と書いた後、 同じ command の以後の git が全部 `command not found` になった (実測)。 `p` / `f` / `repo` のような普通の名前にする。
+18. <a id="zsh-echo-backslash"></a>backslash を含む文字列を `echo` で file に書かない。 zsh の組み込みの `echo` は single quote の中の `\e` `\n` なども解釈する (bash の `echo` は `-e` が無ければ literal。 実測 zsh 5.9: `echo '\end'` の先頭が ESC になる)。 TeX の行を `echo '\end{document}' >> f.tex` で足すと `\e` が ESC に化け、 lualatex は `Text line contains an invalid character` で止まって log に `^^[` が出る (実測)。 → `printf '%s\n' '\end{document}'` か Write tool で書く。
+18. <a id="grep-count-zero-exit"></a>**件数を数える `grep -c` を command の最後に置かない**。 `grep -c` は 0 件のとき `0` を出して**終了値 1** で終わるので、 「問題が 0 件」 を確かめる loop の最後の段が `grep -c` だと、 確認が全部通ったのに Bash tool の結果が `Exit code 1` の error として表示される (実測: 検査を通った出力の横に error が出て、 失敗と読まれた)。 数を出すなら `n=$(grep -c … || true)` と取ってから表示し、 最後の段は終了値 0 の command (`echo done` など) にする。 規則 13 と同じ「終了値 1 が意味を持つ grep」 の罠で、 向きが逆 (成功が失敗に見える)。
+19. <a id="backgrounded-chain-still-runs"></a>**timeout で背景に移された command は、 `;` で繋いだ後段ごと生きている**。 前段が止まっているだけなら、 後段 (commit・push など) は前段が終わった瞬間に走る = 「失敗した」 と読んで同じ commit を打ち直すと二重に走る。 打ち直す前に `ps` で親の shell の子を見て、 止まっている前段だけを止める (後段はそのまま進む)。 止まる原因の代表は、 標準入力を読む CLI を redirect なしで呼ぶこと = Bash tool では入力を待って timeout まで動かない (実測)。 初めて使う検査は `--help` を読み、 commit と同じ command に繋がない。
+20. <a id="same-message-bash-cd-dropped"></a>**同じ message に Bash を並べるときは、 どの呼び出しも `cd` と相対 path に頼らず、 絶対 path で書く** (読むだけの `git` は `git -C <path>`。 commit と push は並べず、 [`claude-code-permissions.md#cd-with-git-goes-to-classifier`](claude-code-permissions.md#cd-with-git-goes-to-classifier) のとおり `cd` だけの呼び出しの次の message で打つ)。 1 本目が別の場所へ `cd` し、 2 本目が `cd <message を出した時点の作業ディレクトリ> && <python など>` のとき、 2 本目の `cd` は効かず、 exit 0 のまま 1 本目の行き先で走る (実測: 2 本目の `os.getcwd()` が 1 本目の行き先を返した。 desktop の Code タブ、 engine 2.1.309)。 読み取りだけの command (`pwd`・`ls`) の組では再現しない。 書き換える hook は `cd` に触っていない。 engine のどこで落ちるかは未確定。 `cd` が 0 を返すので `&&` では止まらず、 読む command は「No such file」 で気づけるが、 書く command はそのまま別の場所に書く。 「`cd` が効かない」 ではなく「並べた呼び出しどうしの順番に依る」 ので、 file が無いと出たら別の場所で走った可能性を先に見る。
+21. <a id="outer-timeout-kills-committing-tool"></a>**中で commit・push する道具を外側の `timeout` で包まない**。 並列の session が多い repo では index の lock 待ちで道具が数分かかり、 `timeout` が commit の途中で道具を止める。 `timeout N <tool> | tail` の形では、 打ち切りの終了値 (124) も道具の出力もパイプの後ろで消え (パイプが終了値を隠す形 = #9)、 何も出ないのを「済んだ」 と読み違える (実測: 記録の道具が書いた分を控えに残して止まり、 道具の拾い直しの手順で入った)。 時間が要るかもしれない道具は Bash tool の背景実行に回す (後段も生きている = #19)。 包んだなら終了値を `$pipestatus` (#15) で見て、 124 なら道具の取り残しの拾い直しを回してから次へ進む。
+22. <a id="background-done-notice-before-exit"></a>**背景実行の command の「完了」 の知らせを受けても、 結果を使う前に出力と process を確かめる**。 知らせが command の終わる前に届き、 本当に終わったときにもう一度届くことがある (実測: 掲示板の道具を背景で回し、 出力が空か途中の 1 行だけのまま「exit code 0 で完了」 が届いたとき、 process はまだ動いていた)。 出力の file が空、 または期待した行 (道具の最後の 1 行・終了値を echo した行) が無ければ、 `pgrep -fl '<command の特徴の語>'` で process が居るかを見る。 居れば pid を取り、 `until ! kill -0 <pid> 2>/dev/null; do sleep 2; done; cat <出力の file>` を背景実行に回す。 この待ちの loop の知らせも早く届く (実測) = 結果を読むのは loop の最後の `cat` の行が出力にあるときだけにし、 無ければ `kill -0 <pid>` でまだ動いているかを見る。 何も出ないのを失敗と読んで打ち直すと、 投稿・commit が二重に走る (#19 と同じ)。 **この 1 回の待ちに Monitor を使わない**: Monitor は待つ語が当たらなければ期限まで生き、 背景の作業として session を畳めなくする (実測: 出力の語で待つ Monitor が、 大文字の `ERROR` を小文字の語で待った回と、 byte の途中で切れた日本語の出力を `grep` が binary と読み飛ばした回で、 2 本とも期限まで残った)。 待つのは上の `until ! kill -0` の背景の Bash だけにし、 出力の語で待つなら `command grep -a -i` (Bash の環境の `grep` は ugrep の関数で、 不正な UTF-8 の file を読み飛ばす = [#bash-tool-grep-ignores-gitignore](#bash-tool-grep-ignores-gitignore))。 **待ちの loop の条件に `pgrep -f '<command の語>'` を使わない**: 待っている背景の shell 自身の command 行がその語を含むので、 `pgrep` が自分に当たり続けて loop が終わらない (実測)。 pid を 1 回だけ取り、 loop は `kill -0 <pid>` で待つ (上の形)。
+23. <a id="grep-v-filters-line-content"></a>**検索の結果を `grep -v` で絞るときは、 除外の語を path の列に結ぶ**。 `command grep -rn <語> <dirs> | grep -v archive` は path でなく**行の全体**を見るので、 除外したい dir の file だけでなく、 その dir への link や同じ語を本文に持つ行まで黙って落とす (実測: 「ある語が残っていない」 を確かめる grep で、 archive の file への link を含む本文の行が除外に当たって見えず、 残りを 1 件少なく数えた)。 path だけを外すなら `grep -v -E '^[^:]*archive'` (`-n` の出力は最初の `:` までが path) か、 検索の側の `--exclude-dir` / `--exclude` を使う。 除外を足した検索で「無い」「残っていない」 と言う前に、 除外を外した件数と比べる。
+24. <a id="while-read-stdin-eaten"></a>**`… | while read -r a b; do …; done` の中で標準入力を読む command (`ffmpeg`・`ssh`・`claude -p` など) を呼ぶときは、 その command の標準入力を切る** (`ffmpeg -nostdin`・`ssh -n`・`< /dev/null`)。 中の command が loop に流している残りの行を読んでしまい、 loop は途中の行を黙って飛ばして終わる (実測: 区間の一覧を 5 行流して `ffmpeg` で 1 区間ずつ測った loop が、 1・3・4・5 行目だけ (うち 1 行は空の値) を出して exit 0 で終わった)。 出力の行数が流した行数と合うかを見る。
+25. <a id="bsd-grep-no-pcre"></a>**macOS で `command grep` に `-P` (PCRE) を渡さない**。 [規則 12](#bash-tool-grep-ignores-gitignore) のとおり素の `grep` (関数) を避けて `command grep` / `/usr/bin/grep` にすると、 macOS では BSD の grep が走り、 `-P` を持たないので `grep: invalid option -- P` と usage を出して何も数えずに終わる。 `… | wc -l` に繋いでいると `0` が出て、 一致が 0 件に見える (実測: 否定の先読み `X(?!Y)` で数えた件数が 0 と出て、 python の `re` で数え直すと 0 でなかった。 エラーの行は出力に出ていたが、 隣の数の行だけを読んだ)。 先読み・後読み・`\d` のような PCRE の形が要るなら python の `re` で数える。 件数を pipe の最後の `wc -l` で取ると前段の失敗が `0` に化ける = [`grep -c` の 0](#grep-count-zero-exit) と、 規則 12 の空の出力と同じく、 `0` を見たら前段が動いたかを先に確かめる。
+
+**3 件目 (2026-09-11) — `"$var:…"` は zsh の修飾子になる**。 run 履歴の commit ごとに `git show "$c:scripts/x.test.sh"` (= その commit の file を表示) と書いた。 zsh は `$c` の直後の `:s…` を置換修飾子 (`:s/old/new/`、 区切り文字は `s` の次の 1 文字 = ここでは `c`) と読んで残りの文字列を飲み込み、 `git show 07866f1` (= commit 全体の diff) を実行した。 後段の grep は diff の行を拾って「行番号」 を返し、 別の commit では 0 件になった。 error は出ず、 別の対象を検査した結果がそれらしい形で返る = 2 件目と同じ mode。 zsh 5.9 の実測: `c=07866f1; print -r -- "[$c:scripts/x]"` → `[07866f1` (閉じ括弧まで消える)、 `x=v1; print -r -- "$x:a"` → cwd を前置した絶対 path、 `d=/a/b.c` で `"$d:t" "$d:h" "$d:r" "$d:e"` → `b.c` `/a` `/a/b` `c`。 bash ではどれも literal。 `"${c}:scripts/x"` と波括弧で閉じれば zsh でも literal になる。 `:` の次が修飾子の文字 (`a` `A` `c` `e` `h` `l` `P` `q` `Q` `r` `s` `t` `u` = zsh 5.9 で実測) のときだけ壊れる。 `$c:src/x` (`:s`)・`$h:time/x` (`:t`)・`$v:applications/x` (`:a`) は壊れ、 `$host:port`・`$rev:path`・`$remote:$branch`・`$url:8080` は壊れない (`p` と `$` と数字は修飾子でない)。 見た目で覚えず、 常に波括弧で閉じる。 double quote で囲んでも食われる (`"$r:src/x"`、 実測)。
+
+兄弟 = 「Bash tool は bash script ではない」 の別の現れ: [`edit-intent-record.md#apply-then-record`](../../ai-collaboration/conventions/edit-intent-record.md#apply-then-record) の shell 注 (Bash tool の最上位では `set -e` が効かない、 gate を pipe の後ろに置かない、 2026-09-11)。 1 件目を記録していたので 2 件目で規約化できた (上の「記録されない残骸は trigger を持たない」 が機能した例)。
+
+### <a id="zsh-wait-next"></a>zsh の待機は子の PID を指定する
+
+zsh 5.9 では `wait -n` が `wait: job not found: -n` で終了する (実測)。
+子を起こした直後の `$!` を保存し、`wait "$child_pid"` でその子を待つ。
+複数の子のうち最初に終わるものを待つ場合は、その機能を持つ実行器を明示して使い、zsh に Bash の option を渡さない。
+`wait` の失敗の後に無条件の完了表示を置くと、子を待っていないのに完了した形になる。各子の終了値と、残っている子を確かめる。
+
+## <a id="ambiguous-identifier-in-issued-commands"></a>渡すコマンドに埋める識別子は、 受け手が別の意味に取れない形にする (2026-09-12)
+
+兄弟 2 節 (`#` と `~`) は **shell** が値を再解釈する罠だったが、 同じ族は **コマンド自身の引数パーサ**でも起きる。 値そのものは正しいのに、 埋めた文字列がたまたま別の構文と一致すると、 受け手が違う対象を指す。
+
+実例: `git stash show|apply|drop <N>` は **数字だけの引数を `stash@{N}` (= stash list の N 番目) と解釈する**。 ∴ 案内に **short sha** を埋めると、 その sha がたまたま全桁数字のとき (7 桁なら (10/16)^7 ≈ **3.7%**) 別物を指して壊れる:
+
+```sh
+git stash show --name-only 1234567   # fatal: log for 'refs/stash' only has 1 entries  ← stash index 扱い
+git stash show --name-only 123456a   # error: 123456a is not a valid reference         ← revision 扱い (期待どおり)
+```
+
+→ **曖昧でない形を選ぶ**。 上の例なら stash list に在る間は `stash@{N}`、 無ければ **full sha** (40 桁が全桁数字になる確率は無視できる)。 一般には:
+
+- 識別子を埋める前に「この文字列は受け手の別構文と一致しうるか」 を 1 回問う (数字だけ / `-` 始まり / `@{…}` / path や glob に見える)
+- 曖昧なら**明示構文**に寄せる (`stash@{N}` / `<sha>^{commit}` / option 終端の `--` / `./<file>`)
+- 短縮形は**人が読む欄**にだけ置き、 **実行される欄には曖昧でない形**を書く (= 表示と実行を分ける)
+
+⚠️ この class は**確率的にしか発火しない**ので、 当たりを引くまで通り続け、 引いた回だけ落ちる = CI の flaky に化ける ([`debugging-discipline.md#flaky-is-a-symptom`](debugging-discipline.md#flaky-is-a-symptom))。 ∴ test には**性質そのもの**を固定する (例:「案内の sha は full である」)。 結果だけを見る assert は 3.7% でしか落ちない。
+
+**背景 (2026-09-12)**: [`scripts/repo-sync-sweep.sh`](../scripts/repo-sync-sweep.sh) の「stash が別 process に pop された」 案内が short sha を埋めており、 CI で 1 回だけ `FAIL: 比較手順が使えない (sha='1168850')`。 再実行で緑になるので flaky に見えた
+
+<a id="stash-show-no-pathspec"></a>**同じ族の近縁 — `git stash show` は path を取らない**: `git stash show -p 'stash@{0}' -- <path>` は `--` の後ろも revision と読み `Too many revisions specified` で rc 1 (実測 git 2.39)。 stash の 1 file だけを見るなら、 stash の commit とその親の diff にする: `git diff 'stash@{0}^1' 'stash@{0}' -- <path>` (未追跡 file を含めた stash の分は `'stash@{0}^3'` 側)。 stash を drop する前に中身を file 単位で確かめる時に踏むが、 実体は **3.7% で user に壊れた手順を渡していた**バグだった。
+
+## <a id="bang-line-not-for-terminal"></a>Claude の入力欄の `!` で打ってもらう 1 行を、 端末に打たせない (履歴展開)
+
+Claude Code の入力欄では、 行頭に `!` を付けた行が shell の command として走る (bash mode)。 本人に「`!` を付けてこの 1 行を打って」 と渡すと、 本人が端末 (Terminal・iTerm の tab) に打つことがある。
+対話の zsh・bash では行頭の `!` は **履歴展開** で、 `!bash ~/x.sh` は「履歴の中で最後に `bash` で始まった command」 に置き換わり、 `~/x.sh` はその後ろに引数として付く = 渡した script でなく、 前に打った別の script が走る
+(実測: 履歴に残っていた、 元に戻せない操作をする古い script が走りかけた。 その script が自分の前提の確かめで途中で止まったので、 何も起きなかった)。
+
+- `!` の 1 行を渡すときは、 打つ場所を名指す (「この会話の入力欄に。 端末ではなく」)。 端末に打ってもらう command には `!` を付けない
+- 同じ Mac の端末の tab に Claude が command を出せるなら、 本人に打たせず tab に出す (本人の操作は承認と code の入力だけ)
+- 本人が端末に打った後なら、 渡した command が走った前提で進めない = 何が走ったか (履歴の該当の行・出力) を先に確かめ、 手順を言い直す
+- 元に戻せない操作をする script は、 違う引数・違う状態で起こされても既定で止まる形 (dry-run が既定・前提の確かめ) にしておく = 誤って起こされても何も起きない
+
+## <a id="bound-command-runtime"></a>Bind reusable command runtimes at installation
+
+A successful `python3` invocation in one shell does not establish the runtime
+used from another working directory, login mode, task surface, or PATH. For a
+repeated account operation, select and probe a supported interpreter once in
+the explicit installer, then generate a launcher with its absolute executable
+path and a shell-quoted script path. Do not depend on opportunistically finding
+another interpreter's site-packages every time the operation runs.
+
+Audit the executable already bound in the launcher, not a fresh PATH-based
+selection. Otherwise the audit can declare a valid installation stale merely
+because the caller's PATH changed. Rebinding belongs to explicit installation,
+not a read-only check. Test installation idempotency, conflicting user files,
+symlink paths, and audit with interpreter discovery disabled.
+
+Use a distinct irreversible subcommand so command-policy rules can target the
+stable launcher plus that verb without also matching read or preview. Runtime
+availability, policy matching, client loading, and remote delivery are separate
+claims. The generic Codex mail installer and its isolated fixtures are
+`scripts/codex_mail_install.py` and `scripts/test_codex_mail_install.py`.
+The mail transaction contract remains in
+[Gmail sending](gmail-sending.md#reviewed-reply-bundle).
+
+## <a id="system-python3-is-xcode-gated"></a>macOS の `/usr/bin/python3` は Xcode に従属する shim — 自動化の土台に素で置かない
+
+**主張**: macOS の `/usr/bin/python3` (同様に `/usr/bin/git`, `/usr/bin/clang`, `/usr/bin/make` ほか) は**インタプリタの実体ではなく、 `xcrun` を経由して「現在選ばれている developer directory」 へ解決する shim**。 その dir が Xcode.app を指していて **ライセンスが未同意 / Xcode がインストール途中**だと、 shim は要求された仕事をする前に
+
+```
+You must agree to the Xcode license agreements...
+```
+
+を出して **exit 69** で終わる。 `python3 --version` すら通らない = **スクリプトの中身とは無関係に、 python を起動する全ての箇所が同時に死ぬ**。
+
+### <a id="xcode-gate-blast-radius"></a>なぜ「1 つの不具合」 に見えないか
+
+この壊れ方の性質:
+
+- **同時多発**: `python3` を呼ぶ hook・定期ジョブ・常駐 agent が**一斉に**落ちる。 個々の症状 (通知が出ない / 自動処理が止まった / 画面が更新されない) は無関係に見え、 別々の原因を探しに行きやすい。
+- **無関係な症状で先に気づく**: 実測では、 最初に人間が気づいたのは「デスクトップの壁紙が切り替わらない」 で、 同じ原因で死んでいた常駐 hook 群には誰も気づいていなかった。 **最初に目に入った症状を問題の定義にしない**。
+- **exit 69 が手がかり**: `EX_UNAVAILABLE`。 ログに `rc=69` / `exit 69` が並び、 かつ複数の無関係なジョブで同時に出ていたら、 まずこの gate を疑う。 確認は 1 コマンド: `/usr/bin/python3 -c ''; echo $?`。
+- **新しい機械・移行直後に踏みやすい**: ライセンス同意は機械ごとの状態で、 移行ツールでは運ばれない。 **Xcode の更新でも外れうる**ので、 同意し直すだけでは再発する。
+
+### <a id="xcode-gate-wrong-fix"></a>⚠️ 別の python へ逃がすのは (多くの場合) 誤り
+
+反射的に Homebrew 等の python へ切り替えたくなるが、 **依存 package がどちらに入っているかを先に見る**。 実測では、 自動化が使う third-party package (YAML / Google API client / PDF / スプレッドシート系) は **system 側の user site (`~/Library/Python/<ver>/lib/python/site-packages`) にしか入っておらず**、 逃がすと `ModuleNotFoundError` という**別の壊れ方に置き換わるだけ**だった。
+
+正しい対処は「**同じインタプリタを、 shim を経由せずに起動する**」:
+
+| 道具 | 効果 | 向き |
+|---|---|---|
+| `DEVELOPER_DIR=/Library/Developer/CommandLineTools` | shim の解決先を Xcode から外す。 **呼び出し側を 1 つも書き換えずに全ての呼び出しに効く** | 環境変数を置ける層 (session の env / job の wrapper) |
+| `/Library/Developer/CommandLineTools/usr/bin/python3` を直に呼ぶ | shim を通らない実体 path。 env を継げない文脈 (別 process として起動される helper 等) 向き | 個別のスクリプト |
+
+どちらも **同じ実体 (同じ版・同じ site-packages)** に届くので、 依存も挙動も変わらない。 ⚠️ CommandLineTools が入っていない機械では両方とも成立しないので、 **存在を確かめてから適用し、 無ければ何もしない** (= 壊れた path を掴ませない)。
+
+### <a id="xcode-gate-declare-per-firing-surface"></a>宣言する場所は「発火面」 ごとに分かれる
+
+1 箇所直せば終わりではない。 **その python を起動するのは誰か**で経路が違う:
+
+| 発火面 | 届く経路 | 届かない経路 |
+|---|---|---|
+| agent の session と hook | agent の設定の env (= 全 hook と shell 呼び出しに継承される) | 各 hook を個別に書き換える (= 数が多く、 次に増えた hook に効かない) |
+| OS の定期ジョブ (launchd / cron) | 各 job の **wrapper script 内で export** (= 配布物なので同期するだけで全機械に届く)。 ⚠️ `python3` 自体も PATH で解決せず [#job-python-by-capability](#job-python-by-capability) で選ぶ | agent の設定 (= OS のジョブは読まない) / job 定義ファイルの環境変数 (= 機械ごとに再登録が要る) |
+| 独立した常駐 helper・GUI helper | script 側で**起動できる実体を probe して選ぶ** (= env を継がない) | 上の 2 つ |
+| 本人の対話 shell (terminal) | login shell の起動 file (`~/.zshenv` 等) で、 CommandLineTools の存在と `DEVELOPER_DIR` 未設定を確かめてから export | 上の 3 つ (= agent・job・helper を直しても、 system default の developer dir は Xcode を指したまま) |
+
+⚠️ **本人の terminal は見落としやすい**: 上の 3 面を直した後でも、 本人が terminal で直に叩いた `python3` だけが license の同意を求めた (実測)。 対話 shell で固定したら、 terminal から `xcodebuild` / `xcrun simctl` を使う時だけ `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` を前置する。 `xcode-select -s` で system default ごと変える手もあるが、 Xcode を前提にする道具まで巻き込みうるので既定にしない。 本人に terminal で実行してもらう command を渡すときは、 その command が shim の python を起動するか (= この gate を踏みうるか) を先に考える
+
+⚠️ **「軽いから安全」 に見える probe ほど実行可能性に依存している**: `--version` / `--help` / `which` は、 この gate が閉じていると**何も返さない**。 その空を「非対応」 と読むと別の silent な後退を生む (= [convention-design-principles.md §22](../docs/convention-design-principles.md#silent-probe-false-healthy))。
+
+## <a id="job-python-by-capability"></a>無人ジョブの `python3` は PATH の順でなく「依存を import できるか」 で選ぶ — 発火面ごとに別の interpreter になる
+
+**主張**: 素の `python3` は、 それを起動する発火面の PATH で解決される。 agent の session (設定の env)、 対話 shell (rc)、 OS の定期ジョブ (job 定義) は PATH の先頭に来る dir が違う。 同じ機械に python3 が複数ある (OS 付属・package manager の複数の版) と、 **発火面ごとに別の interpreter になる**。 package manager の更新で PATH 上の `python3` の実体が新しい版に差し替わると、 **編集が 1 つも無いのに**ジョブの interpreter から third-party の依存が消える。
+
+### <a id="job-python-invisible"></a>壊れ方がその機械の中から見えない理由 (実測)
+
+- **session で試した結果は、 ジョブの環境の証明にならない**: session は別の interpreter を掴んでいる。 「手で実行したら動いた」 はジョブの環境を示さない。 逆に、 rc が PATH の先頭に package manager の python を置いた機械では、 agent の Bash の側が依存の無い interpreter を掴み、 ジョブは動くのに手で打つ道具だけが止まる (実測)
+- <a id="child-shell-python"></a>**agent の Bash から起こした子の shell も別の発火面**: agent の Bash の PATH は session を始めたときの shell の写しで、 その順は session によって違う (上の文のように package manager の python3 が先の session もあれば、 macOS の login shell で `/etc/zprofile` の path_helper が OS の dir を前に並べ直した写しの session もある)。 そこから `zsh script.sh` のように起こした子の non-login shell は `.zshenv` を読み直すので、 `.zshenv` が前置する dir (package manager の python3 など) が毎回先頭に来る。 後者の session では、 Bash で import できた依存が、 同じ session から背景に回した script では見つからない (実測)。 背景の script では interpreter を能力で選ぶか (下の対処の 1)、 依存を持つ interpreter を絶対 path で固定する。
+- **job 定義に PATH が無くても、 launchd の既定の PATH で走るとは限らない**: 本人の shell から `launchctl bootstrap` / `load` したジョブは、 その shell の環境を継ぐ (`launchctl print gui/<uid>/<label>` の `inherited environment` に出る)。 package manager の bin が先頭に居れば `python3` はそこで解決し、 OS 付属の python3 に入れた依存は見えない。 継いだ環境は再 bootstrap や機械の再起動で変わるので、 「昨日まで動いていた」 も証明にならない。 再現するなら `env -i HOME=$HOME PATH=<inherited の値> sh -c '<wrapper>'` で job と同じ PATH を与える (実測)
+- **成功の終了コードで何もしない**: engine を fail-open に書いていると (`ImportError` で exit 0)、 launchd の記録も cron の健康診断も正常を示す。 通知のジョブなら症状は「通知が来ない」 だけで、 来ないことには誰も気づかない
+- **関門が「待機」 に畳む**: 起動行が `<gate> || exit 0` 型だと、 interpreter が起動すらできない場合 (Xcode の gate の exit 69 / 見つからない 127) も「別のマシンが本番なので待機」 と同じ exit 0 になり、 ジョブが黙って永久に休む
+
+### <a id="job-python-fix"></a>対処 (3 つを組にする)
+
+1. **wrapper は interpreter を能力で選ぶ**: [`scripts/lib/pick-python.sh`](../scripts/lib/pick-python.sh) を source して `PY="$(pick_python yaml)" || { echo "$PY" >&2; exit 3; }` → `"$PY" engine.py`。 候補の順 = OS 付属の実体 (shim を通らない path) → shim (+ `DEVELOPER_DIR`) → PATH 上の順。 Python の入口 (別の engine を `os.execv(sys.executable, …)` で起こす shim) も同じで、 [`scripts/lib/pick_python.py`](../scripts/lib/pick_python.py) の `py, env = pick_python([...])` → `os.execve(py, [py, engine, …], env)` にする (今の interpreter が依存を持てばそのまま)。 依存が無いときに `None` を返す読み手の lib は、 無いことを stderr に 1 行出す = 呼び手が「認証の失敗」 と取り違えない ([`scripts/lib/gmail_read.py`](../scripts/lib/gmail_read.py) の `build_service`)。 1 つも無ければ**非 0 で終わる** (= launchd の終了コードに出る)。 依存の無い engine も `pick_python` (module なし) で「起動できる」 ものを選ぶ
+2. **関門の失敗を待機と分ける**: 関門の終了値は 0 = 実行 / 1 = 待機 と決め、 それ以外の非 0 は失敗として同じ終了値で終わらせる。 [`scheduled-tasks.md#launchd-cron-engine`](scheduled-tasks.md#launchd-cron-engine) の `--gate` はこの形を生成し、 既に入っている job 定義も `--ensure` が 1 回照合して書き換える (model 等の手の指定は残す)
+3. **他の機械から見る**: 壊れた機械の中の検査は、 その機械で誰かが session を開くまで何も言わない。 [`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat) の job health (`--job-label-prefix` / `--job-python-modules`) が各ジョブの最後の終了コードと、 job の PATH で解決した python3 が起動できるか・依存を import できるかを記録し、 reader が「関門の python3 が起動できない」 (🔴) / 「wrapper が PATH の python3 を呼ぶのに依存を import できない」 (🟠) / 他の機械の非 0 終了 (🟠) を出す
+
+⚠️ <a id="selftest-imports-only-what-it-tests"></a>**検査の runner も同じ壊れ方をする**: `run-all-checks` のように script の `--selftest` を自動で見つけて回す runner は、 起動した環境の PATH の先頭の python3 で回る (session の Bash・hook・定期ジョブで違う python3 になる)。 本番の実行でだけ要る library (API の client など) を import の時点で要求する script は、 その library の無い python3 に当たると selftest ごと落ち、 検査の赤が回すたびに出たり消えたりする (実測)。 library の確認は本番の入口 (`main`) に置き、 selftest はどの python3 でも回る形にする。 検査の記録が「最後の行」 を理由として見せる場合、 selftest が試した警告の分岐の出力も理由に見える = runner の見出しは失敗の印の行を選ぶ ([`scripts/local-ci.py`](../scripts/local-ci.py) の `headline`)。
+
+⚠️ [#xcode-gate-wrong-fix](#xcode-gate-wrong-fix) の「別の python へ逃がすのは誤り」 は、 **PATH の順が黙って逃がしている**場合にも当てはまる = 意図して選んでいないのに、 ジョブは別の interpreter で動いている。 表の「OS の定期ジョブ」 行の `DEVELOPER_DIR` の宣言だけでは足りない (shim を直しても、 PATH が先に別の python3 を返す)。
+
+⚠️ <a id="job-python-vs-repo-venv"></a>**repo の計算の Python は別の問題**: 本節は無人ジョブが既存の interpreter を依存で選ぶ話。 計算・検算を回す repo は、 宣言 (`.python-version`) の版で作った venv を入口 (`tools/py`) が用意する = [`python-env.md`](python-env.md)。 repo の venv のために Python を入れるときは `python3` の向き先を変えない入れ方を選ぶ (変わると、 本節の壊れ方がジョブの側に起きる)。
+
+⚠️ <a id="job-python-switch-moves-tcc"></a>**interpreter を替えると、 ジョブが起動する CLI の macOS の権限 (TCC) の帰属先も変わる**: Homebrew の python から起動していた頃は python に付いていた許可が、 Apple 純正の python に替えると子の CLI 自身に求められるようになり、 それまで出なかった許可ダイアログが定期ジョブのたびに出始める (実測)。 替えた後は子の CLI の許可を 1 回取り直す。 押しても出直すなら、 CLI の署名を疑う = [`macos-claude-code-tcc-recurring-prompt.md#half-signed-universal-binary`](macos-claude-code-tcc-recurring-prompt.md#half-signed-universal-binary)。

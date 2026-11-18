@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""garoon-client.py — Cybozu Garoon (cloud) を **browser session cookie で script から読む** (画面 drive 不要)。
+
+背景: SAML-only の組織では REST の password auth が admin 限定・OAuth client も admin 登録要 = user 側で
+発行できる credential が無い。 唯一残る機械経路 = user が browser で login 済みの session cookie を
+再利用する (= `chromium-cookies.py`)。 本 script はその上に Garoon の主要 read 操作を載せた薄い client。
+一般則 = conventions/machine-route-first.md #wiring-gap-is-a-task、 Garoon 機構 = conventions/garoon.md。
+
+subcommand:
+  search   <keyword> [--app bulletin|cabinet|...] [--start N]   全文検索 (= UI の検索 box と同じ engine)
+  bulletin-categories                                           掲示板 category 一覧 (REST)
+  bulletin-topics <category_id>                                 category 内の掲示一覧 (REST)
+  bulletin-topic <topic_id>                                     掲示 1 件の本文 (REST)
+  download <fid> --app bulletin|cabinet --out <file か dir>     添付 file の download (dir なら server の file 名で置く)
+  get <path> [--json|--text]                                    任意 path を GET (= /g/... の HTML/JSON)。 path は貼った URL でもよい (同じ組織の host だけ)。
+                                                                --text = script/style を落として tag を剥がした読める行 (ワークフローの進行状況など)。
+                                                                Garoon のエラー画面 (例: fid の無い view.csp) は code と説明を stderr に出して exit 65
+  user <名前> [--limit N]                                       名前で人を引き、 uid・ログイン名・所属・E-mail・役職を並べる
+                                                                (REST の /base/users は id と名前しか返さない = 1 人ずつユーザー情報の画面を読む。
+                                                                 欄が空なら「(空)」 と出す = 空の欄の値を推測で埋めない)
+  status                                                        いま読めるか (GET 1 本。 切れていれば下の復帰を試す)
+  doctor                                                        配線だけを見る (cookie を復号できて値が壊れていないか。 network なし、 健全なら無言)
+  probe [path ...]                                              切れ方の採取 (cookie なし・偽の session id で撃ち、 302 の行き先・Set-Cookie の名前・切れ判定を並べる)
+
+共通 option: --org <subdomain> (env GAROON_ORG)  --browser brave|chrome  --profile Default
+             --browser-refresh off|keep|close (env GAROON_BROWSER_REFRESH)  --wait-login 秒  --trace
+
+機構 fact (2026-09-07 実測、 Garoon 6.31 cloud):
+  - 全文検索 = `POST /g/fts/api/search?csrf_ticket=<ticket>` + JSON body
+      {"keyword": kw, "apps": ["bulletin"|"cabinet"|...], "start": 0,
+       cabinet の時は "cabinetFolderId": "1"(= root) と "fileOnly": true が必須 (無いと GRN_FTS_00001 520)}
+    header `X-Requested-With: XMLHttpRequest`。 応答 = {"result": {"docs": [...], "continuable": bool}, "succes": true}
+    doc = {title, url (/g/bulletin/view.csp?aid=N | /g/cabinet/view.csp?hid=H&fid=F), snippet (HTML), modifiedTime,
+           modifier{displayName}, file{title, downloadUrl(= .../file_download.csp/-/<name>?fid=F), size}}
+    ⚠️ search.csp の HTML は結果を含まない (JS が上の API を叩いて描画) — HTML を grep して「0 件」 と言わない。
+  - csrf ticket = /g/cabinet/search.csp 等の **redirect しない** /g/ ページの inline script (portal/index.csp は
+    302 → index.csp?pid=N なので allow_redirects なしだと取れない) `grn.__PRELOADED_DATA__ = {"csrfTicket": "..."}` から取る。
+  - REST = `GET /g/api/v1/bulletin/...` (session auth = cookie + X-Requested-With で通る)。
+  - file = `GET /g/bulletin/file_download.csp/-/<name>?fid=F` / `GET /g/cabinet/download.csp/-/<name>?fid=F`
+    (cabinet 側は UI では time= 署名 token が付くが、 session 内 GET なら token なしの fid だけで 200 application/pdf
+    が返る = 実測。 返らなくなったら検索結果の downloadUrl をそのまま使う)。
+  - login 切れの判定 = 302 → SSO (別 host) / 302 → `<org>.cybozu.com/login` / 200 + `<title>ログイン` /
+    REST の 401。 script はパスワードも OTP も扱わない。
+  - ログイン画面 (/login) は開かれるたびに未認証の JSESSIONID を配る (実測、 `probe` で見える) = cookie DB の変化は
+    入り直しの証拠にならない (conventions/garoon.md#login-page-mints-session-cookie)。
+
+login 切れからの復帰 = 共通部品 scripts/lib/sso_cookie_session.py (入り直せた = 読み直した cookie を server が受け入れた
+時だけ / tab の行き先で「本体だけの切れ」 と「本人のログインが要る」 を見分ける / `--wait-login` / `--trace`)。
+手順 = conventions/garoon.md#garoon-session-recovery、 設計の要点 = conventions/machine-route-first.md#sso-session-recovery。
+`--browser-refresh` の既定は off (= 人の browser に触る副作用は opt-in、 利用者の入口 wrapper が決める)。
+⚠️ IdP の有効期間 (組織の方針) は延ばさない = 定期的に開かせる仕組みにしない。 開かせるのは読む用事がある時だけ。
+
+⚠️ 出力に cookie / ticket を出さない。 取得した掲示本文・file は組織の内部情報 = private 層にしか置かない。
+"""
+import argparse
+import html as _html
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))  # importlib 経由で読まれた時も lib を引けるように
+from lib.browser_tab import BROWSER_APPS, selftest_cases as _tab_selftest_cases  # noqa: E402
+from lib.sso_cookie_session import (  # noqa: E402
+    EX_LOGIN, CookieSession, LoginRequired, doctor as _doctor, print_probe, probe_anonymous,
+    selftest_cases as _session_selftest_cases, site_selftest_cases)
+
+PROBE_PATHS = ["/g/", "/g/portal/index.csp", "/g/cabinet/search.csp"]
+EX_GAROON_ERROR = 65  # Garoon がエラー画面を 200 で返した (= path や引数の誤り。 黙って exit 0 にしない)
+
+
+def _say(msg):
+    print(f"Garoon: {msg}", file=sys.stderr, flush=True)
+
+
+def expired(code, location, text, base_host):
+    """HTTP 応答が「Garoon のログイン切れ」 なら理由、 そうでなければ None。"""
+    if code in (301, 302, 303):
+        u = urlparse(location)
+        if u.hostname and u.hostname != base_host:
+            return "SSO redirect"
+        if u.path.rstrip("/").endswith("/login"):
+            return "login redirect"
+    if code == 200 and "<title>ログイン" in (text or "")[:3000]:
+        return "login page"
+    if code == 401:
+        return "401"
+    return None
+
+
+def inside(url, base_host):
+    """tab の行き先 (query なしの URL) が Garoon の中か (= ログイン画面でも別 host でもない)。"""
+    u = urlparse(url)
+    return u.scheme == "https" and u.hostname == base_host and not u.path.rstrip("/").endswith("/login")
+
+
+class Garoon(CookieSession):
+    label = "Garoon"
+    entry_path = "/g/"
+    alive_path = "/g/portal/index.csp"  # 生きていれば同じ host の中への 302 で本文なし = 軽い
+    close_path = "/"
+    default_headers = {"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"}
+
+    def __init__(self, org, browser="brave", profile="Default", refresh="off", wait_login=0, trace=False):
+        self.org = org
+        self._csrf = None
+        super().__init__(f"https://{org}.cybozu.com", browser, profile, refresh, wait_login, trace)
+
+    def cookie_domains(self):
+        return ["cybozu.com"]  # org の host と .cybozu.com (IdP の cookie は読まない)
+
+    def expired(self, code, location, text):
+        return expired(code, location, text, self.host)
+
+    def inside(self, url):
+        return inside(url, self.host)
+
+    def on_load(self):
+        self._csrf = None  # cookie を読み直したら ticket も取り直す
+
+    @property
+    def csrf(self):
+        if not self._csrf:
+            # redirect を辿らない (= 切れた時に SSO host へ cookie を持って行かず、 302 を切れとして捕まえる)
+            t = self._request("GET", "/g/cabinet/search.csp", params={"text": "x"}).text
+            m = re.search(r'"csrfTicket":"([0-9a-f]+)"', t)
+            if not m:
+                raise SystemExit("csrfTicket が取れない (= 未 login か page 構造変化)")
+            self._csrf = m.group(1)
+        return self._csrf
+
+    def search(self, keyword, app="bulletin", start=0, **extra):
+        body = {"keyword": keyword, "apps": [app], "start": start}
+        if app == "cabinet":
+            body.setdefault("cabinetFolderId", "1")
+            body.setdefault("fileOnly", True)
+        body.update(extra)
+        ticket = self.csrf  # 切れていればここで入り直す (= POST に古い ticket を載せない)
+        r = self._request("POST", "/g/fts/api/search", params={"csrf_ticket": ticket}, data=json.dumps(body),
+                          headers={**self.h, "Content-Type": "application/json"}, timeout=90)
+        if r.status_code != 200:
+            raise SystemExit(f"fts/api/search {r.status_code}: {r.text[:300]}")
+        return r.json().get("result", {})
+
+    def rest(self, path, **params):
+        r = self.get("/g/api/v1" + path, params=params)
+        if r.status_code != 200:
+            raise SystemExit(f"REST {path} {r.status_code}: {r.text[:300]}")
+        return r.json()
+
+    def download(self, fid, app, out):
+        path = "/g/bulletin/file_download.csp/-/f" if app == "bulletin" else "/g/cabinet/download.csp/-/f"
+        r = self.get(path, params={"fid": fid})
+        if r.status_code != 200 or r.headers.get("content-type", "").startswith("text/html"):
+            raise SystemExit(f"download fid={fid} 失敗 {r.status_code} {r.headers.get('content-type')} (cabinet は fid だけで通る実測だが、 変わったら検索結果の downloadUrl を get で)")
+        dest = Path(out)
+        if dest.is_dir():  # --out に dir を渡したら、 server の付けた file 名で置く (前は IsADirectoryError で落ちた)
+            dest = dest / disposition_name(r.headers.get("content-disposition", ""), f"fid{fid}")
+        dest.write_bytes(r.content)
+        return dest, len(r.content), r.headers.get("content-type")
+
+
+def disposition_name(cd, fallback):
+    """Content-Disposition から file 名 (RFC 5987 の filename* を優先)。 path の区切りは _ に。 取れなければ fallback。"""
+    from urllib.parse import unquote
+    m = re.search(r"filename\*\s*=\s*([^']*)'[^']*'([^;]+)", cd or "", re.I)
+    name = unquote(m.group(2).strip(), encoding=(m.group(1) or "utf-8")) if m else None
+    if not name:
+        m = re.search(r'filename\s*=\s*"?([^";]+)"?', cd or "", re.I)
+        name = m.group(1).strip() if m else None
+    name = re.sub(r"[/\\\x00]", "_", name or "").strip(". ")
+    return name or fallback
+
+
+def _strip(s):
+    return re.sub(r"<[^>]+>", "", s or "").replace("\n", " ")
+
+
+def page_text(page):
+    """HTML を読める行に: script / style を落とし、 tag を改行にして entity を戻し、 空行を捨てる (`get --text`)。"""
+    s = re.sub(r"(?is)<(script|style)\b.*?</\1\s*>", "", page or "")
+    s = _html.unescape(re.sub(r"<[^>]+>", "\n", s))
+    return "\n".join(line.strip() for line in s.splitlines() if line.strip())
+
+
+def error_page(page):
+    """Garoon のエラー画面 (HTTP 200 で返る) なら (code, 説明)、 そうでなければ None。"""
+    if not re.search(r"<title>\s*ガルーン\s*エラー", page or ""):
+        return None
+    m = re.search(r'id="error_number"[^>]*>\s*エラー\s*\(([A-Z0-9_]+)\)\s*</h2>\s*([^<]*)', page)
+    return (m.group(1), m.group(2).strip()) if m else ("?", "")
+
+
+PROFILE_LABELS = ("名前", "ログイン名", "ロケール", "拠点", "所属する組織", "優先する組織", "よみ",
+                  "E-mail", "メモ", "役職", "連絡先", "URL", "画像")
+
+
+def profile_fields(text):
+    """ユーザー情報の画面 (`/g/grn/user_view.csp?uid=<id>`) の page_text から、 ラベルの次の行を値として取る (`user`)。
+    値の空いた欄は次の行が別のラベルになる = 空文字。 画面の上の menu に同じ語が出ても拾わないよう、
+    「ユーザー情報の詳細」 の見出しより後だけを見る。 REST の `/base/users` は id と名前しか返さない (実測)。"""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line == "ユーザー情報の詳細"), 0)
+    out = {}
+    for i in range(start, len(lines)):
+        if lines[i] in PROFILE_LABELS and lines[i] not in out:
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            out[lines[i]] = "" if nxt in PROFILE_LABELS else nxt
+    return out
+
+
+def site_path(path, base):
+    """`get` の引数を path にする。 同じ組織の https URL なら origin を外す (= 画面から貼った URL で動く)。
+    origin を足し重ねると host が `<org>.cybozu.comhttps` になって名前解決で落ちていた (実測)。 別 host は止める。"""
+    if not re.match(r"(?i)https?://", path):
+        return path
+    u, b = urlparse(path), urlparse(base)
+    if u.scheme != "https" or u.hostname != b.hostname:
+        raise SystemExit(f"get: {u.scheme}://{u.hostname} は {b.scheme}://{b.hostname} でない (別 host は読まない)")
+    return (u.path or "/") + (f"?{u.query}" if u.query else "")
+
+
+def doctor(browser, profile):
+    """script 経路の配線だけを見る (cookie を復号できて値が壊れていないか)。 network なし。 健全・対象外なら []。"""
+    return _doctor("Garoon", browser, profile, ["cybozu.com"])
+
+
+def selftest():
+    host = "x.cybozu.com"
+    cases = [
+        ((302, "https://x.ex-tic.com/auth/saml2/a/assertions?SAMLRequest=z", ""), "SSO redirect"),
+        ((302, "https://x.cybozu.com/login?redirect=https%3A%2F%2Fx.cybozu.com%2Fg%2F", ""), "login redirect"),
+        ((302, "/login?redirect=%2Fg%2F", ""), "login redirect"),
+        ((200, "", "<html><head><title>ログイン</title>"), "login page"),
+        ((401, "", '{"error":{"errorCode":"GRN_REST_API_00003"}}'), "401"),
+        ((302, "https://x.cybozu.com/g/portal/index.csp?pid=44", ""), None),
+        ((302, "/g/index.csp?pid=44", ""), None),
+        ((200, "", "<title>ポータル</title>"), None),
+    ]
+    ok = True
+    for (code, loc, text), want in cases:
+        got = expired(code, loc, text, host)
+        ok &= got == want
+        print("PASS" if got == want else "FAIL", code, loc[:40], "->", got)
+
+    for cd, want in [("attachment; filename*=UTF-8''%E4%BA%88%E7%AE%97.pdf", "予算.pdf"),
+                     ('attachment; filename="a/b.xls"', "a_b.xls"), ("", "fid9")]:
+        got = disposition_name(cd, "fid9")
+        ok &= got == want
+        print("PASS" if got == want else "FAIL", "disposition", repr(cd[:30]), "->", got)
+
+    def _parsed(argv):
+        return build_parser().parse_args(argv)
+
+    def _raises(f):
+        try:
+            f()
+        except SystemExit:
+            return True
+        return False
+    b = "https://x.cybozu.com"
+    checks = _tab_selftest_cases() + _session_selftest_cases() + site_selftest_cases(
+        Garoon, b, entry=(b + "/g/", True), login=(b + "/login", False),
+        idp=("https://x.ex-tic.com/auth/session", False), back=(b + "/g/portal/index.csp", False)) + [
+        ("--wait-login は subcommand の後ろでも効く", _parsed(["search", "k", "--wait-login", "5"]).wait_login == 5),
+        ("--wait-login は subcommand の前でも効く", _parsed(["--wait-login", "7", "search", "k"]).wait_login == 7),
+        ("後ろで指定しなければ前の値が残る", _parsed(["--wait-login", "7", "--json", "search", "k"]).json is True
+         and _parsed(["--wait-login", "7", "search", "k"]).wait_login == 7),
+        ("何も付けなければ既定値", _parsed(["status"]).wait_login == 0 and _parsed(["status"]).json is False
+         and _parsed(["status"]).trace is False),
+        ("--trace は subcommand の前でも後でも効く", _parsed(["--trace", "status"]).trace and _parsed(["status", "--trace"]).trace),
+        ("probe は path を省けば既定の組", _parsed(["probe"]).paths == [] and _parsed(["probe", "/g/"]).paths == ["/g/"]),
+        ("Garoon の中の判定: /login と別 host と http は外", inside("https://x.cybozu.com/g/", host)
+         and not inside("https://x.cybozu.com/login", host) and not inside("https://y.cybozu.com/g/", host)
+         and not inside("http://x.cybozu.com/g/", host) and not inside("chrome-error://chromewebdata/", host)),
+        ("get --text: script/style を落とし tag を行に、 entity を戻す",
+         page_text("<html><script>var x=1;</script><style>p{}</style><td>承認</td><td>A &amp; B</td>\n\n<p> </p></html>")
+         == "承認\nA & B"),
+        ("get: エラー画面の code と説明を取る",
+         error_page('<title>ガルーン エラー</title><h2 id="error_number" class="e">エラー (GRN_WRKF_00000)</h2>\n'
+                    '                フォルダーIDが不正です。\n') == ("GRN_WRKF_00000", "フォルダーIDが不正です。")
+         and error_page("<title>ワークフロー</title>") is None),
+        ("get: 同じ組織の URL は path に、 path はそのまま", site_path(b + "/g/workflow/view.csp?fid=1&pid=2", b)
+         == "/g/workflow/view.csp?fid=1&pid=2" and site_path("/g/", b) == "/g/" and site_path(b, b) == "/"),
+        ("get: 別 host の URL は止める", _raises(lambda: site_path("https://y.cybozu.com/g/", b))
+         and _raises(lambda: site_path("http://x.cybozu.com/g/", b))),
+        ("get --text は subcommand の後ろで受ける", _parsed(["get", "/g/", "--text"]).text is True
+         and _parsed(["get", "/g/"]).text is False),
+        ("user: 画面の欄を読み、 空の欄は空文字 (次の行が別のラベル)",
+         profile_fields("メモ\n架空のメニュー\nユーザー情報の詳細\n甲野 太郎\n名前\n標準:\n甲野 太郎\nログイン名\nkouno\n"
+                        "所属する組織\n架空課 (架空大学>事務局>架空課)\n優先する組織\nよみ\nこうの たろう\n"
+                        "E-mail\nkouno@example.org\nメモ\n役職\n連絡先")
+         == {"名前": "標準:", "ログイン名": "kouno", "所属する組織": "架空課 (架空大学>事務局>架空課)",
+             "優先する組織": "", "よみ": "こうの たろう", "E-mail": "kouno@example.org", "メモ": "", "役職": "", "連絡先": ""}),
+        ("user: E-mail と所属の欄が空の人", profile_fields("ユーザー情報の詳細\nログイン名\notsu\n所属する組織\n優先する組織\n"
+                                                           "E-mail\nメモ\n役職\n連絡先").get("E-mail") == ""),
+        ("user の subcommand を受ける", _parsed(["user", "甲野", "--limit", "5"]).limit == 5),
+    ]
+    for name, good in checks:
+        ok &= bool(good)
+        print("PASS" if good else "FAIL", name)
+    print("selftest", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def build_parser():
+    """引数の組み立て。 --wait-login / --browser-refresh / --json / --trace は subcommand の前でも後でも効く
+    (= 後ろに付けると argparse の unrecognized arguments で落ちていた、 実測)。"""
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--org", default=os.environ.get("GAROON_ORG"), help="cybozu.com subdomain (env GAROON_ORG)")
+    ap.add_argument("--browser", default="brave")
+    ap.add_argument("--profile", default="Default")
+    refresh_help = ("切れた時に起動中の browser に裏で tab を開かせて入り直すか (env GAROON_BROWSER_REFRESH)。 "
+                    "keep = 開いた tab を残す / close = 入り直せたら自分が開いた tab を閉じる")
+    wait_help = "本人のログインが要る時、 ログインし終えるのをこの秒数まで待って続きから進む"
+    trace_help = "入り直しの途中の tab の行き先・cookie DB の変化・受け入れの確認を秒つきで stderr に出す (値は出さない)"
+    ap.add_argument("--browser-refresh", choices=("off", "keep", "close"),
+                    default=os.environ.get("GAROON_BROWSER_REFRESH", "off"), help=refresh_help)
+    ap.add_argument("--wait-login", type=int, default=0, metavar="秒", help=wait_help)
+    ap.add_argument("--trace", action="store_true", help=trace_help)
+    ap.add_argument("--selftest", action="store_true", help="切れ判定と入り直しの結末判定の自己テスト (network・browser なし)")
+    ap.add_argument("--json", action="store_true", help="raw JSON を出す")
+    # subcommand の後ろにも同じ option を置けるようにする。 default=SUPPRESS = 後ろで指定しなかった時に前の値を消さない
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--browser-refresh", choices=("off", "keep", "close"), default=argparse.SUPPRESS, help=refresh_help)
+    common.add_argument("--wait-login", type=int, default=argparse.SUPPRESS, metavar="秒", help=wait_help)
+    common.add_argument("--trace", action="store_true", default=argparse.SUPPRESS, help=trace_help)
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="raw JSON を出す")
+    sub = ap.add_subparsers(dest="cmd")
+    p = sub.add_parser("search", parents=[common]); p.add_argument("keyword"); p.add_argument("--app", default="bulletin"); p.add_argument("--start", type=int, default=0)
+    sub.add_parser("bulletin-categories", parents=[common])
+    p = sub.add_parser("bulletin-topics", parents=[common]); p.add_argument("category_id")
+    p = sub.add_parser("bulletin-topic", parents=[common]); p.add_argument("topic_id")
+    p = sub.add_parser("download", parents=[common]); p.add_argument("fid"); p.add_argument("--app", default="bulletin"); p.add_argument("--out", required=True)
+    p = sub.add_parser("get", parents=[common]); p.add_argument("path")
+    p.add_argument("--text", action="store_true", help="script/style を落として tag を剥がした読める行で出す")
+    p = sub.add_parser("user", parents=[common], help="名前で人を引き、 所属・E-mail・ログイン名を画面から読む")
+    p.add_argument("name"); p.add_argument("--limit", type=int, default=20)
+    sub.add_parser("status", parents=[common])
+    sub.add_parser("doctor", parents=[common])
+    p = sub.add_parser("probe", parents=[common], help="切れ方の採取 (cookie を使わない)")
+    p.add_argument("paths", nargs="*", help=f"既定 = {' '.join(PROBE_PATHS)}")
+    return ap
+
+
+def main():
+    ap = build_parser()
+    a = ap.parse_args()
+    if a.selftest:
+        sys.exit(selftest())
+    if not a.cmd:
+        ap.error("subcommand が要る")
+    if a.cmd == "doctor":
+        for line in doctor(a.browser, a.profile):
+            print(line)
+        return
+    if not a.org:
+        raise SystemExit("--org か env GAROON_ORG が要る (= 組織 subdomain、 private 層の環境 doc 参照)")
+    if a.cmd == "probe":  # browser の cookie を使わない = Garoon() を作らない
+        base = f"https://{a.org}.cybozu.com"
+        print_probe(probe_anonymous(base, a.paths or PROBE_PATHS, lambda c, l, t: expired(c, l, t, urlparse(base).hostname)))
+        return
+    try:
+        run(a, Garoon(a.org, a.browser, a.profile, refresh=a.browser_refresh, wait_login=a.wait_login, trace=a.trace))
+    except LoginRequired as e:
+        app = BROWSER_APPS.get(a.browser, a.browser)
+        if e.observed:
+            _say("SSO のログインが切れている = 本人のログインが要る (ログイン画面で止まるのを見た)。 `--wait-login 600` を付けて"
+                 f"実行し直すと、 {app} にログイン画面を開いたまま、 本人がログインし終えるのを待って続きから進む"
+                 + ("" if a.browser_refresh == "close" else f"。 いま {app} に開いたログイン画面の tab は残してある"))
+        else:
+            _say(f"session 切れ ({e.why}) から復帰できなかった → {app} で https://{a.org}.cybozu.com/g/ を開いてログインしてから再実行"
+                 + ("" if a.browser_refresh != "off" else " (`--browser-refresh keep|close` で browser に入り直させられる)")
+                 + " / 途中を見るなら `--trace`")
+        sys.exit(EX_LOGIN)
+
+
+def run(a, g):
+    if a.cmd == "search":
+        res = g.search(a.keyword, a.app, a.start)
+        if a.json:
+            print(json.dumps(res, ensure_ascii=False)); return
+        docs = res.get("docs", [])
+        print(f"# {a.app} '{a.keyword}': {len(docs)} docs (continuable={res.get('continuable')})")
+        for d in docs:
+            f = d.get("file") or {}
+            fid = re.search(r"fid=(\d+)", f.get("downloadUrl", "") or "")
+            print(f"- {d.get('title','')} | {d.get('url')} | {d.get('modifiedTime')} | {(d.get('modifier') or {}).get('displayName','')}"
+                  + (f" | file={f.get('title')} fid={fid.group(1) if fid else '-'}" if f else ""))
+            print(f"    {_strip(d.get('snippet'))[:300]}")
+    elif a.cmd == "bulletin-categories":
+        print(json.dumps(g.rest("/bulletin/categories"), ensure_ascii=False, indent=None if a.json else 1))
+    elif a.cmd == "bulletin-topics":
+        print(json.dumps(g.rest(f"/bulletin/categories/{a.category_id}/topics"), ensure_ascii=False, indent=None if a.json else 1))
+    elif a.cmd == "bulletin-topic":
+        print(json.dumps(g.rest(f"/bulletin/topics/{a.topic_id}"), ensure_ascii=False, indent=None if a.json else 1))
+    elif a.cmd == "download":
+        dest, n, ct = g.download(a.fid, a.app, a.out); print(f"saved {dest} ({n} bytes, {ct})")
+    elif a.cmd == "get":
+        r = g.get(site_path(a.path, g.base))
+        err = error_page(r.text)
+        if err:
+            _say(f"エラー画面 ({err[0]}): {err[1]} — path と引数を確かめる (ワークフローの view.csp は fid も要る = conventions/garoon.md#garoon-workflow-status-read)")
+            sys.exit(EX_GAROON_ERROR)
+        print(json.dumps(r.json(), ensure_ascii=False) if a.json else page_text(r.text) if a.text else r.text)
+    elif a.cmd == "user":
+        rows = []
+        for u in g.rest("/base/users", name=a.name, limit=a.limit).get("users", []):
+            f = profile_fields(page_text(g.get(f"/g/grn/user_view.csp?uid={u.get('id')}").text))
+            rows.append({"uid": u.get("id"), "name": u.get("name"), "login": f.get("ログイン名", ""),
+                         "org": f.get("所属する組織", ""), "email": f.get("E-mail", ""), "title": f.get("役職", "")})
+        if a.json:
+            print(json.dumps(rows, ensure_ascii=False)); return
+        print(f"# user '{a.name}': {len(rows)} 人")
+        for r in rows:
+            print(f"- {r['uid']} | {r['name']} | login={r['login'] or '(空)'} | 所属={r['org'] or '(空)'}"
+                  f" | E-mail={r['email'] or '(空)'}" + (f" | 役職={r['title']}" if r["title"] else ""))
+    elif a.cmd == "status":
+        g.get(Garoon.alive_path)
+        print("読める" + {None: "", "reload": " (cookie を読み直した)", "refresh": " (browser に入り直させた)"}[g.recovered_by])
+
+
+if __name__ == "__main__":
+    main()

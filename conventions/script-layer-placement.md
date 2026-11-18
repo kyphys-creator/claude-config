@@ -1,0 +1,55 @@
+<!-- doc-meta
+when: personal layer / shared project に script を新設するとき + 同じ役割の script が複数層にあると気づいたとき + generic engine と個別設定を分離するとき
+category: harness-core
+summary: script は現在の置き場所でなく audience と依存で配置する。汎用 predicate・変換・selftest は上層 engine、owner/project 固有の値・credential・対象一覧・scheduler wiring は下層 config / shim。下層入口を保つ場合も実装は複製せず exec/import で上層正本を呼ぶ
+-->
+# Script の層配置 — engine は上、instance は下
+
+script の置き場所は「最初にどの案件で書いたか」ではなく、**誰が入力を用意でき、誰に再利用可能か**で決める。一般化できる predicate・変換・検証は可能な限り上層へ置き、狭い audience にしか意味のない値だけを下層へ残す。
+
+## <a id="placement-test"></a>配置判定
+
+1. owner の識別子、private SoT、credential、account、repo 一覧が無くても動く機械部分は **layer 1**。
+2. 特定共有 project の schema・成果物・共同編集契約そのものを実装する決定的 engine は **layer 2**。
+3. owner 固有の対象一覧、選好、private workflow、cross-machine credential 配線は **layer 3**。
+4. hostname、絶対 path、導入済み app、local state、scheduler 登録は **layer 4**。再現可能な installer は上層に置けても、導入済みという事実は layer 4 のまま。
+
+「private data を読む」は script 全体を private に固定する理由ではない。data の形を引数・config にして処理する部分が他人にも使えるなら、engine と instance を分ける。
+
+## <a id="engine-instance-seam"></a>正しい seam
+
+- **上層 engine**: 明示的な `--root` / `--config` / `--repo` 等を受け、owner 名・絶対 path・秘密を持たない。判定ロジック、既定値の意味、exit code、positive/negative/foil を含む selftest の正本はこちら。
+- **下層 config / shim**: owner/project 固有の root、repo、account、例外、通知先だけを注入する。既存 dashboard や hook の path を保つ必要があれば薄い shim を残し、`exec` または import で上層 engine を呼ぶ。
+- **私的な経路に依存する一部は callback にする**: 非公開の client でメールや API を読む部分は engine に入れず、呼び出し側から関数として渡す。engine は判定の純関数 (抽出・既知集合との照合・表示する 1 行) と「いつ呼ぶか」だけを持つ。判定の selftest は上層で合成データだけで回り、下層 shim の selftest は経路の形を真似た fake で継ぎ目だけを見る。
+- **下層入口の import 名を保つ**: 下層 script の関数を別の script や手順書が import しているなら、shim はその名前を同じ引数で残す (engine から再 export し、account 名などで選ぶ関数は下層で wrap)。CLI の引数だけ保っても import する呼び出し元は壊れる。移設前に下層 path を全 repo で grep し、CLI 以外の使われ方を拾う。
+- <a id="new-engine-name-push-order"></a>**下層が engine の新しい名前を使うときは engine を先に push する**: shim 越しに engine を読む下層の入口が、 engine に足した名前を import する (ES module の `import { 新しい名前 }`、 Python の `from engine import 新しい名前`) と、 engine をまだ pull していないマシンでは新しい機能だけでなく**入口全体**が起動しない (ES module は名前が無いと読み込みの時点で失敗する)。 push の順 = engine の repo → 下層の repo。 結果には「両方を pull するまで下層の既存の機能も止まる」 と書く。
+- **engine の読み込み方**: shim が engine を module として読むなら、`importlib` の `exec_module` ではなく source を毎回 compile して exec する (macOS の system python は bytecode cache を別の場所に書き、同じ秒・同じ size で書き戻された source では古い `.pyc` を読みうる)。`check-script-layering.py` はこの形も shim と認める。
+- **参照面**: 下層 README / instruction index は役割・発火面・個別値の所在と上層正本への pointer だけを持つ。上層の述語や閾値表を再 author しない。
+- **SESSION**: 「何を移したか + 正本 pointer + 残作業」だけ。実装史、判定表、件数、恒久的な配置判断は engine/doc/ledger に置く。
+
+同じ basename の script が上下層にあり、両方が判定ロジックを持つ状態は migration の途中形であって完成形ではない。byte-for-byte copy も二重正本なので、配布 mirror として明示・検査する場合を除き shim 化する。
+
+<a id="embedded-copy"></a>**名前の違う写し (別の script に heredoc で埋め込んだ helper、 別の名前の script) は [`check-script-layering.py`](../scripts/check-script-layering.py) に見つからない** — 同じ basename の二重実装しか数えないため。 同じ層の 2 つの repo にまたがる写しも同じ。 見つけたら 1 本に寄せる:
+
+1. 寄せる前に、 両方を合成の入力の表 (エスケープ・コメント・入れ子・行の形・閉じていない入力) に通して差を並べ、 差ごとにどちらが正しいかを決める。 写しの方が誤っていることがある = 中間の出力の一致を目標にしない (実測 = 埋め込みの写しだけが誤る形が 5 つあった)。
+2. 呼び元には引数の対応だけを残し、 その対応を呼び元の selftest で確かめる (対応を壊した写しで selftest が落ちることも 1 回見る)。 正本の冒頭には呼び元を書く (正本の CLI を変える人が呼び元の selftest も回せるように)。 正本が見つからない機械では、 黙って飛ばさずに置き場所を出して止める (飛ばすと壊れた成果物を配る)。
+3. 人が見る最終の成果物 (組版した PDF の頁画像など) を、 同じ入力で前後に作って比べる。 共有の作業 tree が並列 session で動いているなら、 一時 dir に固定の clone を作って入力を止める (下の「入力を固定する」 と同じ)。
+
+## <a id="migration-gate"></a>移設の検収
+
+1. 上層 engine を先に追加し、合成 fixture で selftest を通す。selftest の歯は、要所を 1 か所ずつ外した mutant を `<name>.mutants.json` に宣言して [`check-foil-teeth.py`](../scripts/check-foil-teeth.py) で確かめる (scratch の `sed` で壊して見るだけでは次の人が再現できない)。「途中の file が残っていない」 だけを見る検査が、途中の file を使わない版でも通っていた例がある (実測)。
+2. 下層の呼び出し path を保ったまま shim 化し、**変更前に保存した旧入口の出力**と新入口の出力・exit code を照合する。
+   - 入力を固定する: 実データの入力 (定期 job が書き直す cache など) は 2 回の実行の間に変わりうるので、 入力を file に書き出して旧版の写しと新版の両方に渡す。 「今日」 と設定の path も env で固定する (旧版の写しは置き場所が変わるので、 自分の dir を基準にした既定の path が別の場所を指す)。 出力を追記で貯める照合 script は、 回す前に前回の出力を消す
+   - 実データでは出ない分岐 (未承認・見えない・新着・エラー) は、旧版と新版の写しの設定定数だけを scratch の config に差し替えて同じ呼び出しを通し、比べる。写しは元と同じ basename にする (argparse の usage に prog 名が出て、名前だけの差が混じる。実測)。
+   - 関数を import する呼び出し元がいるなら、両版を同じ fake client で動かし、標準出力・呼び出しの列・書き出した file を 1 つの report にまとめて比べる。
+   - 差が出たら原因を名指ししてから、その差だけを正規化して比べ直す (例: 定数の文字列を config 由来の名前に置き換えた)。正規化を広げて差を消さない。
+   - 全部一致したら、比べる仕組みの歯を 1 回確かめる。旧版の写しの出力を 1 か所だけ壊して同じ照合を回し、その出力を通るケースだけが差になることを見る (比べる仕組みが何も見ていなくても「全部一致」 は出る)。
+   - <a id="shim-runs-the-engine"></a>shim が本当に engine を読んでいることを別に確かめる。engine の写しの符号を 1 か所変え、engine の所在をその写しに向けて下層の入口を回し、検査の失敗で落ちることを見る (import の経路が古い写しを掴んでいても、engine が同じ中身なら出力の一致では見分けがつかない)。所在が無い写しでは、足りない file を名指して止まり traceback を出さないことも見る。
+   - 旧版が git にあるときの旧入口の出力は [`compare-script-output.py`](../../ai-collaboration/scripts/compare-script-output.py) で取れる: 旧版を一時 dir に出し、両側で同じ script を回して時間の表示を除いて比べる。engine の名前を import する script も全部並べる (書き換えた script だけでなく)。
+   - 大きな副作用のある mode (実際の download・送信) を回さないなら、その経路は engine の selftest (fake + 一時 dir) で見た、と結果に書く。
+3. 個別値を下層 config / shim に寄せ、上層 diff に owner・第三者・未公開案件の事実が無いか確認する。
+   - <a id="shim-env-defaults"></a>shim が環境変数で個別値を渡すときは、 空文字の変数も未設定として扱って上書きする。 `os.environ.setdefault` は空文字の変数をそのまま残し、 engine 側の `os.environ.get(...) or <既定>` が汎用の既定に落ちて別の dir を読む (実測)。 engine が見つからない機械の shim は、 表示だけの mode では 0 で抜けて呼び元 (hook・dashboard) を止めず、 記録を書く mode では非 0 で止める (記録できたと読まれないように)。
+4. 上層の規約・script index を正本にし、下層 index と SESSION は pointer 化する。
+5. [`scripts/check-script-layering.py`](../scripts/check-script-layering.py) で同名二重実装が無いことを検査する。新しい lower-layer script は、上層 counterpart を同時に作らない正当な場合だけ先頭 40 行に `layer-placement: layer3 <理由>` を書く。これは配置理由の declaration であり、汎用化できないことの永久免罪ではない。
+
+この checker が証明するのは「既知の二重実装がない」「新設時に配置判断を飛ばしていない」ことまで。lower-only script の意味が本当に owner 固有かは `--inventory` の棚卸しで定期的に読み直す。

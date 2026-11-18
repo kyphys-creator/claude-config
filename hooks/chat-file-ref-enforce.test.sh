@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# chat-file-ref-enforce.test.sh — logic + incident-replay selftest
+#
+# §A incident replay: cd で repo に入った後、 repo の中からの path を link / inline code で書いた最終発話 (= 右パネルで
+#     「このファイルが見つかりませんでした」) と、 repo を基準にした session が ../ で外の repo を指す形を再現して fire を確認。
+#     A7-A8 = 検収で見つけた見逃し・2 重計上 (区切りの無い名前 + 行番号の href / label が inline code の link)。
+# §B 誤検出の regression: 基準フォルダからの正しい path / 絶対 path / ~/ / URL / anchor / fenced block の中 /
+#     どこにも無い path / 区切りの無い名前 / 追加フォルダの中へ ../ で出る path / CLI の session / 途中の text だけ。
+#     B11-B14 = 検収で見つけた誤検出 (link の label の inline code / list・引用の中の fence) と scheme 判定の回帰。
+#     B15-B16 = 同名 file が同じ実体 (symlink) / app が link にしない文字を含む inline code。
+# §A' 検収の追補: 行頭の inline な 3 連 backtick を fence と取り違えない / 基準フォルダの同名の別 file が開く形。
+# §D 基準フォルダが git repo: app の path の末尾一致 (1 件なら開く = silent、 複数なら fire、 untracked も見る)。
+# §E 書き方の問題: href を山括弧 <…> で囲んだ link / file 名の濁点の形 (NFC・NFD) が disk 上の名前と違う参照
+#     (2026-10-13 の実例 = Dropbox の NFD の名前の PDF を山括弧の絶対 path で書いた)。 絶対 path でも拾う。
+# §F 音声・動画が右パネルで鳴らない (2026-11-03 の実例 = 同期フォルダを起点にした配信用の MP3 の path を inline code で書き、
+#     押すと右パネルが読み込めなかった)。 外 (実体の path で判定) / 25 MB 超 / 同じ turn に afplay・open で流した (= 黙る)。
+# §G 実体が session のフォルダの外 (実例 = 同期フォルダへの symlink の repo の PDF を絶対 path で書き、 押すと
+#     「見つかりませんでした」)。 symlink の repo の絶対 path・相対 path / settings にだけ在る追加フォルダ = fire、
+#     実体も中・symlink の repo の中で始めた session・app で足したフォルダ・fenced block・scratchpad = silent。
+#     cd した先からの相対 path は今も書き直させ、 文は「版で変わる」 と言う (app 5.11492.5 の段は写さない)。
+# §C fail-open と配線: stop_hook_active / transcript 不在 / 空入力 / 部品の不在・例外 = 沈黙。 symlink 経由で部品を見つける。
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+HOOK="$HERE/chat-file-ref-enforce.sh"
+REPO="$(cd "$HERE/.." && pwd)"
+[ -x "$HOOK" ] || { echo "FAIL: hook not executable: $HOOK"; exit 1; }
+
+pass=0; fail=0; results=()
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+# 手元の環境から切り離す: HOME は空の dir (部品は transcript の追加フォルダが空だと本物の ~/.claude/settings.json の
+# additionalDirectories を読む) / git は $TMP より上の repo を探さない (一時 dir の祖先に .git が在ると、 git でない
+# 基準フォルダの case の参照が `git ls-files` の末尾一致 1 件として黙り、 A1〜A9 が落ちる = 実測)
+mkdir -p "$TMP/home" && export HOME="$TMP/home"
+unset CLAUDE_CONFIG_DIR   # settings の追加フォルダを読む先 (部品の settings_additional_dirs) も HOME の下に固定する
+export GIT_CEILING_DIRECTORIES="$(cd "$TMP" && pwd -P)"
+
+# 歯の検査 (scripts/chat_file_refs.mutants.json → check-foil-teeth.py) は、 修正の一部を外した部品の写しの dir を渡す。
+# hook は <root>/scripts/lib を読むので、 その形の root を一時 dir に組む。 C6 (symlink 経由) だけは実物の部品を読む。
+if [ -n "${CHAT_FILE_REF_TEST_LIBDIR:-}" ]; then
+  LIBDIR="$(cd "$CHAT_FILE_REF_TEST_LIBDIR" && pwd)" || { echo "FAIL: no such dir: $CHAT_FILE_REF_TEST_LIBDIR"; exit 1; }
+  mkdir -p "$TMP/cfg/scripts" && ln -s "$LIBDIR" "$TMP/cfg/scripts/lib"
+  REPO="$TMP/cfg"
+fi
+
+ROOT="$TMP/root"
+mkdir -p "$ROOT/book/drafts" "$ROOT/book/notes" "$ROOT/tools/scripts" "$TMP/extra"
+: > "$ROOT/book/drafts/intro.md"; : > "$ROOT/book/notes/design.md"; : > "$ROOT/tools/scripts/run.py"
+: > "$ROOT/CLAUDE.md"; : > "$TMP/extra/memo.md"; : > "$ROOT/book/SESSION.md"
+mkdir -p "$TMP/extra/docs"; : > "$TMP/extra/docs/memo2.pdf"   # A11/A12: 追加フォルダを起点にした path
+echo "book の指示書" > "$ROOT/book/CLAUDE.md"          # A10: 基準フォルダの CLAUDE.md とは別の file
+: > "$ROOT/book/LINKED.md"; ln -s "$ROOT/book/LINKED.md" "$ROOT/LINKED.md"   # B15: 同じ実体
+mkdir -p "$ROOT/book/pkg/@scope"; : > "$ROOT/book/pkg/@scope/index.js"       # B16
+
+# mktranscript path entrypoint root additional_json final_text [mid_text] [bash_command]
+#   環境 snapshot (root) → user → assistant tool_use (cwd = root/book に cd した後) → tool_result → final
+mktranscript() {
+  local path="$1" ep="$2" root="$3" extra="$4" final="$5" mid="${6:-}" cmd="${7:-cd book && ls}"
+  {
+    jq -nc --arg r "$root" --argjson x "$extra" \
+      '{type:"attachment", cwd:$r, attachment:{type:"environment", snapshot:{workingDirectory:$r, additionalWorkingDirectories:$x}}}'
+    jq -nc --arg r "$root" --arg ep "$ep" '{type:"user", cwd:$r, entrypoint:$ep, message:{content:"試稿を開いて"}}'
+    [ -n "$mid" ] && jq -nc --arg r "$root/book" --arg t "$mid" '{type:"assistant", cwd:$r, message:{content:[{type:"text", text:$t}]}}'
+    jq -nc --arg r "$root/book" --arg c "$cmd" '{type:"assistant", cwd:$r, message:{content:[{type:"tool_use", name:"Bash", input:{command:$c}}]}}'
+    jq -nc --arg r "$root/book" '{type:"user", cwd:$r, message:{content:[{type:"tool_result", content:"ok"}]}}'
+    jq -nc --arg r "$root/book" --arg t "$final" '{type:"assistant", cwd:$r, message:{content:[{type:"text", text:$t}]}}'
+  } > "$path"
+}
+
+mkpayload() { jq -n --arg t "$1" --argjson a "${2:-false}" '{hook_event_name:"Stop", transcript_path:$t, stop_hook_active:$a}'; }
+
+# assert label expect(1/0) payload [needle] [env...]
+assert() {
+  local label="$1" expect="$2" input="$3" needle="${4:-}"
+  local out actual=0
+  local g1 g2 snip
+  out="$(printf '%s' "$input" | CLAUDE_CONFIG_ROOT="$REPO" "$HOOK" 2>&1)" || true
+  # 判定は here-string で読む (pipefail の下の `printf | grep -q` は、 grep が先に抜けると一致しても偽になりうる
+  # = conventions/shell-env.md#pipefail-grep-q-sigpipe)。 grep の終了値は落ちたときの行に残す
+  grep -qF '"decision"' <<< "$out"; g1=$?
+  grep -qF 'chat-file-ref' <<< "$out"; g2=$?
+  [ "$g1" = 0 ] && [ "$g2" = 0 ] && actual=1
+  if [ "$actual" = "$expect" ] && { [ -z "$needle" ] || grep -qF -- "$needle" <<< "$out"; }; then
+    pass=$((pass+1)); results+=("✅ $label")
+  else
+    # 落ちた行は 1 行に畳む (check-foil-teeth.py は FAIL の行の 1 行目しか見せない = 出力が JSON でも判定が偽になった
+    # 落ちの原因が、 前は 1 行目の `out={` の後ろに隠れた)
+    snip="${out:0:300}"; snip="${snip//$'\n'/ ⏎ }"
+    fail=$((fail+1)); results+=("❌ $label (expect=$expect actual=$actual needle=$needle grep=$g1/$g2 len=${#out} out=$snip)")
+  fi
+}
+
+BT='`'
+N=0
+case_() {  # case_ label expect final [needle] [ep] [root] [extra_json] [mid] [bash_command]
+  N=$((N+1))
+  local t="$TMP/t$N.jsonl"
+  mktranscript "$t" "${5:-claude-desktop}" "${6:-$ROOT}" "${7:-[]}" "$3" "${8:-}" "${9:-cd book && ls}"
+  assert "$1" "$2" "$(mkpayload "$t")" "${4:-}"
+}
+
+echo "=== §A incident replay ==="
+case_ "A1: link が repo の中からの path (cd の後) = fire + 正しい path" 1 \
+  "こちらです: [drafts/intro.md](drafts/intro.md)" "book/drafts/intro.md"
+case_ "A2: inline code が repo の中からの path = fire" 1 \
+  "試稿 ${BT}drafts/intro.md${BT} の最後の節です。" "book/drafts/intro.md"
+case_ "A3: 行番号・anchor つき href も解決して fire" 1 \
+  "[design](notes/design.md#opening) と [run.py:12](scripts/run.py:12)" "tools/scripts/run.py"
+case_ "A4: repo を基準にした session が ../ で外へ (追加フォルダ無し) = fire (フォルダの外)" 1 \
+  "[run](../tools/scripts/run.py)" "フォルダの外" "claude-desktop" "$ROOT/book"
+case_ "A5: VS Code の panel も対象" 1 "[x](drafts/intro.md)" "" "claude-vscode"
+case_ "A6: 第三者版 desktop も対象" 1 "[x](drafts/intro.md)" "" "claude-desktop-3p"
+case_ "A7: 区切りの無い名前 + 行番号の href (scheme と取り違えない) = fire" 1 \
+  "[SESSION.md:42](SESSION.md:42)" "book/SESSION.md"
+case_ "A8: label が inline code の link = link の 1 件だけ (code と 2 重に数えない)" 1 \
+  "[${BT}drafts/intro.md${BT}](drafts/intro.md)" "file 参照 1 件"
+
+echo "=== §B 誤検出の regression ==="
+case_ "B1: 基準フォルダからの path = silent" 0 "[intro](book/drafts/intro.md) と ${BT}tools/scripts/run.py${BT}"
+case_ "B2: 絶対 path = silent" 0 "[intro]($ROOT/book/drafts/intro.md)"
+case_ "B3: ~/ と URL と anchor だけ = silent" 0 "[a](~/drafts/intro.md) [b](https://example.com/drafts/intro.md) [c](#drafts)"
+case_ "B4: fenced block の中 = silent" 0 "例:
+${BT}${BT}${BT}
+[drafts/intro.md](drafts/intro.md) ${BT}drafts/intro.md${BT}
+${BT}${BT}${BT}"
+case_ "B5: どこにも無い path = silent" 0 "[x](path/to/file.md) ${BT}src/foo.ts${BT}"
+case_ "B6: 区切りの無い名前の inline code = silent" 0 "${BT}intro.md${BT} と ${BT}CLAUDE.md${BT}"
+case_ "B7: ../ で出た先が追加フォルダの中 = silent" 0 "[run](../tools/scripts/run.py)" "" "claude-desktop" "$ROOT/book" "[\"$ROOT\"]"
+case_ "B8: CLI の session = silent" 0 "[drafts/intro.md](drafts/intro.md)" "" "cli"
+case_ "B9: 途中の text だけに在り最終発話は clean = silent" 0 "完了しました。" "" "claude-desktop" "$ROOT" "[]" "[drafts/intro.md](drafts/intro.md)"
+case_ "B10: inline code の中の link 記法 = silent" 0 "${BT}[a](drafts/intro.md)${BT}"
+case_ "B11: label が repo の中からの path の inline code・href は正しい絶対 path = silent (押すと href が開く)" 0 \
+  "[${BT}drafts/intro.md${BT}]($ROOT/book/drafts/intro.md)"
+case_ "B12: list の中で 4 桁以上 indent された fence の中 = silent" 0 "1. 手順
+
+    ${BT}${BT}${BT}bash
+    cat drafts/intro.md ${BT}drafts/intro.md${BT} [x](drafts/intro.md)
+    ${BT}${BT}${BT}
+"
+case_ "B13: 引用 > の中の fence = silent" 0 "> ${BT}${BT}${BT}
+> [x](drafts/intro.md)
+> ${BT}${BT}${BT}"
+case_ "B14: mailto / tel は scheme のまま = silent" 0 "[m](mailto:a@example.com) [t](tel:123)"
+case_ "B15: 基準と cwd の同名 file が同じ実体 (symlink) = silent" 0 "[LINKED.md](LINKED.md)"
+case_ "B16: app が link にしない文字 (@) を含む inline code = silent" 0 "${BT}pkg/@scope/index.js${BT}"
+
+echo "=== §A' 検収の追補 (見逃し・意図と違う file) ==="
+case_ "A9: 行頭の inline な 3 連 backtick は fence ではない = 後ろの link を見逃さない" 1 \
+  "${BT}${BT}${BT}code${BT}${BT}${BT} は例です。
+
+本物: [x](drafts/intro.md)" "book/drafts/intro.md"
+case_ "A10: 基準フォルダの同名の別 file が開く (repo の中で [CLAUDE.md](CLAUDE.md)) = fire" 1 \
+  "[CLAUDE.md](CLAUDE.md)" "同名の別 file"
+
+case_ "A11: 追加フォルダを起点にした inline code = fire + 追加フォルダの中の絶対 path" 1 \
+  "理由書は ${BT}docs/memo2.pdf${BT} です。" "$TMP/extra/docs/memo2.pdf" "claude-desktop" "$ROOT" "[\"$TMP/extra\"]"
+case_ "A12: 追加フォルダを起点にした link = fire" 1 \
+  "[memo2](docs/memo2.pdf)" "$TMP/extra/docs/memo2.pdf" "claude-desktop" "$ROOT" "[\"$TMP/extra\"]"
+case_ "B17: 追加フォルダの中の絶対 path = silent" 0 \
+  "[memo2]($TMP/extra/docs/memo2.pdf)" "" "claude-desktop" "$ROOT" "[\"$TMP/extra\"]"
+
+echo "=== §D 基準フォルダが git repo (app は path の末尾一致で探す) ==="
+if command -v git >/dev/null 2>&1; then
+  GROOT="$TMP/groot"
+  mkdir -p "$GROOT/book/drafts" "$GROOT/a/notes" "$GROOT/b/notes"
+  : > "$GROOT/book/drafts/intro.md"; : > "$GROOT/a/notes/dup.md"; : > "$GROOT/b/notes/dup.md"
+  git init -q "$GROOT" && git -C "$GROOT" add -A
+  : > "$GROOT/book/drafts/new.md"   # untracked
+  case_ "D1: tracked の末尾一致が 1 件 = app が開く = silent" 0 "[x](drafts/intro.md)" "" "claude-desktop" "$GROOT"
+  case_ "D2: 末尾一致が 2 件 = app の絞り込みは写さない = fire" 1 "[x](notes/dup.md)" "a/notes/dup.md" "claude-desktop" "$GROOT"
+  case_ "D3: tracked に無く untracked の末尾一致が 1 件 = silent" 0 "${BT}drafts/new.md${BT}" "" "claude-desktop" "$GROOT"
+else
+  results+=("⏭  §D: git が無いので skip")
+fi
+
+echo "=== §E 書き方の問題 (山括弧の href / 濁点の形) ==="
+: > "$ROOT/book/My Notes.md"
+case_ "E1: 山括弧で囲んだ絶対 path の href (中身は在る) = fire + 囲まず %20 の形" 1 \
+  "[メモ](<$ROOT/book/My Notes.md>)" "My%20Notes.md"
+case_ "E2: 山括弧で囲んだ基準フォルダからの href (中身は在る) = fire" 1 \
+  "[試稿](<book/drafts/intro.md>)" "山括弧"
+case_ "E3: 山括弧の中身が repo の中からの path (cd の後) = fire + 置き場所も直した形" 1 \
+  "[試稿](<drafts/intro.md>)" "book/drafts/intro.md"
+case_ "E4: 山括弧の URL / どこにも無い path = silent" 0 \
+  "[u](<https://example.com/a b>) [x](<path/to/no such.md>)"
+NFC_NAME="ポスター.pdf"
+NFD_NAME="$(python3 -c 'import unicodedata, sys; print(unicodedata.normalize("NFD", sys.argv[1]))' "$NFC_NAME")"
+: > "$ROOT/book/$NFD_NAME"
+if [ -e "$ROOT/book/$NFC_NAME" ] && ! ls "$ROOT/book" | grep -qxF "$NFC_NAME"; then
+  case_ "E5: disk 上は NFD・link は NFC の絶対 path = fire + 濁点の形" 1 "[ポスター]($ROOT/book/$NFC_NAME)" "濁点の形"
+  case_ "E6: 基準フォルダからの NFC の link = fire" 1 "[ポスター](book/$NFC_NAME)" "濁点の形"
+  case_ "E7: disk 上と同じ NFD で書いた link = silent" 0 "[ポスター]($ROOT/book/$NFD_NAME)"
+  NFD_ODD="$(python3 -c 'import unicodedata, sys; print(unicodedata.normalize("NFD", sys.argv[1]))' "ポスター (案) A.pdf")"
+  : > "$ROOT/book/$NFD_ODD"
+  case_ "E9: 山括弧 + 濁点の形 + 空白・丸括弧 (2026-10-13 の実例の形) = fire + 両方を言う" 1 \
+    "[案](<$ROOT/book/ポスター (案) A.pdf>)" "濁点の形 (NFC / NFD) も"
+else
+  results+=("⏭  E5-E7・E9: この file system は正規化だけ違う名前を同じ file として開かない (macOS の外) ので skip")
+fi
+: > "$ROOT/book/memo (v2).md"
+case_ "E8: 山括弧で囲んだ丸括弧つきの名前 = 囲まずに %28・%29 で示す" 1 \
+  "[v2](<$ROOT/book/memo (v2).md>)" "memo%20%28v2%29.md"
+
+echo "=== §C fail-open と配線 ==="
+mktranscript "$TMP/c.jsonl" claude-desktop "$ROOT" "[]" "[drafts/intro.md](drafts/intro.md)"
+echo "=== §F 音声・動画 ==="
+mkdir -p "$ROOT/show/clips" "$TMP/sync/配信用"
+: > "$ROOT/show/clips/cut.mp3"                                  # 中・小さい = 鳴る
+: > "$TMP/sync/配信用/ep1.mp3"                                  # 外 (同期フォルダ = settings の追加フォルダ)
+python3 -c "f=open('$ROOT/show/ep2.mp3','wb'); f.seek(26214400); f.write(b'0')"   # 中・25 MB 超 (疎な file)
+ln -s "$TMP/sync" "$ROOT/show/sync-refs"                        # repo の中から同期フォルダへの symlink
+case_ "F1: 聞いてほしい外の音声への絶対 path = fire (流す案内)" 1 "新しい音は [ep1]($TMP/sync/配信用/ep1.mp3) で聞けます。" "afplay"
+case_ "F2: 同期フォルダを起点にした inline code (2026-11-03 の形) = fire、 書き直しでなく流す案内" 1 \
+  "新しい音を聞くなら ${BT}配信用/ep1.mp3${BT} です。" "右パネルで鳴りません" "claude-desktop" "$ROOT" "[\"$TMP/sync\"]"
+case_ "F3: 中の小さい音声 = silent (右パネルで鳴る)" 0 "[cut](show/clips/cut.mp3) を聞いてください。"
+case_ "F4: 中でも 25 MB 超 = fire (大きさを示す)" 1 "[ep2](show/ep2.mp3) を聴いてください。" "25.0 MB"
+case_ "F5: 同じ turn に afplay で流した = silent" 0 "聞いてもらった音: [ep1]($TMP/sync/配信用/ep1.mp3)" "" "claude-desktop" "$ROOT" "[]" "" \
+  "afplay '$TMP/sync/配信用/ep1.mp3'"
+case_ "F6: 中に見えるが実体は外 (symlink) = fire" 1 "試聴は [ep1](show/sync-refs/配信用/ep1.mp3)" "フォルダ (と scratchpad) の外"
+case_ "F7: open -R (Finder で見せるだけ) は流したと数えない = fire" 1 "聞くなら [ep1]($TMP/sync/配信用/ep1.mp3)" "afplay" \
+  "claude-desktop" "$ROOT" "[]" "" "open -R '$TMP/sync/配信用/ep1.mp3'"
+case_ "F8: 音声でない外の絶対 path = fire (実体が外 = 開かない案内、 流す案内でない)" 1 "[memo]($TMP/extra/memo.md) を聞いて" "実体が session のフォルダの外"
+case_ "F9: 聞く語の無い置き場所の記録でも、 外の file への link = fire (押しても開かない link)" 1 \
+  "収録の写しは [ep1]($TMP/sync/配信用/ep1.mp3) に置きました。" "fenced code block"
+case_ "F10: 聞く語の無い同期フォルダ起点の inline code = 従来の書き直しの案内 (流す案内でない)" 1 \
+  "写しは ${BT}配信用/ep1.mp3${BT} です。" "直し方" "claude-desktop" "$ROOT" "[\"$TMP/sync\"]"
+
+echo "=== §G 実体が session のフォルダの外 (実例 = 同期フォルダへの symlink の repo の PDF を絶対 path で書いた) ==="
+mkdir -p "$TMP/sync2/review" "$TMP/setonly" "$TMP/home/.claude"
+: > "$TMP/sync2/review/cand.pdf"; : > "$TMP/setonly/m.pdf"
+ln -s "$TMP/sync2" "$ROOT/fs"                                      # repo の場所が同期フォルダへの symlink
+printf '{"permissions":{"additionalDirectories":["%s"]}}\n' "$TMP/setonly" > "$TMP/home/.claude/settings.json"
+case_ "G1: symlink の repo の file を絶対 path で (実例の形) = fire + 実体の path" 1 \
+  "候補: [cand.pdf]($ROOT/fs/review/cand.pdf)" "$TMP/sync2/review/cand.pdf"
+case_ "G2: 同じ file を基準フォルダからの相対 path で = fire" 1 "[cand](fs/review/cand.pdf)" "実体が session のフォルダの外"
+case_ "G3: settings にだけ在る追加フォルダの file の絶対 path = fire (右パネルは settings を数えない)" 1 \
+  "[m]($TMP/setonly/m.pdf)" "実体が session のフォルダの外" "claude-desktop" "$ROOT" "[\"$TMP/setonly\"]"
+case_ "G4: settings にだけ在る追加フォルダを起点にした link = 書き直しを勧めず fire (候補が全部外)" 1 \
+  "[m](m.pdf)" "実体が session のフォルダの外" "claude-desktop" "$ROOT" "[\"$TMP/setonly\"]"
+case_ "G5: 同じ file を symlink で中に置いた絶対 path (実体も中) = silent" 0 "[l]($ROOT/LINKED.md)"
+case_ "G6: symlink の repo の中で始めた session (根の実体 = 同期フォルダ) の相対 path = silent" 0 \
+  "[cand](review/cand.pdf)" "" "claude-desktop" "$ROOT/fs"
+case_ "G7: app で足したフォルダ (snapshot に在り settings に無い) の絶対 path = silent" 0 \
+  "[cand]($TMP/sync2/review/cand.pdf)" "" "claude-desktop" "$ROOT" "[\"$TMP/sync2\"]"
+case_ "G8: symlink の repo の file を fenced block の中に書いた置き場所 = silent" 0 "置き場所:
+${BT}${BT}${BT}
+$ROOT/fs/review/cand.pdf
+${BT}${BT}${BT}"
+SP="/tmp/claude-cfrtest-$$/proj/sess/scratchpad"; mkdir -p "$SP"; : > "$SP/copy.pdf"
+case_ "G9: scratchpad の写しの絶対 path = silent (外に数えない)" 0 "[copy]($SP/copy.pdf)"
+rm -rf "/tmp/claude-cfrtest-$$"
+case_ "G10: cd した先からの相対 path は今も書き直させる (文は「版で変わる」)" 1 "[x](drafts/intro.md)" "版と遠隔の設定で変わる"
+mkdir -p "$ROOT/repo/.claude/worktrees/w1"; : > "$ROOT/repo/main.md"
+case_ "G11: desktop の worktree で始めた session から元の repo の file の絶対 path = silent (元の folder も根)" 0 \
+  "[main]($ROOT/repo/main.md)" "" "claude-desktop" "$ROOT/repo/.claude/worktrees/w1"
+case_ "G12: repo で始めた session から隣の repo の file の絶対 path = fire" 1 \
+  "[intro]($ROOT/book/drafts/intro.md)" "実体が session のフォルダの外" "claude-desktop" "$ROOT/repo"
+case_ "G13: 足すフォルダ = 外を指す symlink の実体 (repo の実体) を示す" 1 \
+  "候補: [cand.pdf]($ROOT/fs/review/cand.pdf)" "足すフォルダ = $(cd "$TMP/sync2" && pwd -P))"
+mkdir -p "$TMP/setonly/proj/.git" "$TMP/setonly/proj/docs"; : > "$TMP/setonly/proj/docs/x.pdf"
+case_ "G14: symlink でない外の file = 足すフォルダは git の work tree の最上段" 1 \
+  "[x]($TMP/setonly/proj/docs/x.pdf)" "足すフォルダ = $(cd "$TMP/setonly/proj" && pwd -P))" "claude-desktop" "$ROOT" "[\"$TMP/setonly\"]"
+rm -f "$TMP/home/.claude/settings.json"
+
+assert "C1: stop_hook_active=true = silent (loop guard)" 0 "$(mkpayload "$TMP/c.jsonl" true)"
+assert "C2: transcript 不在 = silent" 0 "$(mkpayload "$TMP/no-such.jsonl")"
+assert "C3: 空入力 = silent" 0 ""
+
+out="$(mkpayload "$TMP/c.jsonl" | CLAUDE_CONFIG_ROOT="$TMP/no-such-repo" "$HOOK" 2>&1)" || true
+[ -z "$out" ] && { pass=$((pass+1)); results+=("✅ C4: 部品が無い = silent"); } \
+  || { fail=$((fail+1)); results+=("❌ C4: 部品が無いのに出力 (${out:0:120})"); }
+mkdir -p "$TMP/broken/scripts/lib"
+echo 'raise RuntimeError("broken")' > "$TMP/broken/scripts/lib/chat_file_refs.py"
+cp "$REPO/scripts/lib/transcript_turns.py" "$TMP/broken/scripts/lib/"
+out="$(mkpayload "$TMP/c.jsonl" | CLAUDE_CONFIG_ROOT="$TMP/broken" "$HOOK" 2>&1)" || true
+[ -z "$out" ] && { pass=$((pass+1)); results+=("✅ C5: 部品が例外で落ちる = silent"); } \
+  || { fail=$((fail+1)); results+=("❌ C5: 部品が壊れているのに出力 (${out:0:120})"); }
+
+# C6: ~/.claude/hooks と同じ symlink 経由 (CLAUDE_CONFIG_ROOT 無し) で部品を見つけて fire する
+mkdir -p "$TMP/dot-claude-hooks"
+ln -s "$HOOK" "$TMP/dot-claude-hooks/chat-file-ref-enforce.sh"
+out="$(mkpayload "$TMP/c.jsonl" | env -u CLAUDE_CONFIG_ROOT "$TMP/dot-claude-hooks/chat-file-ref-enforce.sh" 2>&1)" || true
+grep -qF '"decision"' <<< "$out" && { pass=$((pass+1)); results+=("✅ C6: symlink 経由で部品を見つけて fire"); } \
+  || { fail=$((fail+1)); results+=("❌ C6: symlink 経由で fire しない (${out:0:120})"); }
+
+echo
+for r in "${results[@]}"; do echo "$r"; done
+echo
+echo "pass=$pass fail=$fail"
+[ "$fail" = 0 ] || exit 1
+echo "ALL PASS"

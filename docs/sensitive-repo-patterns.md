@@ -8,7 +8,7 @@ Design patterns for repositories that need to track sensitive data (customer inv
 
 The mechanics of encryption tools (git-crypt, etc.) are covered in [git-crypt-guide.md](git-crypt-guide.md). This document is a layer above: **what to put where, and in what shape, so that information does not leak outside the encrypted layer.**
 
-## Part 1: Recognize the Public Surface
+## <a id="part-1-public-surface"></a>Part 1: Recognize the Public Surface
 
 **git-crypt (and similar tools) encrypt only file contents.** Everything else remains in plaintext in the git history and is exposed to anyone with read access, even if you only intend the repo to be private:
 
@@ -22,7 +22,7 @@ The mechanics of encryption tools (git-crypt, etc.) are covered in [git-crypt-gu
 
 **Practice**: Before publishing, walk through a public-surface checklist (see the Japanese version, Part 1-2) and verify every item.
 
-## Part 2: Encryption Configuration
+## <a id="part-2-encryption"></a>Part 2: Encryption Configuration
 
 **Pattern 2-1: Prefer default-encrypt over allow-list.**
 
@@ -39,7 +39,11 @@ New files are encrypted automatically. No one forgets to add a filter line. The 
 
 **Pattern 2-3:** Comments in `.gitattributes` explaining *why* files are encrypted are themselves a leak of operational intent. Strip them.
 
-## Part 3: Minimize the Public Surface
+**Pattern 2-4: Ledgers you append to often should be one entry per file.** git-crypt stores a full encrypted blob per version (no delta compression), and encrypted files cannot be 3-way merged. A single list file grows history by its whole size on every commit and collides between parallel writers. Split it into `todo/<id>.yaml` (one mapping per file, file name = id): declare the new directory encrypted *before* the first file, cut the text at entry boundaries instead of re-dumping YAML, move readers onto one loader first, and compare before/after outputs as sets and as orders separately. Dropping the old file's versions from history afterwards is irreversible: rehearse on a mirror clone, keep the emptied commits (`--prune-empty never`) so their messages survive, and have every other machine follow once (tool: [`scripts/git-drop-path-history.py`](../scripts/git-drop-path-history.py)). Details and tools: [Japanese version §2-4](sensitive-repo-patterns.ja.md#pattern-2-4); the general rule for history growth (generated binaries, hosting limits, the detector) is [`conventions/repo-history-growth.md`](../conventions/repo-history-growth.md).
+
+**Pattern 2-5: Scrub identifiers out of history by renaming and replacing (paths, plaintext versions, commit messages).** Paths and commit messages are plaintext even in an encrypted repo, and versions committed before encryption stay in history. When identifiers of people (student-ID-like codes, names) are in paths, plaintext versions or messages, keep the files and replace only the identifiers. The order: (1) apply the same rules to the current tree first as normal commits with explicit paths, including references in other repos, so the rewrite leaves the latest tree byte-identical and other clones can follow by tree equality; (2) rehearse on a mirror clone of the remote with the origin removed: pass 1 renames with `--filename-callback`, pass 2 replaces plaintext content (re-encrypting old plaintext versions of now-encrypted paths via `git-crypt clean`) with `--file-info-callback` plus `--message-callback`, because filter-repo refuses both callbacks in one run; (3) verify; (4) the owner pushes with `--force-with-lease=refs/heads/<branch>:<old>` to an explicit URL and `refs/heads/<branch>:refs/heads/<branch>`, re-rehearsing (one command) if the lease is rejected; (5) list remote refs that still hold the old history (other branches, pull-request refs that only the host's support can remove); (6) other machines follow with [`scripts/git-rewrite-follow.py`](../scripts/git-rewrite-follow.py) from the composed commit map, and collaborators re-clone. Lessons: renaming through `--file-info-callback` misses later deletions and resurrects removed files; verify independently of the scrub list (identifier *shapes* and the *full* surname list over every path, message and plaintext blob), excluding hex-only tokens that are short git hashes but never digit-only tokens (digits are a subset of hex, so excluding them leaves receipt or account numbers in messages, and the tool's own check shares the exclusion and passes); after the rewrite, query the messages once with a regex independent of the tool (amounts, 7+ digit numbers, e-mail addresses); syntax-check code files the rules changed; keep the identity list out of every repository. Tool: [`scripts/git-scrub-history.py`](../scripts/git-scrub-history.py); details: [Japanese version §2-5](sensitive-repo-patterns.ja.md#pattern-2-5); how to build the list and why verification must be independent: [`conventions/confidential-repo-boundary.md#history-scrub-identity-from-all-versions`](../conventions/confidential-repo-boundary.md#history-scrub-identity-from-all-versions).
+
+## <a id="part-3-minimize"></a>Part 3: Minimize the Public Surface
 
 **Pattern 3-1: Slug design.** Do not encode identities in filenames. Use opaque slugs (`a.md`, `b.md`, `n1.md`) and keep the slug-to-identity mapping only in an encrypted `INDEX` file. Semantic fragments (`ac`, `tok`, `bnk`) are combinable into guesses and should be avoided.
 
@@ -57,7 +61,7 @@ New files are encrypted automatically. No one forgets to add a filter line. The 
 3. **Store the hook script in the encrypted side** so the script's logic and allowlists do not themselves leak.
 4. Structural constraints (size/encoding/patterns) beat keyword blacklists: they need no maintenance, do not leak, and catch novel identifiers.
 
-## Part 4: Bootstrap Design
+## <a id="part-4-bootstrap"></a>Part 4: Bootstrap Design
 
 **Pattern 4-1: Document the full chain from zero to readable state on a fresh machine.** Do not leave any step buried in encrypted files that cannot be read before unlock. Common gaps:
 
@@ -73,7 +77,7 @@ New files are encrypted automatically. No one forgets to add a filter line. The 
 
 If no, and the information is not inherently machine-specific, use a git-synced location (or equivalent cross-machine sync) instead.
 
-## Part 5: Operational Discipline
+## <a id="part-5-discipline"></a>Part 5: Operational Discipline
 
 **Pattern 5-1: Forcing functions beat discipline.** Where the same kind of mistake recurs, do not rely on "try harder." Install structural defenses: secure defaults, pre-commit hooks, always-loaded gate questions, size caps, design-level impossibility (opaque slugs).
 
@@ -90,7 +94,7 @@ If no, and the information is not inherently machine-specific, use a git-synced 
 
 **Pattern 5-4: Examples co-age with the rule.** When you refine a design rule, the examples cited in the old rule may become violations under the new rule. Check and either correct them, annotate them as historical, or delete them. Leaving a self-contradictory example undermines the new rule.
 
-## Appendix: Checklists
+## <a id="appendix-checklists"></a>Appendix: Checklists
 
 See the Japanese version's Appendix A/B/C for:
 
@@ -98,7 +102,7 @@ See the Japanese version's Appendix A/B/C for:
 - New-note-addition checklist
 - Periodic audit checklist
 
-## Related documents
+## <a id="related-documents"></a>Related documents
 
 - [git-crypt-guide.md](git-crypt-guide.md) — tool-level usage (install, init, export-key, remote machine setup)
 - [convention-design-principles.md](convention-design-principles.md) — meta-level principles for writing conventions
@@ -106,3 +110,4 @@ See the Japanese version's Appendix A/B/C for:
 ## Changelog
 
 - **2026-04-09**: Initial version. Patterns extracted from the implementation of a private encrypted notes repository and generalized for public sharing.
+- **2026-09-23**: Added Pattern 2-4 (one entry per file for frequently appended ledgers).

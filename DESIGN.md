@@ -1,10 +1,808 @@
 # DESIGN — claude-config
 
-設計判断とその理由を記録する。
+設計判断とその理由を記録する。 本 file は live な判断 (= 今も効いている設計判断 / defer 判断 + un-defer trigger) の snapshot、 **完了・超越済みの dated entry は [`DESIGN-archive.md`](DESIGN-archive.md) へ分離済** (grep 専用、 分離基準は [§2026-07-10](#design-reorg-archive-first))。
+
+## <a id="toc"></a>目次
+
+- [2026-11-07: 「方針を先に出してから実装する」 を独立の規約 file に置き、 返信版をそこへ統合する](#policy-before-implementation-placement)
+- [2026-10-31: RC server の中身を beat に載せ、 古い server は機械が起こし直す](#rc-detail-and-unattended-refresh)
+- [2026-09-29: 規則の文書の変更の報告 — 差し戻しの後も照合し、 他の session の分は file ごとに畳み、 書かれていた記録は証拠から照合し直す](#additive-echo-bookkeeping)
+- [2026-09-29: auto mode で承認 CLI が classifier に止まる経路は、 本人の狭い allow の宣言で開ける](#approval-cli-allow-in-auto-mode)
+- [2026-09-29: data 形式の file の配線 lock は場所で決める (名前の言及では lock しない)](#wiring-lock-data-files-by-location)
+- [2026-09-28: SESSION.md の形を gate にする — 案件ごとの現在地を置き換える file にし、 日付の節・hash・messageId・育つ commit を止める](#session-shape-gate)
+- [2026-09-25: 規則の文書への変更は形 (追記か書き換えか) でなく語で見る — 追記の特権を外し、 書き換えだけを止める門も外す](#rule-doc-change-by-vocabulary-not-form)
+- [2026-09-25: SSO の入り直しは server の受け入れで決め、 入り直しの処理を部品 1 つに置く](#sso-recovery-server-acceptance)
+- [2026-09-23: memory file の予算 gate — 予算を超えて育つ commit だけ止める (縮める commit は通す)](#memory-budget-gate)
+- [2026-09-23: approve の引用照合 — 引けるのは記録する時点で著者の最新の発言だけ (短い引用は発言の全体)](#approve-quote-binding)
+- [2026-09-22: CI の 6 件の赤は runner の環境差 — font・<base> の AGENTS.md・ext4 の inode 再利用](#ci-runner-env-failures)
+- [2026-09-19: macOS に exec で kill される git hook は、 同じ中身の新しい inode に作り直す (検査は SessionStart で毎回)](#killed-hook-recreate-design)
+- [2026-09-17: SSO 保護サイトの login 切れは、 予告も推定もせず、 使う時に tab の行き先を見て復帰する](#sso-session-recovery-design)
+- [2026-09-17: hook の退役は registry に書き、 毎回の sync が外す](#hook-retirement-registry)
+- [2026-09-16: 共通 pre-commit の installer は repo が管理する hook を置き換えない](#precommit-installer-respects-repo-hooks)
+- [2026-09-15: 公開 repo の gate の誤検知を構造で消す (書誌・複合語・生成データ) + 棚卸しと監査を 1 本に](#public-gate-structural-exemptions)
+- [2026-09-15: 発音 evidence と user-visible 音声 delivery を分離する](#pronunciation-evidence-and-delivery)
+- [2026-09-14: 公開 repo の Tier E (owner の非公開の活動の事実)](#public-gate-tier-e)
+- [2026-09-13: 公開 repo の Tier D (未公開文書の逐語) と marker 点検](#public-gate-tier-d)
+- [2026-09-11: 既存図の情報を inventory 後に置換する](#figure-replacement-information-design)
+- [2026-09-11: INSPIRE 監査は texkey から安定 identifier へ fallback](#inspire-stable-id-fallback)
+- [2026-09-10/11: commit に agent/session/model/effort trailer (host/account は焼かない)](#session-provenance-trailer-design)
+- [2026-09-01: Codex integration — L1 正本 + 明示 L4 wiring + 多層検証](#codex-layered-integration)
+- [2026-09-01: AUTO-TREE の auto-load 税 縮退 (when 表示 + hooks/scripts README 移設)](#auto-tree-autoload-slim)
+- [2026-07-10: 検証の発火面化 — CI + run-all-checks + hook 配線の単一リスト駆動化](#ci-and-single-list-wiring)
+- [2026-07-10: 構造 tree / 列挙 / カテゴリ index の自動生成 (generate-tree.py)](#generated-docs-tree-autogen)
+- [2026-07-10: DESIGN.md の archive-first 再編](#design-reorg-archive-first)
+- [2026-06-27: Office handling 入口 router を layer 1 に hoist](#office-files-router-hoist)
+- [2026-06-17: layer-1 convention の発火面 tension (future work)](#layer1-firing-surface-tension)
+- [2026-06-13: CONVENTIONS.md 冒頭列挙の再生成 + 機械 enforcement](#conventions-listing-regeneration)
+- [2026-06-01: setup.sh clone step の重複 clone 防止](#setup-clone-rename-skip)
+- [2026-05-26: commit-msg leak guard option B (git native BLOCK)](#commit-msg-leak-guard-option-b)
+- [2026-05-19: 4 層 model「依存 vs 名指し」区別](#depend-vs-mention-distinction)
+- [2026-05-14: pre-commit-bib 全 repo install (時点依存検出の撤廃)](#pre-commit-bib-all-repos)
+- [PATH 管理: 二層防御の設計](#path-two-layer-defense)
+- [危険コマンドのブロック: deny ルール vs PreToolUse フック](#dangerous-commands-deny-rules)
+- [ARCHITECTURE.md: 必須化せず任意ファイルに留める](#architecture-md-optional)
+- [RUNBOOK 系ファイル: 規約化を待つ (実例先行)](#runbook-files-defer)
+- [git history scrubbing: 見送り (2026-04-06 確定)](#history-scrubbing-declined)
+- [自己言及的 odakin 記述: 現状維持 + 監視表 (2026-04-06 確定)](#self-mention-monitoring)
+- [hooks/ の役割分担](#hooks-role-table)
+- [SECRETS_REPOS の個人層外出し (2026-05-10)](#secrets-repos-externalization)
+- [個人層検出 helper (2026-05-10)](#find-personal-layer-helper)
+- [dropbox-refs convention (2026-04-07)](#dropbox-refs-design)
+- [git-state-nudge STALE_DIRT (2026-04-08)](#stale-dirt-detection)
+- [公開リポ leak 防止: 構造制約 hook + pre-commit ephemeral literal check](#public-repo-leak-prevention)
+- [sensitive-terms.txt の symlink architecture (2026-05-14 追補)](#sensitive-terms-symlink-architecture)
+- [2026-05-18: PDF Read tool fallback hook 設計判断](#pdf-read-fallback-hook)
 
 ---
 
-## PATH 管理: 二層防御の設計
+## <a id="policy-before-implementation-placement"></a>2026-11-07: 「方針を先に出してから実装する」 を独立の規約 file に置き、 返信版をそこへ統合する
+
+**背景 (実測)**: 返信・返答書の起草には方針の段が `concise-output.md#policy-before-draft` に置かれていたが、 code・hook・設定・規則の文書の実装には同じ段が無く、 方針の誤りが実装の後に見つかって実装ごと作り直す形が残っていた。 方針の段で直された誤りはどれも入力の読みの誤りだった。
+
+**決定**: 原則・範囲・方針の段を立てない作業・下請けへの 2 段の依頼・実装の後の照合を [`conventions/policy-before-implementation.md`](conventions/policy-before-implementation.md) の 1 か所に置く。 返信版は同 file の `#drafting` / `#delegating` に統合し、 `concise-output.md#policy-before-draft` は anchor を残した pointer にする (この anchor を引く文書が切れない)。 入口は CONVENTIONS.md §5 の 11 番目の 1 行、 依頼書の書き方 (`multi-session-coordination.md#orientation-prepay`) の 1 行、 設計原則 §4 の 1 行、 Codex の入口の 1 文。 範囲の線は「本人が別の形を選びうる変更」 = 選ぶ余地がある所だけに往復を入れる。
+
+**捨てた案**:
+- CONVENTIONS.md に本文の節を置く = 入口の file に payload が入る (分野の本文は `conventions/` に分ける作り)。
+- `docs/convention-design-principles.md` に置く = 規則を設計する人向けの文書で、 実装に入る瞬間に開かれない。
+- `concise-output.md#policy-before-draft` を広げる = 出力の簡潔さの file の読む時 (doc-meta の when) と中身がずれる。 返信版を事例として 2 か所に本文を置くと片方だけ直って食い違う ([`docs/convention-design-principles.md#rule-variant-drift`](docs/convention-design-principles.md#rule-variant-drift))。
+- 範囲を実装すべてにする = 1 文の直しや記録にも往復が入り、 推す答えのままの項目を確認させる形 (`concise-output.md#no-reason-to-deviate` の実測) が戻る。
+- turn 終わりの hook で方針の有無を見る = 返事の表面から見分けられない (`concise-output.md#not-machine-detectable`)。 機械の網は掲示板の起動文の 1 文と request の段の印 (警告だけ) に置く。
+
+---
+
+## <a id="rc-detail-and-unattended-refresh"></a>2026-10-31: RC server の中身を beat に載せ、 古い server は機械が起こし直す
+
+**背景 (実測)**: スマホから始めた session に返事が付かないとき、 常駐機の中は他の機械から見えず、 `last_status` と log の経過時間だけでは「受け取っていない」 と「受け取って止まっている」 を分けられなかった。 待機中の表示 `Ready ·` は marker に無く `unknown` に落ちていた。
+
+**決定**: 待機数・接続中の session・子 process・実行中の CLI の新旧・返事の無い会話・答えを待つ許可ダイアログを beat に載せ ([`scripts/lib/rc_server_state.py`](scripts/lib/rc_server_state.py))、 reader が他の機械から出す。 古い server は `--rc-refresh-stale` が無人で起こし直す。 人の手が要る許可ダイアログだけは、 答えの記録が届くまで reader が出し続ける。
+
+**捨てた案**:
+- 再起動の手順を人に渡す = 人の記憶は carrier でない ([`#human-memory-not-a-carrier`](docs/convention-design-principles.md#human-memory-not-a-carrier))。
+- 接続 0 の時だけ起こし直す = 起動時に作られる session が残り続ける server は接続 0 にならず、 発火しない。 代わりに「会話記録が 6 時間止まる ∧ 子孫が忙しくない」 で使用中を見分ける。 代償 = 長く放置した接続は切れる。
+- 別の機械の認証情報で API を直接読む = token を持ち回す経路を増やしてまで得る情報ではない。 beat の経路で足りる。
+- `claude` を呼んで版を読む = beat は claude に依存しない (認証切れの時こそ動く必要がある)。 版は実行 file の path・更新時刻で見る。
+
+**性質**: 読むだけの関数は fail-open で、 読めない項目は欠けるだけ。 許可ダイアログの欄が無い beat は「無い」 でなく「読めなかった」。 session の題 (利用者の文面) は beat に載せない。 essence には異常の有無だけを入れ、 時間の経過では commit しない。
+
+## <a id="session-shape-gate"></a>2026-09-28: SESSION.md の形を gate にする — 案件ごとの現在地を置き換える file にし、 日付の節・hash・messageId・育つ commit を止める
+
+**背景 (実測)**: 「SESSION に正本を置かない」 の規約 ([CONVENTIONS.md#session-no-durable-record](CONVENTIONS.md#session-no-durable-record)) と messageId 密度・byte の検出器 ([`scripts/check-session-sot.py`](scripts/check-session-sot.py)) が在っても、 owner の訂正が形を変えて繰り返された。 違反の共通形 = 「日付 + 何をした (session id)」 の節を SESSION に足し、 中に commit hash・検証結果・承認の経緯を書く。 走査した SESSION.md のほぼ全部に日付の節が在り、 目安 80 行を超える file が半数以上、 archive へ移した本文が数百 KB。 密度・byte の proxy はこの形を通していた (違反の行は 429 byte、 hash 2 つ、 messageId 0)。
+
+**原因の判定**: (1) entry の key が session / 日付 = 置き換える slot が無く追記しかできない → 日付の節 = 変更履歴 = 恒久の記録 ([§19.7](docs/convention-design-principles.md#time-keyed-file-appends-only))。 (2) 手順書が生成器: 層1 §3 の「重要な判断で SESSION を更新」 と、 それを写した各 repo の CLAUDE.md の「重要な判断時 → SESSION.md に決定事項を記録」、 memory-guard の deny 文言の「SESSION.md に書く」、 案件 README に締切・状態を書けと命じた repo の CLAUDE.md。 (3) 検出器の盲点: 先の cold-eyes 検討が「真の違反は graduate し損ねた固着」 と置いて write-time を見送り、 proxy を messageId 密度に絞った。 その後の再発は全部その盲点の中で起きた。 (4) SoT drift の registry が既定で `*/SESSION.md` を exempt していた (SESSION に写しが在っても drift として見えない)。
+
+**判断**:
+1. **形の契約を機械で守る** = [`scripts/check-session-shape.py`](scripts/check-session-shape.py): 日付の見出し・commit hash (`最終更新 … (sweep 済: hash)` は通す)・messageId・1000 byte 超の 1 行を staged の追加行で止め、 200 行を超えて**育つ** commit を止める (縮める commit は通る = [#memory-budget-gate](#memory-budget-gate) と同じ形)。 exit 1 = 違反 / 3 = 故障 ([#failure-exit-equals-violation-exit](docs/convention-design-principles.md#failure-exit-equals-violation-exit))。 escape hatch = `CLAUDE_SESSION_SHAPE_GUARD=0`。
+2. **発火面は 2 つ** = 全 repo の pre-commit ([`scripts/pre-commit-bib`](scripts/pre-commit-bib) と公開 repo の [`scripts/public-precommit-runner.sh`](scripts/public-precommit-runner.sh)、 Claude / Codex / 人の commit に共通) + 書き込み hook ([`hooks/session-shape-guard.sh`](hooks/session-shape-guard.sh)、 PreToolUse Edit/Write/MultiEdit で deny)。 fleet の状態は `--fleet` (dashboard)。
+3. **生成器を同じ検出器で warn する**: README が自分を正本と宣言する行 (非公開 repo では止める、 公開 repo は warn)、 CLAUDE.md / AGENTS.md の「README / SESSION に (決定・成果物・状態を) 書け」 の行。 層1 §3 の文言と memory-guard の deny 文言は行き先を種類別 (決定 → DESIGN、 状態 → 台帳、 SESSION は現在地の行を置き換える) に言い直した。
+4. **registry の既定から SESSION.md の exempt を外す** ([`scripts/sot-registry-add.py`](scripts/sot-registry-add.py) の `DEFAULT_ALLOW`)。
+5. **既存の file は一括で寄せる** = [`scripts/migrate-session-shape.py`](scripts/migrate-session-shape.py) (dry-run 既定、 日付つきの節を archive へ verbatim MOVE、 日付なしの節と最新の状態は残す、 gate を通してから commit。 archive が subdir なら相対 link を `fix-md-links.py` で合わせる)。 寄せた後に残るのは日付の無い節の中の経緯 (機械で区別できない) = 次に触る commit で行数の予算が止める。 見送った防御に戻す観測を書く規律 = [§19.8](docs/convention-design-principles.md#demoted-defense-reversal)。
+6. **暗号化の一致を同じ gate に入れる** (kind `archive-plaintext` / `session-decrypted`): SESSION.md を暗号化している repo で archive に同じ filter が無い / archive の blob が平文 / 暗号文だった SESSION.md が平文の blob で入る commit を止める。 実測: 暗号化された SESSION.md の中身が平文の archive として push された。 経路は一括移設の道具と手で作った archive の 2 つで、 道具の側の検査 (書く前に止まる) は手の経路を見ない = commit で止める。 属性 (`check-attr --cached`) と blob の先頭 (`\0GITCRYPT`) の両方を見るのは、 属性の付け忘れと driver の無い clone で平文のまま入る経路が別だから。 escape hatch は形のものと分ける (`CLAUDE_SESSION_CRYPT_GUARD`) = 形の意図した例示で漏洩の gate が一緒に外れない。 fleet は dashboard (`--fleet` の 🔴) と個人層の run-all-checks (`--crypt-audit`)。
+7. **「README / SESSION が正本」 と書く行を、 README / SESSION 以外の file でも拾う** (kind `sot-claim`): 3 の README の自称正本は README 自身の決まった言い回しだけで、 間に語が挟まる形・SESSION を指す形・他の file に書かれた形 (CLAUDE.md・DESIGN.md・案件の notes) が素通りしていた (実測)。 述語は文の向き (README / SESSION が主語か、 「正本 =」 の最初の file か) で見て、 否定・規則の記述・過去の記述・引用・code fence・記録 (plans / archive) を除く。 重さは 3 と同じ (非公開 = 止める、 公開 = warn)。 書く瞬間の hook の射程 (4 種の file 名) は広げない = 他の md は commit と fleet が見る。 述語の較正の実測は engine の docstring。
+
+**README の build も正本は CLAUDE.md**: 公開 repo の README に載せる build / quickstart / deploy の手順は README-only 読者のための写しで、 正本 (保守の規則・変えるときの手順) は CLAUDE.md に置く。 [CONVENTIONS.md#readme-style](CONVENTIONS.md#readme-style) の (b) をこの形に言い直した (以前は公開 repo の README を build の正本としていた)。 README を正本にしない線を build にも通し、 写しは同じ commit で両方を直して drift を防ぐ。
+
+**採らなかった案**: (a) 検出器に prose を足す = 6 月と同じ (recall 依存、 [§8.12](docs/convention-design-principles.md#firing-surface-hierarchy))。 (b) check-session-sot.py の閾値を下げる = proxy の軸が違う (byte でなく形)。 (c) 行数だけを止める = 日付の節を小さく足し続ける形が残る。 (d) SESSION.md を廃して他の file に統合 = 「今どこにいるか」 の入口は要る、 要らないのは変更履歴の形。
+
+**限界**: 日付も hash も持たない散文の決定ログは通る (形の契約 + 4 軸 sweep が持つ)。 Bash の heredoc で書いた変更は hook を通らない (commit の gate が捕まえる)。 既存の file は追加行と行数の成長だけで判定するので、 育っている file は次に触る commit で縮退が要る (fleet 走査が一覧を出す)。
+
+## <a id="rule-doc-change-by-vocabulary-not-form"></a>2026-09-25: 規則の文書への変更は形 (追記か書き換えか) でなく語で見る — 追記の特権を外し、 書き換えだけを止める門も外す
+
+**背景 (実測)**: 2026-09-23 に「既存の文を変えずに足すだけの変更」 を事前に止めない線を引いた。 2 日後、 足すだけが無料で書き換えが裁定になると agent は文書が良くなる形でなく通る形を選ぶことが出た (直すべき文の隣に段落を積む、 見出しの言い切りと食い違う行を足す、 古い文と新しい文を同居させる)。 本人の裁定 = 「追記だけするようになってごちゃごちゃになっている、 無意味」。 最初の直しは規則の文の削除・置き換えを止める門 (6 割以上を残す言い直しだけ、 言い直しの差分の語、 指示の向き) を残したが、 それも書き換えを追記より厳しく見る = 追記に逃げる動機が残るので、 本人「外して」 で外した。
+
+**判断** (engine = [`scripts/agent-rule-guard.py`](scripts/agent-rule-guard.py) の `judge_change` / `change_exemption`、 規則 = [`conventions/agent-rule-ownership.md#additive-and-free-zones`](conventions/agent-rule-ownership.md#additive-and-free-zones)):
+1. 事前に止めるのは語と隠しだけ: 足した文・言い直した文の緩める位置の緩和の語 (言い直した文は、 元の文が既に持っていた語を数えない)、 既存の文の fence / comment / 取り消し線への隠し、 下の行を過去のものにする見出し、 文書の全消し。
+2. 消す・置き換える・向きを変えるは通り、 記録と返事の行 (「消した「…」」「「前」→「後」」) に出る。 形は意味を守らない = 本人が読む面 (返事と差分) に検出を寄せる。
+3. 言い直しの対応は元の文の 6 割の文字の一致で取り、 2 文が 1 文になる・1 文が 2 文になる変更でも元の文の語を数えない。 対応の計算は候補を絞る (共有する語、 1 文あたり 24 件、 全体で 1.5 秒の予算) = hook の timeout を越えない。 予算を越えた分は厳しい側 (消した + 新しい文) に倒す。
+4. 規則の文書への追記は、 その tool の結果と一緒に隣の文と「既存の文は正しく残るか」 を agent に返す (止めない)。 止めた変更は denied-log に残す。 生きている session の変更は圧縮の開始で他の session に割り当てない。 Stop の案内の行は発言の先頭と file 名だけ。
+
+**採らなかった案**: (a) 追記も修正も本人の最新の依頼に結びつける (`apply --latest` 1 手) = agent は最新の発言を何でも引くので束縛が儀式になり、 手数だけ増える。 (b) 9/23 より前に戻す = 承認を何度も求める状態。 (c) 規則の文の削除だけ門に残す = 隣に逆向きの文を足せば通るので、 書き換えを避ける動機だけが残る。
+
+**実測**: 2 か月の規則の文書の版で、 裁定なしで通る割合 = 公開 repo 26% → 80%、 個人層 21% → 88% (止まる残りはほぼ緩和の語。 変更前の値は基準の engine を記録して数え直したもの)。 適用の途中で engine を呼び元より先に写した数分、 全 session の Edit / commit が fail-closed で止まった = engine と呼び元は候補の呼び元で続けて写す ([`conventions/hook-authoring.md#engine-edit-is-deploy`](conventions/hook-authoring.md#engine-edit-is-deploy))。 候補と実測の記録は個人層の plans (同日の results)。
+
+## <a id="sso-recovery-server-acceptance"></a>2026-09-25: SSO の入り直しは server の受け入れで決め、 入り直しの処理を部品 1 つに置く
+
+**起点 (実測)**: cookie 再利用の client が「入り直した」 と言った直後に「復帰できなかった」 で止まり、 本人のログインが要るという案内 (exit 75) も出なかった。 ログイン画面そのものが未認証の session cookie を配り、 client は cookie DB の時刻の変化を入り直しと読んでいた = IdP が切れていても、 browser がログイン画面を通るだけで条件が満たされる。 cookie の書き出しが速い時ほどログイン画面を見届ける前にこの cookie を掴むので、 機械・時刻によって出たり出なかったりした。 同じ判定が別サイトの client にも写されていて、 そちらは同じ host の中の SSO 入口への 302 を切れと判定しない穴も持っていた (切れているのに `status` が「読める」)。
+
+**判断**:
+- **入り直せた = 読み直した cookie を server が受け入れた時だけ** (軽い GET 1 本)。 cookie の変化は「確かめる時機」 の合図にだけ使う ([principles §8.8 の「成功でも失敗でも起きる変化」](docs/convention-design-principles.md#change-on-both-paths))。
+- 受け入れられなければ見続ける (ログイン画面で止まるのを見届けて exit 75 / SAML の完了を待つ)。 同じ cookie のまま認証済みになるサイトのために、 未認証の cookie を掴んだ後は DB が変わらなくても 5 → 10 → 15 秒で確かめ直す。
+- **入り直しの処理を [`scripts/lib/sso_cookie_session.py`](scripts/lib/sso_cookie_session.py) に集約**し、 client は subclass でサイト固有の切れ判定と「サイトの中」 の判定だけを書く。 selftest の場面 (IdP 切れ / 先に変わる cookie / wait-login / server が受け入れない) は部品が持ち、 各 client は本物の URL の形で同じ場面を通す (`site_selftest_cases`)。 規約 = [`machine-route-first.md#recovery-in-one-component`](conventions/machine-route-first.md#recovery-in-one-component)。
+- 手で追った切り分けを道具にした: `probe` (切れ方の採取、 [`#capture-expiry-shape`](conventions/machine-route-first.md#capture-expiry-shape)) / `--trace` (復帰の途中の tab・cookie・受け入れ) / doctor が復号した値の破損まで見る ([`chromium-cookies.py --check`](scripts/chromium-cookies.py)。 鍵や暗号の形式が変わると AES-CBC は例外なしに化けた値を返し、 「復号できた」 だけの検査は通ってしまう)。
+
+**棄却した案**:
+- *cookie の変化の後に固定時間待ってから撃ち直す*: 必要な長さは SAML の往復と IdP の状態で変わり、 IdP が切れている時は何秒待っても受け入れられない。 待ちでなく確かめで決める。
+- *ログイン画面が配った cookie を名前や値の形で見分ける*: サイトの内部に依存し、 cookie の値を読むことになる (値は読まない約束)。
+- *修正を 2 つの client にそれぞれ当てる*: 次の SSO サイトの client がまた古い形から写す。
+
+**未検証**: IdP が切れた状態からの復帰の実走 (exit 75 → `--wait-login`)。 selftest の偽の tab と時計でだけ通している。
+
+## <a id="memory-budget-gate"></a>2026-09-23: memory file の予算 gate — 予算を超えて育つ commit だけ止める (縮める commit は通す)
+
+**背景 (実測)**: auto-load される memory file の肥大は warn (SessionStart・dashboard・commit 時) で見えていたが、 warn はどの commit も止めない。 並行する複数の session が制約の行・索引の行・entry を書き足し、 縮退の直後から 1 日 ~4 KB 育って、 warn の閾値に 2 日で戻った (= 縮退しても再肥大の速さが勝つ)。
+
+**判断** (engine = [`scripts/check-memory-file-bloat.py`](scripts/check-memory-file-bloat.py) の `--staged --block`、 規則 = [`conventions/memory-file-slimming.md#commit-budget-gate`](conventions/memory-file-slimming.md#commit-budget-gate)):
+1. 止めるのは「stage した file が予算以上 ∧ HEAD より byte が増える」 commit だけ。 縮める commit・予算内の commit は通す = 予算を超えてからは、 足す分を同じ commit で MOVE + pointer 化して払う。
+2. 予算 (`BLOCK_FILE_KB`) は warn (`WARN_FILE_KB`) より下 = commit で育つ限り surface の warn に届かない。 値は engine の定数だけが持つ。
+3. 検査の故障は exit 3 (違反の 1 と分ける)。 呼び元は commit を止めず「この commit では走っていない」 を出す。 engine が古い機械 (`--block` を知らない) でも同じ扱いになる。
+4. 逃げ道は env `CLAUDE_MEMORY_BUDGET_GUARD=0` (warn に落として通す)。 使うのは owner が明示したときだけ。
+5. 配線は利用者の層 = pre-commit から `--block` を渡した file だけが対象 (既定は従来どおり warn だけ)。
+
+**追補 (2026-10-04、 止められた側が払わずに取り下げる失敗の RCA)**: gate は設計どおり育つ commit を止めたが、 止められた側 (agent) は
+実測ではほとんどの回で追記を取り下げるか削って通し、 要る routing・制約が落ちた。 原因は 3 つ。 ① 払う操作に道具が無く、 止めた画面は
+28 KB の手順 doc を指していた (払う費用 ≫ 足す費用 → 取り下げが最安)。 ② 「足した分を払う」 では file が予算の線に張り付く平衡になり、
+以後の全 commit が境界の取引になる (hysteresis が無い)。 ③ pointer 化の床: 経緯 payload (日付・RCA・実測・引用の括弧) が file 全体で
+数 KB しか残っておらず、 払いの原資が無い = 次は構造変更 (列挙の生成 file 化・制約の point-of-use 化) の判断で、 それは owner のもの。
+手当 = [`scripts/memory-budget-pay.py`](scripts/memory-budget-pay.py) (status / candidates / retreat / graduate、 verbatim 退避と検算を
+1 コマンドに) + gate の `--pay-cmd` (止めた画面に command) + `--headroom` (予算の手前 2 KB で 🟡 = warn 150 KB が予算 145 KB の上に在る
+ので、 張り付いた file は surface で silent だった) + 規約 [`#pay-command`](conventions/memory-file-slimming.md#pay-command)
+(⑤ 払う command / ⑥ 余裕の目安まで払う / ⑦ 床では構造変更)。 閾値は変えていない。 実測の数字と構造変更の候補 = 個人層の RCA plan。
+
+**追補 2 (同日、 owner の裁定で構造変更)**: 床に居た file の 2 大表を auto-load 面から降ろした。 ① 道具ごとの制約表 → auto-load されない
+conventions file へ verbatim MOVE し、 [`scripts/constraint-at-use.py`](scripts/constraint-at-use.py) (PreToolUse hook、 Bash の command と
+file 系 tool の path に行の 1 列目から導いた key を当て、 該当行を session に 1 回 additionalContext で出す。 導けない行は表の file の
+HTML comment で key を足し、 `--check` が key の無い行を止める)。 ② 「いつ何を読むか」 の routing table → 全文は conventions file、
+auto-load 面には [`scripts/generate-trigger-table.py`](scripts/generate-trigger-table.py) が 3 列目の 1 文目 + ⚠️ の文だけを marker の
+間に生成 (`--check` で drift)。 ⚠️ を残す契約にしたのは、 表の ⚠️ が「読む前に知っておく行動制約」 として置かれたもので、 経緯は ⚠️ を
+含まないから (1 文目だけの契約より 3.5 KB 多いが、 制約を doc を開くまで知らない状態を作らない)。 採らなかった案: `.claude/rules/` の
+`paths:` (file を扱う時だけ読む rule) — 表の多くは Bash で叩く道具の制約で path では当たらず、 1 つの機構 (hook) で Bash と path の両方を
+覆えるので 2 本目を持たない。 実測: auto-load file 148 → 107 KB (−28%)、 移した行は link の深さ以外 1 字も変えていない。
+
+**採らなかった案**:
+- *絶対サイズで止める (予算以上なら常に止める)*: 予算を超えた状態では縮退の commit まで止まり、 抜け出せない。
+- *節ごとの予算 (索引・制約表・entry 一覧それぞれに上限)*: 節の境界が変わるたびに設定が要る。 どの節で払うかは書き手が決めればよく、 file 全体の予算で足りる。
+- *warn の閾値を下げる*: 止めない限り並行 session の追記は積み上がる (warn は既に commit 時にも出ていた)。
+
+**較正 (実測)**: 縮退の直後で予算まで ~14 KiB の余裕。 本物の pre-commit に一時 index (`GIT_INDEX_FILE`) で 20 KB 足した file を渡し、 予算の検査として rc 1 で止まることを確かめた (worktree と本物の index は触らない)。 ⚠️ 試験データは閾値からの差で作る: 最初の試行は「今の file + 固定量」 で作り、 縮退で base が縮んでいたため予算の内側 (143.5 KiB) に落ちて素通りした。 rc だけでなく止めた検査の行まで見たので気づけた ([`conventions/hook-authoring.md`](conventions/hook-authoring.md) の配線 test の規律と同じ)。
+
+**代償**: 予算を超えてから制約を 1 行足したい session は、 同じ commit で何かを archive へ移す手間を払う。
+
+---
+
+## <a id="approve-quote-binding"></a>2026-09-23: approve の引用照合 — 引けるのは記録する時点で著者の最新の発言だけ (短い引用は発言の全体)
+
+**背景 (実測)**: `approve --quote` の照合は、 引用を含む**最初の** user 発言を返していた。 同じ短い承認 (「OK」) を 2 回に分けて使った session で、 後の承認の記録がすべて前の「OK」 を指した (中身は候補の全文 hash に束縛されていたので保護は効いていた = 監査の帰属だけが誤り)。 同じ照合は部分一致なので「OK」 が「BOOK」「OK じゃない」 にも当たり、 本人の発言の前に harness が付ける `<system-reminder>` の文まで引用元にしていた。
+
+**判断** (engine = [`scripts/manuscript-claim-guard.py`](scripts/manuscript-claim-guard.py) の docstring「承認:」、 規則 = [`conventions/agent-rule-ownership.md#approval`](conventions/agent-rule-ownership.md#approval) 2.):
+1. 引けるのは**記録する時点で著者の最新の発言だけ** (exit 5)。 同じ発言で複数の file をまとめて承認する記録は、 著者が次に発言するまで通る。 古い発言は、 既に引かれたものも、 まだ引かれていないものも引けない = 流用を事後に人が記録から探す前提を置かない。
+2. **短い引用 (`SHORT_QUOTE` 文字未満) は発言の全体**と一致する時だけ (端の空白・句読点は除いて比べる。 疑問符は除かない = 「OK?」 は承認でない)。 長い引用は発言の一部でよい。 発言の全体を引けば必ず照合できる = 正当な承認は落ちない。
+3. 本人の発言に前置された `<system-reminder>` の塊は引用元から除く (hook 注入の除外と揃える)。
+4. approve の出力に、 結び付いた発言の時刻と冒頭を出す (結び付け違いがその場で見える)。
+5. 記録したら、 そのターンの最後の返事に引いた発言と対象の file を同じ行に書く。 Stop が確かめ、 無ければ 1 回差し戻す (Claude / Codex、 fail-open、 `8b6d321`) = 「引用の意味」 の取り違えを、 後から記録を読む前提でなく、 著者がその場で見る。
+6. 承認なしで入った規則の文書への追記も、 同じ Stop で入れた turn の返事に書かせる (既読の操作を廃止、 書けなかった分は人のいる session の開始に割り当て。 `5e47df9`、 正本 = [`conventions/agent-rule-ownership.md#additive-and-free-zones`](conventions/agent-rule-ownership.md#additive-and-free-zones))。
+
+**採らなかった案**:
+- *発言が候補 file の作成より後であることを要求 (mtime)*: 承認の後に同じ中身の候補を作り直す手順が実在する (実測) = 正当な承認を落とす。 file の時刻は「著者がいつ見たか」 の証拠にならない。
+- *同じ発言の再利用だけを止める (最初の記録の時刻と、 その後の発言を比べる)*: 一度入れたが、 まだ引かれていない古い発言が引けるまま残り、 限界として「記録を人が後から読む」 と書くことになった。 「最新の発言だけ」 はこれを含み、 時刻の比較も要らない (位置で決まる = 時刻の無い transcript でも同じ判定)。
+- *短い引用を語の境界で区切る*: 「OK じゃない」 の「OK」 は境界で区切れるので通ってしまう。 否定は機械で読めないので、 短い引用は全体一致にした。
+
+**較正 (実測)**: 蓄積した承認記録を新しい規則で読み直すと全件通る。 引いた発言と記録の間に著者の別の発言が挟まった正当な承認は 0 件、 長い発言の一部を引いた承認の引用は 28 字以上だった (閾値 12 はその下)。
+
+**代償**: 承認の後、 記録の前に著者が別の発言をすると記録できない (もう一度承認を得る)。 較正の記録では 0 件。
+
+**未検証**: Codex の rollout は 1 本しか見ていない。 その 1 本は 1 つの発言を同じ文面で 2 回書いていた (最新の方に一致するので判定は崩れない)。 発言の後に user-role の注入を足す client があれば、 正当な承認が exit 5 になる = その時は注入の除外 (`human_text_segments`) に足す。 ⇒ Claude でも実際に起きた: 背景 task の完了通知・別 session の連絡が user-role で入り、「最新の本人の発言」 を上書きして正当な承認が exit 5 になった (実測)。 出どころの欄 (`turnOrigin` ≠ human) と封筒 (`<task-notification>` 等) で本人の発言から外して解消 (`96bbda4`)。 較正のとき 1 つの session で「通知は数えられていない」 と確かめたが、 別の session では数えられていた = 1 session の不在の実測で一般化しない。 ⇒ 逆向きも実際に起きた: 作業中 (assistant の turn の途中) に届いた本人の発言は transcript に `type: user` の行でなく `attachment` (`type: queued_command`、 `origin.kind: human`、 `commandMode: prompt`) として入り、 照合器に見えない (実測) = その発言を引用できず、 しかも「最新の本人の発言」 の判定からも漏れる (作業中に届いた発言の後でも、 その前の承認の発言が引けた)。 owner の裁定 (数えてよい) で解消: `origin.kind=human` ∧ `commandMode=prompt` の queued_command を本人の発言として読む (画像つきは text の block。 同じ型で入る背景 task の通知 〔commandMode=task-notification〕 と別 session の連絡 〔origin.kind=peer〕 は読まない。 手元の transcript の実測で 4 形 = 本人のテキスト / 本人の画像つき / 通知 / 別 session)。 selftest は直す前の実装で赤くなる。
+
+**運用メモ**: canary を手で回す時は `--caller` を付けない (付けた名前は呼び元として liveness の記録に残り、 後で「報告の途絶えた呼び元」 として出る)。 hook の test は、 stdin を読み切る hook を stdin を閉じて呼ぶ ([`hooks/manuscript-claim-guard.test.sh`](hooks/manuscript-claim-guard.test.sh) の `_live`。 閉じない stdin を継ぐと入力待ちで止まる。 関連 = [`conventions/hook-authoring.md#hook-stdin-pipe-sigpipe`](conventions/hook-authoring.md#hook-stdin-pipe-sigpipe))。
+
+commit: `7c9cee2` (最新の一致 + 再利用の判定 + system-reminder) → `b693cf6` (短い引用) → `535cbba` (test の stdin) → `5219492` (最新の発言だけ、 再利用の判定を削除)。
+
+---
+
+## <a id="ci-runner-env-failures"></a>2026-09-22: CI の 6 件の赤は runner の環境差 — font・<base> の AGENTS.md・ext4 の inode 再利用 (検査の意図は保ち、 環境の欠落は宣言する)
+
+**背景**: 9 月中旬から `checks` が 222 成功 / 6 失敗で赤のまま (Codex の依頼 = board `claude-config/2026-09-22-ci-six-checks-repair`)。 6 件とも macOS の手元では緑 = ubuntu の runner でだけ落ちる。 原因は 4 種で、 どれも検査の対象 (道具) の壊れではなく、 検査が**手元の環境に暗黙に依存**していた。
+
+| 検査 | 原因 (runner でだけ赤) | 直し方 | 直す前に赤くなる対照 |
+|---|---|---|---|
+| `formcase.py --selftest` (行の送り) | `line_pitch("游ゴシック")` が Excel 同梱 font (macOS の path) を読む前提。 fontTools も requirements に無かった | selftest が合成 TTF 2 本 (hhea 1.602 em = 游ゴシック相当 / 1.0 em = MS 系相当) を `fontBuilder` で作って読ませ、 実機 font は在れば追加で見る (無ければ SKIP を宣言)。 `fonttools` を requirements に | font 無しの写しで旧 test ❌ → 新 test ✅ / `line_pitch` が hhea を無視する mutant で新 test ❌ (歯あり) |
+| `html-print-pdf.py` / `mail-to-pdf.py --selftest` | runner に日本語 font が無い → Chromium は無い glyph を描かず PDF の文字層にも残さない → 日本語だけの頁が preflight で「白紙」・文字層に日本語なし | runner に `fonts-noto-cjk` (checks.yml) = 日本語の描画を**実際に**検査する。 selftest は `japanese_font_available()` (macOS = 真 / 他は `fc-list :lang=ja`) で日本語の項だけ理由つき SKIP、 経路 (browser → PDF → preflight → raster) と伏せた値の検査は常に走る | `HTML_PRINT_PDF_JA_FONT=0` で SKIP 側の経路が通る / font を入れた CI の log に SKIP でなく PASS の行 |
+| `audit-codex-integration.test.sh` / `setup-codex.test.sh` | `9ddf7a6` が足した <base>/AGENTS.md の検査が `CONFIG_ROOT/..` を見る = test の fixture の外 (owner の機械には在り、 CI の checkout の親には無い) | `CLAUDE_BASE_DIR` で <base> を差せるように (既定 = checkout の親、 本番は不変)。 test は fixture の <base> に template を置き、 audit の test に「無ければ MISSING で止まる」 負の対照 | 親に AGENTS.md の無い写しで旧 = FAIL (MISSING) / 新 = passed |
+| `install-hook-stubs.test.sh` T13 / T17 | 偽の exec 検査は **inode 番号**で kill を覚える。 ext4 は空いた番号をすぐ再利用するので、 作り直しで空いた番号が次の一時 file に付き、 別 file の判定を引き継ぐ (APFS は再利用しない = macOS では出ない) | `kill_mark` が印を付けた inode を hard link で生かす (番号が空かない)。 本番の installer は新 inode を作るだけで正しく、 変えない | Linux でだけ再現 = 修正前の CI で 3 NG、 修正後 0。 手元 (APFS) は両方 53/53 |
+
+**原則**: 環境に依存する検査は (a) 依存を fixture に取り込む (合成 font・fixture の <base>・hard link) か、 (b) 環境を整える (runner に font) か、 (c) 走れない理由を **宣言して** SKIP する (silent skip 禁止 = `run-all-checks.sh` 冒頭の契約)。 (c) だけで緑にすると検査が消えるので、 今回は (a)(b) を主に、 (c) は font の無い機械の日本語の項に限った。
+
+**残る制限**: runner の日本語 font は apt の `fonts-noto-cjk` に依存 (image が変われば SKIP に落ちて log に出る) / 日本語 font の判定は fontconfig 経由 (`fc-list` が無い Linux = 偽 = SKIP) / formcase の実機 font の項は macOS + Excel の機械だけ (合成 font が代替) / inode 再利用の対策は test 側の fixture だけ。 手元の `run-all-checks.sh` = PASS 228 / FAIL 0 (macOS)、 CI = [https://github.com/odakin/claude-config/actions/runs/35738944982](https://github.com/odakin/claude-config/actions/runs/35738944982) (0a14fa0)。 保護 file 6 本 (checks.yml / audit と test 3 本 / hook-authoring.md) は本人の承認を `approve --quote --candidate` で記録してから当てた。
+
+## <a id="killed-hook-recreate-design"></a>2026-09-19: macOS に exec で kill される git hook は、 同じ中身の新しい inode に作り直す (検査は SessionStart で毎回)
+
+**起点 (実測)**: 同じ中身の hook stub が、 repo によって `died of signal 9` になって commit が止まった。 判定は inode ごとで、 同じ inode への上書きでは直らず、 新しい inode の複製は通る (仕組み・実測と推定の区別 = [`conventions/macos-exec-policy-kill.md`](conventions/macos-exec-policy-kill.md)、 hook を配る側の規則 = [`conventions/hook-authoring.md#killed-hook-stub`](conventions/hook-authoring.md#killed-hook-stub))。
+
+**判断**:
+- 直し方 = 同じ bytes・同じ mode の新しい inode (一時 file + `mv`)。 macOS が scan し直すので検査は外れない。 installer の書き込みも常に新しい inode にする (`hook_stub_put`)
+- 検査 = `$BASH_ENV` に `exit 0` だけの file を渡す = hook を 1 行も走らせない。 本体を走らせずに済むので、 SessionStart で全 repo の全 hook に回せる
+- 作り直すのは 1 回だけ。 直らなければ WARNING を出して止める
+- 発火面 = SessionStart (個人層の bootstrap が `scripts/heal-hook-stubs.sh --surface` を呼ぶ) + setup.sh Step 8c + 各 installer。 見出しへの振り分けは層1 の script が持つ (呼ぶ側が出力の文言に依存しないため)
+- 対象 = git が実際に使う hooks dir の全 hook (repo 自前の hook も) と stub の runner。 中身を変えないので、 「installer は自分が置いたものだけを最新化する」 ([#precommit-installer-respects-repo-hooks](#precommit-installer-respects-repo-hooks)) とも「git が track している file の内容は書かない」 とも衝突しない
+- macOS 限定・bash の shebang 限定
+
+**棄却した案**:
+- *xattr (`com.apple.provenance`) を剥がす / Gatekeeper・XProtect の設定を変える*: 安全機構を弱める。 作り直した file は provenance を持ったまま通る (実測) ので要らない
+- *同じ inode に同じ中身を書き直す (installer の旧来の `printf > hook`)*: 判定が残る (実測)
+- *本物の hook を走らせて検査する (`git hook run`)*: pre-commit は index に対する本物の検査が走るので SessionStart で全 repo には回せない。 手元の確認用に留める
+- *kill を見つけたら再起動を促す*: 再起動で消えるかは確かめておらず、 作り直しで直る
+- *直るまで作り直しを繰り返す*: syspolicyd が詰まっている間は同じ目に遭い、 本当に malware と判定されたなら回り込むことになる
+
+**un-defer trigger**: bash 以外の hook (sh / python) で同じ kill が起きたら、 shebang に依らない検査 (起動直後に止めた子の生死を見る等) を検討する。 再起動で消えることを確かめたら、 規約の「推定」 を「実測」 に直す (SESSION の Open item)。
+
+---
+
+## <a id="sso-session-recovery-design"></a>2026-09-17: SSO 保護サイトの login 切れは、 予告も推定もせず、 使う時に tab の行き先を見て復帰する
+
+**起点 (実測)**: browser の session cookie を再利用してサイトを読む client ([`garoon-client.py`](scripts/garoon-client.py)) が、 login 切れのたびに止まって本人を呼んでいた。 同日に入れた最初の対策は 2 本立てだった — (E) 閲覧履歴から「IdP の最後のログイン + 有効期間」 を推定し、 切れる前後に session 開始時へ予告する / (F) 切れたら `open -g` で browser に tab を開かせ、 cookie DB の更新を上限まで poll する。 動きはしたが、 (E) の予告は利用間隔が有効期間より長い使い方では毎回出るだけ、 (F) は成否が見えず tab が溜まり、 (E) の推定を (F) が使っていなかった。
+
+**判断**:
+- **予告と常時の死活警告を捨てる**。 切れは故障でなく周期で、 先にログインしても次の利用まで持たない ([principles §8.62](docs/convention-design-principles.md#steady-state-is-not-a-finding))。 監視に残すのは配線の故障だけ (`doctor` = cookie を復号できるか、 network なし)
+- **推定を捨て、 観測にする**。 開かせた tab の行き先 (query を落とした URL と読み込み中か) を AppleScript で見れば、 入り直せたか・ログイン画面で止まったかが数秒で分かる ([§8.63](docs/convention-design-principles.md#observe-dont-estimate))。 IdP の URL の形も有効期間も client は持たない = 組織固有の値が公開層に要らない
+- **本人に頼むのは IdP も切れている時だけ、 頼んだ後は script が完了を見る** (`--wait-login`、 [§8.64](docs/convention-design-principles.md#completion-by-observation))。 待たない時は専用の exit code (75) で止まり、 agent が次の手を選べる
+- **browser に触る副作用は opt-in** (`--browser-refresh off|keep|close`、 既定 off)。 公開の client が既定で人の browser に tab を開くのは筋が悪い。 利用者は org と流儀を数行の wrapper (private 層) で 1 回決める
+- **閉じるのは自分が開いた tab だけ**、 id で指し、 閉じる直前に場所を確かめる。 本人がログインに使った tab・時間切れの tab は閉じない
+- tab の駆動と結末判定は [`scripts/lib/browser_tab.py`](scripts/lib/browser_tab.py) に切り出す (判定 `watch()` は tab と時計を差し替えて selftest できる純粋な関数)。 client 側に残るのはサイト固有の「切れ判定」 と「中か外か」 だけ
+- 規約の置き場: 設計の要点 = [`machine-route-first.md#sso-session-recovery`](conventions/machine-route-first.md#sso-session-recovery) (session-cookie-reuse の一部)、 サイトの手順 = [`garoon.md#garoon-session-recovery`](conventions/garoon.md#garoon-session-recovery)、 AppleScript の機構 = [`macos-gui-app-automation.md#chromium-tab-scripting`](conventions/macos-gui-app-automation.md#chromium-tab-scripting)
+
+**棄却した案**:
+- *(E) の推定を (F) に渡す (切れている見込みなら tab を開かない)*: 推定器と組織固有の定数を公開 client に持ち込むことになり、 推定が外れる経路 (期間の型が未決・別端末のログイン) も持ち込む。 しかも IdP が切れている時は本人がログインする tab がどのみち要る = 開かないことの得が無い
+- *既に開いている同じサイトの tab を reload して使い回す*: 本人の入力中の form を壊しうる。 script からは「その tab を今使っているか」 が分からない
+- *自分が開いた tab の id を run をまたいで覚え、 次回それを使う*: 本人がその tab で作業を始めていたら本人のもの。 判定できないので状態は持たない。 tab が溜まる問題は「成功時と、 待たない失敗時に自分の tab を閉じる」 で足りる
+- *browser の中で読む経路 (browser MCP) に全面的に寄せる*: SSO は browser が面倒を見てくれるが、 拡張の接続と domain 許可が機械 × account ごとの配線になり、 無人の検査から使えず、 1 回の読み取りが tool call 数回になる。 cookie 再利用を第一選択のまま、 入り直しだけを browser に任せる
+- *サイト本体のセッションを定期アクセスで生かし続ける*: 相手への定期的な負荷になり、 IdP 側が放置型なら有効期間 (組織の方針) の延命にもなる。 しない
+- *別 window・最小化した window で開く*: 窓の出現と Dock の動きの方が tab 1 枚より目に付く。 前面の tab を元に戻すだけにした
+- *ログイン待ちで OS 通知を出す / browser を前面に出す*: 頼む経路は agent の chat で足りる。 部品を増やさない
+
+**未検証**: `--wait-login` の実走 (IdP が切れた状態からの復帰)。 入り直せる側 (IdP が生きている時の本体切れ) と `close` (自分の tab を閉じる) は 2 サイトで実走して確かめた = [SSO の入り直しは server の受け入れで決める](#sso-recovery-server-acceptance)。
+
+## <a id="hook-retirement-registry"></a>2026-09-17: hook の退役は registry に書き、 毎回の sync が外す (installer の hardcode をやめる)
+
+**起点 (実測)**: 個人層の hook を 1 本消した時、 配線 (hooks dir の symlink + `settings.json` の entry) が「足すだけ」 なので、 各マシンに command が残る形だと分かった。 層1 には同じ型の掃除が `setup.sh` に hardcode で在ったが、 pull だけで新しい hook を配線する経路 ([#ci-and-single-list-wiring](#ci-and-single-list-wiring)) を作った後も、 退役だけは setup.sh の再実行に依存していた。
+
+**判断**: 退役は `hooks/retired-hooks.txt` (1 行 1 file 名、 `Event:file 名` で event だけの退役) に書き、 [`scripts/lib/prune-retired-hooks.sh`](scripts/lib/prune-retired-hooks.sh) が外す。 層1 は `sync-hook-settings.sh` が毎回呼び、 個人層の installer は同じ関数に自分の registry を渡す。 setup.sh の hardcode 2 件は registry へ移した。 規約 = [`hook-authoring.md#additive-wiring-needs-retirement`](conventions/hook-authoring.md#additive-wiring-needs-retirement)。
+
+**棄却した案**:
+- *registry を持たず、 「command の指す file が無い entry」 を自動で消す*: 他の層・利用者が足した hook も、 その repo が一時的に無い (未 clone・移動中・別マシン) だけで消してしまう。 消す対象は「自分が退役させたと宣言したもの」 に限る
+- *list (settings-entries.json) に無い自層の hook を全部消す*: 自層の hook かどうかを command の path から判定できない (どの層も同じ hooks dir に symlink を張る)
+- *registry の名前が repo にまだ在っても外す*: 書き間違い 1 行で生きている hook が全マシンから外れる。 在る名前は外さず WARN にした (event 指定の退役だけは、 file が現役なのが前提なので当てない)
+
+## <a id="precommit-installer-respects-repo-hooks"></a>2026-09-16: 共通 pre-commit の installer は repo が管理する hook を置き換えない
+
+**起点 (実測)**: 検証 repo の `.git/hooks/pre-commit` が repo 自身の hook (commit 粒度 gate + worker の書込み範囲 gate を走らせてから pre-commit-bib を chain) でなく pre-commit-bib を直接指しており、 2 つの gate が効いていなかった。 原因 = setup.sh Step 6 が「link 先が pre-commit-bib でなければ付け替え、 通常 file は `.bak` に退避して置き換え」 ていたこと。 setup.sh は変更のたびに再実行を促される (git-state-nudge) ので、 repo の installer を走らせても次の再実行で戻される。 全 repo を sweep すると、 もう 1 repo (repo 自身の hook は pre-commit-bib を chain しない) も同じ形で数か月前から無効だった ([2026-05-14](#pre-commit-bib-all-repos) の一括 install の記録にある「旧 hook を上書き」 と同じ形)。 同日に public repo 用の lib にも、 `.git/hooks` の link を track 判定の外に置いたせいで link 越しに track 済み hook 本体を stub で書き換える経路が潜在していた (fixture で再現)。
+
+**判断**:
+- Step 6 の本体を `scripts/install-precommit-bib.sh` に切り出す。 **自分が置いたもの (pre-commit-bib への link / 別の場所の pre-commit-bib への link / 旧版コピー) だけを最新化**し、 それ以外は chain の有無を表示して残す。 `.bak` 退避はしない。 hook の位置は `git rev-parse --git-path hooks/pre-commit` (= core.hooksPath を反映)、 core.hooksPath の先には書かない
+- repo が自前の pre-commit を**宣言**していれば (track 済みの `hooks/pre-commit` / `.githooks/pre-commit` / pre-commit に触れる `install-hooks.sh`)、 効いている hook が pre-commit-bib か空のとき **pre-commit-bib で埋めずに finding** として repo 側の入れ方を出す
+- `lib/hook-stub.sh` の `hook_stub_is_tracked` は symlink を 1 段たどって判定 (Step 8 / 8b の installer も同じ lib を使うので一緒に塞がる)
+- 検出 = `install-precommit-bib.sh --check`。 installer は setup.sh 実行時にしか走らないので、 過去に置き換えられた他マシンの状態は owner の SessionStart (config-bootstrap) が毎回これを呼んで出す
+
+**棄却した案**:
+- *「既存 hook が pre-commit-bib を呼んでいれば skip」 だけ*: chain しない repo の hook (上の 2 例目) を救えない。 置き換えてよいかは「chain しているか」 でなく「自分が置いたか」 で決まる
+- *repo が track する hook を installer が自動で張る / repo の `install-hooks.sh` を自動実行する*: 自分の repo だけでなく fork や共著 repo も clone されるので、 共同研究者が push できる code を clone ごとの同意なしに git hook にする (= 実行経路を増やす)。 案内に留め、 実行は各マシンで 1 回の判断にする
+- *宣言を独自の marker file にする*: 既存の repo は既に `hooks/` / `.githooks/` / `install-hooks.sh` の形で宣言しており、 marker を足すまで検出できない期間が生まれる。 既存の形を読む方が穴が小さい (代わりに、 どれにも当たらない独自配置の repo は検出の外)
+
+**un-defer trigger**: 宣言の 3 形に当たらない repo 管理 hook で同じ無効化が起きたら、 宣言の読み取りを増やすか marker を導入する。
+
+---
+
+## <a id="public-gate-structural-exemptions"></a>2026-09-15: 公開 repo の gate の誤検知を構造で消す (書誌・複合語・生成データ) + 棚卸しと監査を 1 本に
+
+**判断**:
+- 公刊済みの書誌 (arXiv / DOI を持つ JSON record の title・authors・abstract の値の行、 公開先 link だけの md 行) は **行の構造で** Tier A-E から外す (`lib/published_metadata.py`)。 書き手の文 (reason / summary / link 以外の語) は外さない
+- 実名 gate の姓 2 字 term が地名等に当たる誤検知は、 個人層の `compound_allow` で **複合語だけ** を照合前に消す (`lib/sensitive-terms.sh`、 runner と commit-msg matcher が共有)。 3 字以上の term・ASCII term を含む複合語は builder が拒否
+- 外部の公開データを機械が変換した file は、 受理一覧の `generated: <glob>  # 生成元` で **棚卸しからだけ** 外す (`lib/public_tree_accept.py`)。 データ形式の file に限る
+- 週次監査 (`audit-public-repos.sh`) は中身の検査を `scan-public-tree.sh --force` に委ね、 独自の grep を削除 (= 棚卸し・監査・commit gate の除外が 1 つの runner に揃う)
+- gate を締めたら無人の書き手の直近 commit を今の gate に通す (`replay-public-gate.sh`)
+
+**却下した案**:
+- 書誌を許可 list (題名・著者名の列挙) で逃がす = 論文が増えるたびに古くなり、 list 自体が名前の一覧になる
+- 棚卸しで Tier B を path / file 単位で受理する = 公開の受理一覧に置けば term の在り処を晒し、 後から入った実名も黙る
+- 姓 2 字の prefix を stoplist に落とす = 「X さん」 が止まらなくなる (網が縮む)
+- vendored / 生成物の dir を名前で走査から外す = 実測では生成物に共同作業者の開発機の path が焼かれていて、 除外するとそれが隠れる
+- 無人の書き手の commit を `--no-verify` にする = 実名の網を自分で外す
+
+**un-defer trigger**: `compound_allow` が 20 語を超えたら、 地名辞書などから導出する方式を再検討 (= 手で足す list は育たないか膨らむ)。 規約 = [`conventions/confidential-repo-boundary.md#tree-finding-resolution`](conventions/confidential-repo-boundary.md#tree-finding-resolution)。
+
+## <a id="pronunciation-evidence-and-delivery"></a>2026-09-15: 発音 evidence と user-visible 音声 delivery を分離する
+
+**問題**: 転写された人名を英語 system voice に渡すと「音は出る」が対象言語の発音にはならない。
+さらに browser tool 側の player を再生・表示しても、その player が user の chat / panel に提示されたとは限らない。
+この 2 つを一つの成功扱いにすると、**言語として誤った音**と**user に届かない音**の両方を「再生済」で閉じる。
+
+**採用**:
+
+1. 表記の復元 (`name-rendering.md`) と発音 evidence (`pronunciation-verification.md`) を別の fact として扱う。
+2. 発音は本人・母語話者録音 → 対象言語 TTS → IPA の順で取り、他言語 TTS は明示した近似に限る。
+3. 繰り返す対象言語 TTS は UI click でなく API wrapper を layer 1 に置く。ウイグル語の最初の実装は
+   `scripts/uyghur-tts.py` が Idirak/MMS-TTS の公開 endpoint を使い、直接音声 URL または明示保存した WAV を返す。
+4. delivery の完了条件は、tool 側の player でなく、最終応答にある user が開ける link / local media file とする。
+
+**所有**: 発音の evidence ladder と Uyghur route は [`conventions/pronunciation-verification.md`](conventions/pronunciation-verification.md)、
+提示面の一般則は [`conventions/mid-turn-text-visibility.md#tool-side-media-not-user-visible`](conventions/mid-turn-text-visibility.md#tool-side-media-not-user-visible)、
+長文の local 音声校正は [`conventions/tts-review.md`](conventions/tts-review.md) が正本。生成 URL の UUID は一時 artifact なので
+SESSION / DESIGN / 人名 SoT に保存しない。
+
+---
+
+## <a id="public-gate-tier-e"></a>2026-09-14: 公開 repo の Tier E (owner の非公開の活動の事実)
+
+**判断**:
+- 識別子・未公開文書の文に続く 3 つめの class として、 owner の非公開の活動の事実 (応募・採否・事務の指摘・推薦・期限の超過) を公開 repo で見る。
+- 固有語 (個人層 `activity-fact-terms.txt`) = BLOCK。 出来事の語と日付・件数が同じ行 = commit 時は警告だけ。 棚卸し (`--scan-public`) = 承認済み一覧に無い行があれば FAIL
+  ([`docs/convention-design-principles.md#semantic-detector-ack-ratchet`](docs/convention-design-principles.md#semantic-detector-ack-ratchet))。
+- 出来事の語は研究費・審査・推薦に特有の語に絞る。 手順の文にも出る語 (提出・申請・審査・指摘・締切・超過) は入れない。
+- engine が壊れたときは止めない (exit 1 かつ engine の見出しのときだけ止める)。
+
+**却下した案**:
+- 共起で BLOCK する = 公開 2 repo の直近 927 commit に replay すると、 語を絞る前は約 20% の commit で発火した (絞った後で約 9%)。
+- 固有語を Tier B の `sensitive-terms.txt` に足す = そちらはマシンごとの非追跡 file で、 別のマシンに届かない。
+- path 単位の除外 = その file に後から入った本物も黙る。
+
+**un-defer trigger**: 同じ class の漏洩が Tier E の後に 1 件でも公開 repo で見つかったら、 語の共起でなく「公開層に書いてよい文の型」 を決める方式を再検討する
+(再検討の作業は owner の個人層で進行中)。 規則 = [`CLAUDE.md#owner-activity-facts`](CLAUDE.md#owner-activity-facts)。
+
+## <a id="public-gate-tier-d"></a>2026-09-13: 公開 repo の Tier D (未公開文書の逐語) と marker 点検
+
+**判断**:
+- 公開 repo の pre-commit と commit-msg に Tier D を足す。 D-1 = 未公開文書の逐語 (`scripts/check-unpublished-quote.py`)、 D-2 = 既存の `scripts/check-confidential-leak.py` (それまで private repo の hook chain にしか配線されていなかった)。
+- target は公開 repo だけ。 源の宣言は個人層 (`unpublished-sources.txt`) に置き、 engine は置き場所を持たない。
+- 止めるのは「exit 1 かつ engine 自身の見出し」 のときだけ (= engine の import error で全公開 repo の commit を止めない)。
+- 公開 repo の gate の唯一のスイッチは `.claude/public-repo.marker` なので、 GitHub の visibility と突き合わせる点検 (`scripts/check-public-marker.py`) を定期検査に置き、 別マシンの hook は毎 session の install で揃える。
+
+**却下した案**:
+- 内容語の shingle だけで検出する = 公開 2 repo の全履歴 replay で、 漏れた短い引用を 7 語では 1 件も拾えず、 5 語では半分が誤検出だった。
+- 非公開 repo の `.md` と `.py` も源にする = 層3 の plan や script から層1 へ一般則を上げる正当な写しが常に止まる。
+- pre-commit で毎回 GitHub に公開かどうかを問う = commit が network に依存する。 問うのは点検の側だけにした。
+
+**un-defer trigger**: 源に review report (`.md`) を足す = 査読所見の逐語が公開 repo に入りかけた 1 例目。 言い換えの検出は原理的に不可 (confidential-repo-boundary.md #4)。
+
+設計・較正・配線の確認の正本 = [`conventions/confidential-repo-boundary.md#unpublished-text-public-gate`](conventions/confidential-repo-boundary.md#unpublished-text-public-gate)。 なぜ規則だけでは止まらなかったか = [`docs/convention-design-principles.md#rule-visible-where-the-act-happens`](docs/convention-design-principles.md#rule-visible-where-the-act-happens)。
+
+## <a id="session-provenance-trailer-design"></a>2026-09-10/11: commit に agent/session/model/effort trailer (host/account は焼かない)
+
+並列 session が同じ working tree を触ると commit author が全部同じ人間に潰れ、 「どの commit が
+どの session か」 が git から復元できない (= staging window race の事後追跡が transcript 漁りと
+記憶になる)。 `prepare-commit-msg` hook で `Agent-Session: <agent>:<id>` + `Agent-Model:` +
+`Agent-Effort:` を trailer block に足して機械抽出可能にした。agent namespace は Claude / Codex /
+将来 runtime を一つの key で区別し、model/effort は「どの推論設定が carrier だったか」を残す。
+旧 `Claude-Session:` は履歴互換として読み残し、新規 commit だけ generic key へ移行する。規約 = [`multi-session-coordination.md#session-provenance-trailer`](conventions/multi-session-coordination.md#session-provenance-trailer)、
+実装・配線・検査の所有表 = [`codex/PARITY.md#session-provenance-implementation`](codex/PARITY.md#session-provenance-implementation)。
+
+**判断 1: host / account / surface は書かない。** 当初案は「public repo = session id のみ / private
+repo = host と surface まで」 の出し分けだった。 却下の理由: (a) session id から transcript を引けば
+冒頭の自己同定 stamp に host も account も載っており冗長 (b) 出し分けは `.claude/public-repo.marker`
+の有無に依存するため、 **marker 付け忘れの public repo で機器名が公開 history に焼き付く** — 不可逆な
+leak が「設定漏れ」 という最も起きやすい原因で起きる。 id だけにすると分岐そのものが消え、 全 repo で
+同一挙動になる (= 事故の型が設計から消える)。 方向としては [§公開リポ leak 防止](#public-repo-leak-prevention)
+の「機器名は具体値でなく属性で書く」 と同じ。 **一般則として層1 へ hoist 済** = [`convention-design-principles.md §8.34`](docs/convention-design-principles.md#context-branch-as-leak-path) (= 安全側の出力が context 判定に依存するなら、 分岐を消せないか先に問う)。
+
+**判断 2: marker を条件にせず全 repo に配る**。Claude は `setup.sh` Step 8b、Codex は明示 scope の
+`scripts/setup-codex.sh --repo/--repo-root` を使う。sibling の
+`install-public-commit-msg.sh` は public repo 限定だが、 本 hook は private repo (= 並列 session が
+同じ tree を触る作業場) でこそ効く。 判断 1 で public / private の挙動差が消えたので、 marker を
+条件にする理由も無くなった。Codex installer は user-managed `prepare-commit-msg` を全 target の
+変更前に preflight し、`--replace` が無ければ partial install を残さず拒否する。さらに入力 root 内の
+candidate でも Git 解決後の top-level が外へ出れば bulk 対象から除外する。入力判定を resolver 出力へ
+引き継がない一般則は [`§8.35`](docs/convention-design-principles.md#post-resolution-scope-revalidation) へ hoist した。
+
+**判断 3: message に運ばれた既存 session trailer があれば追記しない** (`git interpret-trailers --if-exists doNothing` +
+legacy key の事前検出)。
+「今の session」 を足し続ける設計にすると、 interactive rebase 1 回で無関係な全 commit に現 session が
+混入する。 最初に書いた session を保存する側を採った。 帰結として **rebase / amend で書き換えた
+session は記録されない**。ただし `git commit --amend -m` は message 全体を置換し、Git が元 commit id を
+hook に渡さない経路では旧 trailer 自体が入力から消えるため、amending session の新 block になる。
+
+**判断 4: runtime fact と設定既定を混ぜない。** Claude は session id を
+`CLAUDE_CODE_SESSION_ID`、model を commit 時に同じ session の会話記録の最後の応答の `message.model`
+(= commit を打っている turn の model。 読めなければ SessionStart input を写した machine-local cache)、
+commit 時の effective effort を公式 Bash env `CLAUDE_EFFORT` から取る。 SessionStart input だけに頼らないのは、
+desktop の窓の起動 (SDK の経路)・print・`/clear` の SessionStart input に `model` が無く、 cache が空のまま
+`unknown` になっていたため ([`hook-authoring.md#sessionstart-model-by-launch-path`](conventions/hook-authoring.md#sessionstart-model-by-launch-path))。
+会話記録は Codex の thread row と同じく同じ session id の行だけを読む (他の session の値で埋めない)。 Codex の公式 Hook contract は全 command hook に `session_id` と
+`model` を渡すが effort は渡さない。Codex adapter は SessionStart、UserPromptSubmit、PreToolUse でその値を
+machine-local cache に保存し、Git hook は現行 runtime の `CODEX_SESSION_ID` / `CODEX_THREAD_ID`
+compatibility probe または明示 `CLAUDE_CONFIG_AGENT_*` を読む。cache 不在時だけ、同じ session id の
+local thread row を read-only で schema-probe する。config default は actual と偽らない。2 経路とも欠けた
+Codex active model は warning 付きの `unknown` として記録し、provenance の縮退だけでは commit を止めない。
+Codex effort 等で actual を確定できない値も同じく `unknown` と書く (Claude の mid-session model switch は会話記録の最後の応答が拾う)。
+
+**fail-open を維持する**: supported session id が無ければ no-op で、model/effort が取れなければ `unknown` を
+残す。active model は健康な現行経路なら取得できるため欠測をwarningするが、hook無効化・未対応経路・local
+state schema drift まで不可能とは言えず、provenance annotation の欠測はcommit本体の不正を意味しない。
+trailer 不在は人手 commit だけでなく未導入/未対応 runtime も表し得るため、agent経由でないことの単独証拠には使わない。
+
+## <a id="codex-layered-integration"></a>2026-09-01: Codex integration — L1 正本 + 明示 L4 wiring + 多層検証
+
+**問題**: 共有規約を Codex でも使えるようにするには、通常の安全なローカル作業を逐次確認なしで進められる必要がある。一方で、公開リポを clone しただけで clone 者の home directory・個人設定・Claude 設定を変えてはならず、共有 project (layer 2) を個人 layer (layer 3) やマシン状態 (layer 4) に依存させてもならない。Codex 固有の説明を README・SESSION・skills にそれぞれ増やすと、製品仕様や検証範囲の変更が一箇所だけに残る。
+
+**採用**:
+
+1. **source は public layer 1、導入は明示的な layer 4**: versioned instructions・skills・hook code とその capability map を本リポに置き、各 clone 者が各マシンで installer を実行して初めて local wiring を作る。layer 3 は owner が cross-machine bootstrap 方針を記録する場所であって、installer が発見・生成・同期する対象ではない。layer 2 はこの導入に依存しない。
+2. **安全な local autonomy と安全境界を分離**: installer の opt-in は workspace 内の通常作業を止めない設定だけを行う。外部 write・破壊的操作・コスト発生・scope 拡張と、execution environment が課す技術的 permission gate は残す。これにより「安全な local step ごとの会話確認」と「本当に必要な境界」を混同しない。
+3. **Claude の実装を copy せず、Codex の観測可能な lifecycle subset と Git gate を組み合わせる**: native hook は高 signal な local event に限定し、committed public content は agent に依存しない Git-side protection を authority に残す。client の trust review や観測不能な tool path を installer で越えたと主張しない。
+4. **散文正本 + executable regression を対にする**: durable technical record は [Codex capability map](codex/PARITY.md#codex-integration-sot) に一本化し、entry document は pointer に縮退する。contract checker は pointer・SESSION の重複禁止・hook adapter・runner/CI/pre-commit wiring を、fixture / behavior test は installer の default-refuse preflight と hook behavior を検証する。default installer は全 target を mutation 前に preflight し、user-managed conflict では partial state を残さない。
+
+**採らないもの**:
+
+- Codex setup のために `~/.claude`、Claude の設定・hook・credential を変更または流用すること。
+- clone や shared-project setup が owner の private layer を暗黙に取得・配布すること。
+- native Windows installer、client trust、または hosted / specialised tool path まで既に同等だと宣言すること。Claude Code の既存 Windows bootstrap は別の supported surface であり、この不在理由に使わない。
+
+**検証の読み方**: source/trigger wiring、behavior、layer-4 wiring、client trust は別の evidence である。どれか一つの green を「完全導入」の根拠に昇格しない。日常の authoritative map と実行コマンドは [Codex capability map](codex/PARITY.md#codex-integration-sot) に置き、current state は SESSION の短い pointer に留める。
+
+## <a id="auto-tree-autoload-slim"></a>2026-09-01: AUTO-TREE の auto-load 税 縮退 (when 表示 + hooks/scripts README 移設)
+
+**問題**: CLAUDE.md 95 KB のうち 79% (75.5 KB) が AUTO-TREE 3 block。 conventions block (54.6 KB) は doc-meta の **summary** を表示していたが、 summary は中央値 381 B・最大 1.9 KB のミニ要約に成長しており、 CLAUDE.md は毎 session + headless routine が払う auto-load 税 ([`scheduled-tasks.md #headless-context-budget`](conventions/scheduled-tasks.md#headless-context-budget)) として過大。 一般則は [`memory-file-slimming.md`](conventions/memory-file-slimming.md) の「routing table は trigger 列こそが routing 機能、 rule digest は drift する複製」 — これを生成側に適用した。
+
+**変更 (生成契約、 owner 承認 2026-09-01)**:
+1. conventions tree 行の説明を summary → **when** (= trigger、 合計 9.9 KB)。 summary は生成 index [`conventions/README.md`](conventions/README.md) が引き続き when + summary 両方を表示 = **情報の削除ゼロ、 源 (doc-meta) 不変**。
+2. hooks / scripts の per-file 列挙を新生成物 **`hooks/README.md`** + **`scripts/README.md`** へ移設。 CLAUDE.md 内の当該 block は件数 + README pointer の 1 行になる。 生成物は 3 → **5 箇所**、 いずれも `--check` (CI / pre-commit) 管轄。
+3. ⚠️ 新 README 2 本は AUTO-GENERATED の **view** であり正本ではない (正本 = 各 file header 説明 1 行目 / doc-meta)。 「README に正本を置かない」 規律と整合 — 手編集禁止 header + drift 検査で README の正本化経路は構造的に閉じている。 setup.sh / audit-hooks.sh は `*.sh` / `*.py` glob のみを install/audit 対象にするため hooks/README.md は installer に対して不可視。
+
+**実測**: CLAUDE.md 95 → 35 KB (−63%)。 `--selftest` は新契約 (when 表示 / summary 非表示 / README 生成 / 各 drift 検出) に更新済み ALL PASS。 旧契約の記述は [§2026-07-10 生成 doc](#generated-docs-tree-autogen) — 当時の「3 箇所」 は本 entry で supersede。
+
+## <a id="ci-and-single-list-wiring"></a>2026-07-10: 検証の発火面化 — CI + run-all-checks (検査リスト単一 SoT) + hook 配線の単一リスト駆動化
+
+### 問題
+
+(a) selftest / .test.sh 資産 20 本超がどの発火面にも載っておらず、 自動生成 index 4 本の OUT OF SYNC (= §17 が slug DB から欠落) が ~10 日 silent だった。 (b) hook 配線が JSON 定義 + merge loop の hardcode 名前リスト ×4 の二重管理で、 同期漏れが実発生 (= stale-read-nudge.sh が実装 + test 完備のまま setup.sh 未配線 = header 主張と食い違う silent dead)。 (c) 下流 repo からの inbound 参照検証 (check-inbound-refs.py) が偽陽性 3 クラス込みで 25 HARD を報告し、 狼少年化しかけていた。
+
+### 設計
+
+- **検査リストの SoT = `scripts/run-all-checks.sh`** に一元化し、 CI (`.github/workflows/checks.yml`) は**それを呼ぶだけ** (= CI yml と local 実行の drift を design-out)。 検査対象は自動発見 (= `--selftest` を持つ python script の grep / `*.test.sh` glob) で hardcode リストを持たない。
+- **環境依存 test の SKIP 契約**: 前提 (jq / macOS 固有 tool / owner 環境) が無い test は SKIP を出力して exit 0 (= silent skip 禁止、 skip 理由は test 自身が出す)。 runner は集計のみ。
+- **hook 配線は entries JSON から jq で期待リストを導出** (`scripts/lib/merge-hook-event.sh`) — 「JSON と loop を同時に更新せよ」 という人力同期を構造的に不可能化。
+  - **2026-09-12 追記**: list を setup.sh 内の文字列から [`hooks/settings-entries.json`](hooks/settings-entries.json) へ出し、 配線の入口を [`scripts/sync-hook-settings.sh`](scripts/sync-hook-settings.sh) (無い symlink と entry を足すだけ・冪等・`--check`) に一本化した。 setup.sh / setup.sh が生成する post-merge hook / 個人層の bootstrap が同じ script を呼ぶ。 理由 = 新しい層1 hook (自己同定 stamp の UserPromptSubmit / Stop) を足した時、 setup.sh を再実行しない machine では settings に entry が入らず hook が走らなかった (post-merge は既存 symlink の更新しかしていなかった)。 退役 hook の掃除は引き続き setup.sh が持つ (sync は削除しない)。 setup.sh に list を文字列で戻すと `scripts/sync-hook-settings.test.sh` が落ちる。
+- **check-inbound-refs の偽陽性 3 クラスを informational 降格**: code file (.py/.sh) 由来 = selftest fixture / path 直後の「新規・未作成・却下」 marker = 構想言及 / 参照元 repo に同名 doc = local 解決が自然 (= §17 hierarchical-name-collision の機械対処)。 HARD = 真の壊れ参照のみに純化。
+- runner は ubuntu (public repo = Actions 無料)。 macOS 固有検査は SKIP 契約で吸収。
+
+### 効果 (初日実測)
+
+CI 初回走行が「macOS では不可視だった Linux 全滅バグ」 3 種を検出 (= GNU stat の stdout 混合 〔[hook-authoring.md#substitution-fallback-stdout-mixing](conventions/hook-authoring.md#substitution-fallback-stdout-mixing) に SoT 化〕 / bootstrap の CLI gate が hermetic test を殺す / hook header と実装の食い違い)。 以後 push / PR ごとに 37 検査 + commit 時の pre-commit warn 層の二層構成。
+
+---
+
+## <a id="generated-docs-tree-autogen"></a>2026-07-10: 構造 tree / 冒頭列挙 / カテゴリ index の自動生成 (generate-tree.py)
+
+**問題**: conventions/*.md の説明文が (1) CLAUDE.md 構造 tree (2) CONVENTIONS.md 冒頭の全列挙 (3) 各 file 本文 の 3 箇所に手動同期されていた。 pre-commit-extra.sh の comm ベース検査 (2026-06-13) は「列挙の存在」 しか見ず説明文 drift は検出外。 実測: 2026-07-10 時点で CLAUDE.md tree に hooks 7 本 + scripts 9 本 + lib 1 本 (+ test file 群) が未記載。
+
+**設計 (= design-out、 検出でなく生成)**:
+
+- **源の単一化**: conventions/*.md は各 file 冒頭の HTML comment frontmatter `<!-- doc-meta / when: / category: / summary: -->` が唯一の説明 home (YAML frontmatter は GitHub render に出るので不採用)。 scripts/ hooks/ は各 file header の説明 1 行目 (.py = docstring 1 行目 / .sh = shebang 直後の # comment / .html = 冒頭 `<!-- -->`) が home。 移行時、 旧 tree の長文説明は情報量が最大だったため各 file header へ verbatim MOVE した (114 件 byte 一致を機械検証、 位置依存表現「↑の」 3 件のみ自己完結化)。
+- **生成**: `scripts/generate-tree.py --write` が (1) CLAUDE.md の `<!-- AUTO-TREE:{conventions,hooks,scripts} BEGIN/END -->` marker 間 (2) CONVENTIONS.md の `<!-- AUTO-ENUM BEGIN/END -->` 間 (3) `conventions/README.md` 全体 (カテゴリ別 index、 8 カテゴリ) を再生成。 tree の他 block (templates/ docs/ hammerspoon/ 等) は手動のまま (scope 限定)。
+- **源は git-tracked file のみ** (git 不在時 disk fallback): untracked file (並列 session の未 commit 作業・一時 file) を tree に載せると committed checkout で --check を回す CI と結果が割れるため。 実際、 初回生成時に並列 session の未 commit test file 3 本を拾いかけたのが動機。 新 file は `git add` した瞬間に源へ入る = commit 単位で自己整合。
+- **検査の一本化**: `--check` (drift = exit 1 / 源の validation error 〔doc-meta 欠落・不正 category・header 説明無し・未知 subdir〕 = exit 2) を run-all-checks.sh (= CI) と pre-commit-extra.sh (= warn-only、 旧 comm ベース検査 1+2 を置換 = 検出 logic の二重実装解消) の両方に配線。 `--selftest` 20 check 内蔵 (hermetic tempdir fixture、 git-mode の untracked 除外 fixture 含む)。
+
+**新規 file の手順** (旧「同 commit でここにも追記」 discipline を置換): conventions/*.md → doc-meta を書く / scripts・hooks → header 1 行目に説明を書く → `git add` → `python3 scripts/generate-tree.py --write`。 忘れは pre-commit warn + CI fail が拾う。
+
+## <a id="design-reorg-archive-first"></a>2026-07-10: DESIGN.md の archive-first 再編 (DESIGN-archive.md 分離 + slug anchor + index 化)
+
+### 問題
+
+本 file が 1,268 行に達し、 自リポ規約 ([`CONVENTIONS.md #optional-files`](CONVENTIONS.md#optional-files) 「DESIGN.md が 1000 行超になったらトピック別再編と完了リファクタ集約を検討」) の trigger を発火済みのまま未対応 = 自己不整合だった。 TOC / anchor / index が無く、 外部からの §-参照は fragile な prose 一致に依存、 dated entry と無日付の主題節が混在して navigable でなかった。
+
+### 設計 (= SESSION.md / SESSION-archive.md の hot/cold 分離と同型の archive-first)
+
+1. **[`DESIGN-archive.md`](DESIGN-archive.md) 新設**: 「明確に完了・超越済みの dated entry」 (= 完了 marker 付き / 原則が他 doc へ昇格済 / 一度きりの migration 記録で再訪価値が grep 参照のみ) を verbatim move。 初回分離 = 6 entry (2026-05-13 ×2 / CONVENTIONS.md §2 記録判別表除去 / `~/Claude/CLAUDE.md` symlink 化 / EXPLORING.md 分離 / 4 層モデル renumber)。
+2. **保守基準 = 迷ったら残す**: live な設計判断 (= 今も効いている判断 / defer + un-defer trigger / 運用 guide を含む節) は行数が大きくても残置 (例: 公開リポ leak 防止 / STALE_DIRT)。 live 要素が graduation で消えた時点で archive 候補に戻る (= [`docs/convention-design-principles.md #design-snapshot-operation`](docs/convention-design-principles.md#design-snapshot-operation) の lifecycle と両立: pedagogy 抽出済みで削除できる entry は削除が第一選択、 「削除はまだ重いが hot に置く価値も無い」 中間帯だけを archive が受ける)。
+3. **slug anchor + AUTO-GENERATED index**: 残る各 `##` heading に `<a id>` を付与し `scripts/generate-doc-index.py` で `DESIGN.index.yaml` を生成 (= `run-all-checks.sh` の `--check-all` が同期を機械検証)。 冒頭に TOC。 dated title の leading date は index の legacy field に凍結され、 旧来の 「`DESIGN.md §2026-05-26`」 型 prose 参照の forwarding address になる。
+4. **cross-repo anchor preservation**: 移動 entry への被参照を全 repo grep で列挙し archive path へ reroute ([`CONVENTIONS.md #session-trim-anchor-preservation`](CONVENTIONS.md#session-trim-anchor-preservation) の DESIGN 適用)。 `check-inbound-refs.py` で HARD DANGLING 0 を維持。
+
+### 副次修復
+
+2026-05-13 (3rd round) entry の `##` 見出し行が commit `ff08f9a` (2026-05-14) で誤って削除され、 本文が直前 entry 末尾に無見出しで連結されていた defect を発見。 archive 移動時に `32bfddd` 時点の原見出しを復元 (= errata note を archive 側に併記)。
+
+---
+
+## <a id="office-files-router-hoist"></a>2026-06-27: Office handling 入口 router を layer 1 に hoist (`office-files.md` 新設)
+
+### 問題
+
+Office ファイル (Excel / Word / PDF / pptx) の handling は layer 1 に knowledge が散在していた:
+- 考え方 = `office-automation-principles.md`
+- 罠 = `office-automation.md` (+ `index.yaml` validator)
+- 道具 = `scripts/diff-form-xlsx.py` / `pdf_form_fill.py` / `docx-to-pdf.sh` / `xlsx-to-pdf.sh` / `pptx-to-pdf.sh` / 各種 integrity check
+- 権限 = `claude-code-permissions.md`
+- e-Rad = `erad-submission.md`
+
+しかし**全部を束ねる単一入口が layer 1 に無く**、 個人層 (layer 3) の `office-file-handling.md` に router がある状態だった。 = layer 1 only の参照ルートが存在せず、 「universal な Office 仕事の入口」 として generic な user が辿れる経路が欠けていた。
+
+### 設計
+
+`conventions/office-files.md` を**薄い router** として新設:
+- 入口 ⓪〜⑥ (考え方 / 権限 / skill 判断 / 罠 / PDF 化 / 機械監査 / e-Rad) を 1 表で
+- 中身は持たず**全 pointer** (layer 1 内の各 home に飛ぶ)。 罠の早見は `office-automation.md#symptom-index` 経由
+- layer 3 (個人層) の `office-file-handling.md` は env 追補 (機械別 install / 生成 driver 実装例) に薄化、 入口は layer 1 へ
+
+これに伴う 2 つの dedup:
+- 「**入口の順番**」 を `office-automation-principles.md` も宣言していた (旧 L6) → 「考え方の正本、 router は `office-files.md`」 に書き換え (= 入口の 2 重宣言を解消)
+- `skill vs 手動` 判断表は principles §1 「道具選択の梯子」 と同じ「道具を選ぶ判断」 軸 → principles §1 に統合 (router 側は pointer)
+
+### 同時に投入した機械層
+
+router §4 で参照する `scripts/diff-form-docx.py` を新設 (= `diff-form-xlsx.py` の docx 版、 ラベル欄上書き / 見出し消失 / 空の箇条書き / 全空 labeled 列を blank diff で検出)。 `office-automation.md#diff-form-docx-detection` slug + principles §5b「記入後は『審査員の目』 で閉じる」 とセット。
+
+### origin
+
+2026-06-27 ある研究費 docx 申請様式で同一様式に 4 記入ミス連続 → 申請者発見 ×4。 視覚 render しても自分の記入箇所しか見ない = recall 依存の規律では止まらない実証 → 機械化 + router hoist。
+
+---
+
+## <a id="layer1-firing-surface-tension"></a>2026-06-17: layer-1 convention の発火面 — 「正しい層配置」 と「発火確率」 の tension (= future work)
+
+### 問題
+
+universal な規律 (= 全 Claude Code ユーザーで true) は 4 層 model 上 **layer 1 (`conventions/*.md`) が正しい配置**。 だが [§10](docs/convention-design-principles.md#file-role-architecture) (`docs/convention-design-principles.md`) の auto-load tier では `conventions/*.md` は T0 (= 毎 session 強制 load = CLAUDE.md / MEMORY.md のみ) でなく **on-demand**。 つまり layer-1 convention は「何かがそれを指していて、 かつその pointer が読まれた時」 にしか発火しない (= [§8.12](docs/convention-design-principles.md#firing-surface-hierarchy) 発火面 hierarchy で最弱の **doc 記載 / recall 依存**)。
+
+→ **tension**: 規律を正しく layer 1 に置くと観客は最大化されるが、 **発火確率は下がりうる** (= 個人層 CLAUDE.md の「読み込み必須」 経由でしか辿られず、 該当 convention file を実際に開かないと効かない)。 「正しく記録したのに発火しない」 が起こりうる。
+
+### 暫定 mitigation (= 2026-06-17 に実証した「下層から参照を張る」)
+
+universal rule を layer 1 に置いたうえで、 **その規律が効くべき作業文脈で読まれる下層 doc (layer 2 / 3) から pointer を張る** (= 規則実体は重複させず「正本 = layer 1」 と書いた pointer のみ。 §2 ポインタ原則)。 pointer が in-context で読まれることで layer-1 の doc 規律が下層の reading path 経由で発火する。 worked example (2026-06-17): ある universal な LaTeX 編集則を `conventions/latex.md` に新設し、 それが効く文脈で読まれる layer-3 の paper 執筆 doc + layer-2 の該当 paper repo CLAUDE.md から pointer を張った。
+
+### open (= future work、 未決定)
+
+manual な per-rule pointer は (a) scale しない (b) 「pointer を張るのを忘れない」 という recall に再依存する。 より系統的な発火面を探す (= 本 entry の主題):
+
+- personal skill (`conventions/personal-skills.md`、 auto-discover = 全 session 可視) を「LaTeX / paper 編集の時に latex.md を引く」 等の topic-trigger 発火面にする
+- §3 の「規約を読まない」 問題 + routing を「declared → consulted at topic detection」 へ強化 (= topic 検出時に required-reading を能動 surface)
+- dashboard / SessionStart の hint surface への相乗り (= §8.12「新機構を増やす前に既存 channel への相乗りを先に検討」)
+- 個人層「読み込み必須」 table の trigger column に該当 convention を登録する運用 (= 既存 channel)
+
+### 追記 (2026-09-10): 入口の *置き場所* の基準は言語化した (= open の解決ではない)
+
+上の暫定 mitigation「下層から pointer を張る」 の **どこに張るか** に基準を与えた =
+[§8.12b](docs/convention-design-principles.md#symptom-keyed-entry-point) (= **home は topic 側 / 入口は「症状の瞬間」 側**)。
+契機は、 layer-1 に正しく置いた規律の `when` が **それが要る瞬間**と鍵が合っていないと気付いた事例
+(= [§session-provenance-trailer 設計](#session-provenance-trailer-design) の読み方を並列 session 設計 doc に置いたが、
+要るのは「commit が消えた」 という git 考古学の瞬間だった)。 ⚠️ **未発火のまま見落とされた incident ではなく、
+owner の「上層には要らないのか」 という問いで設計 review 中に捕まえた near-miss** — 下の un-defer trigger 1 件目には
+数えない。
+
+### <a id="completion-gate-firing-resolution"></a>部分 resolution (2026-09-11): completion boundary は global entry + blocking Stop へ
+
+上の第1 un-defer trigger (= layer-1 に記録済みの規律が実際に不発) が到来した。Git の変更 task で commit/push 規律は既に存在したが、Codex の直接入口は「commit 後 push」までしか運ばず、build 成功後かつ完了報告前という event が未定義だった。旧 Stop hook も dirty の一度通知だけで、clean-but-ahead と live remote drift を見なかった。規則の内容でなく **entry / event / blocking surface / state predicate** の4点が failure path だった。
+
+この class は manual pointer の追加だけで閉じず、(a) product-neutral な完了 gate を [`CONVENTIONS.md#completion-git-gate`](CONVENTIONS.md#completion-git-gate)、(b) 複数段 workflow の一般原則を [`#completion-boundary-state-gate`](docs/convention-design-principles.md#completion-boundary-state-gate)、(c) Codex 固有の state baseline + blocking Stop を [`codex/PARITY.md#completion-git-gate-hook`](codex/PARITY.md#completion-git-gate-hook) に置いた。global/workspace AGENTS と該当 skills は短い入口だけを持ち、fixture / integration checker / layer-4 audit を既存 run-all channel に相乗りさせた。owner 固有の各作業単位 strictness は layer 3 に残る。
+
+これは「全 layer-1 rule を自動 surface する」一般解ではない。機械判定でき、全 Git 変更 task に効き、完了という既存 lifecycle event がある高頻度 invariant だから global entry + Stop が正当化された。judgment 系 rule の manual pointer scale 問題は残る。
+
+### 残る un-defer trigger (= signal / 機械判定)
+
+- L1-rule-surfacing のための manual 下層 pointer を **3 件目**張ろうとした時 (= DRY 圧 → 系統化、 §9.6 機構増殖抑制と両睨み)
+- convention の発火面を別件で再設計する時 (= personal-skills 拡張等に相乗り)
+
+### 関連
+
+- [`docs/convention-design-principles.md` §8.12](docs/convention-design-principles.md#firing-surface-hierarchy) (発火面 hierarchy、 doc=最弱) / [§8.13](docs/convention-design-principles.md#conditional-firing-visibility) (silent dead) / [§8.15](docs/convention-design-principles.md#enforcement-surface-frontend-survival) (frontend honor、 ⚠️ ex-§8.14 typo: label "frontend honor" は §8.15 と semantically 一致、 §8.14 は identity corroboration) / [§3](docs/convention-design-principles.md#rule-addition-criteria) (「規約がない」 か「規約を読まない」 か) / [§10](docs/convention-design-principles.md#file-role-architecture) (auto-load tier)
+- `conventions/personal-skills.md` (skill = auto-discover 発火面)
+- 起点: universal な LaTeX 編集則 (= 段落長の判断でコメントアウト行を数えない) を latex.md に hoist した際、 user が「層 1 だと逆に読まれなくなる」 と発火面の弱さを指摘 → 下層 pointer で暫定対応 + 本 entry で系統化を future work 化
+
+---
+
+## <a id="conventions-listing-regeneration"></a>2026-06-13: CONVENTIONS.md 冒頭の conventions/ 列挙 — 完全列挙と判定して再生成、機械 enforcement は defer
+
+### 問題と意図判定
+
+冒頭の `conventions/*.md` 列挙が dir 実体 56 file に対し 35 file で drift していた (≈ 2.5 ヶ月分の追加忘れ)。「完全列挙のつもりが drift」 か 「意図的 curation (domain 規約のみ掲載)」 かを git 履歴で判定: (a) 初出 commit `4cdd2d4` (2026-03-31 split) では実体 2 file = 列挙 2 file の完全列挙、 (b) `git log -L` で列挙行の全履歴を見ると entry の除去は一度もなく単調追記のみ、 (c) 直近の追記 `e29fba4` は infra/meta 系 (hook-authoring / personal-skills) を含み 「domain 規約のみ」 仮説と矛盾、 (d) 漏れた 21 file 中 20 は **CONVENTIONS.md を触らない commit** で追加されたもの (全 21 を commit 単位で検証済。 残る 1 = giving-talks.ja.md だけは CONVENTIONS.md を触った同時追加 commit `24c3775` でも EN のみ列挙されており、 これは drift でなく「翻訳 variant は列挙しない」 意図的前例)。 → **完全列挙が意図、 追加忘れ drift と判定** (.ja variant のみ例外規則として明文化)。
+
+### 修復
+
+列挙を `ls conventions/*.md` の名前順で再生成し、 冒頭に scope marker (= 全列挙・名前順・新規 file は同 commit で追記・`.ja.md` 翻訳 variant は親 entry に併記) を明記。 これで「漏れ」 と 「意図的除外」 が区別可能になり、 将来の audit は列挙 vs `ls` の機械 diff に還元される。 `.ja.md` の扱いは前例踏襲 (= giving-talks の EN+JA 同時追加 commit `24c3775` でも EN のみ列挙していた) で親 entry への併記とした。 同型 drift だった CLAUDE.md 構造 tree (6 file 欠落) も同 commit で同期。
+
+### 機械 enforcement: 当初 defer → 同 session で実発火に格上げ (`.claude/pre-commit-extra.sh`)
+
+当初は「再 drift したら機械化する」 という **doc 記載の格上げ trigger** で defer した (= blast radius annoyance 級、 §9.1 triage、 §9.6 機構増殖抑制)。 しかし user が「これはしっかりそうなるようになってるか?」 と問うた — これは正しい指摘で、 **doc 記載の trigger は §8.12 の最弱発火面 (recall 依存)** であり、 まさに今回の列挙 drift を ~2.5 ヶ月 silent 累積させた失敗 mode そのもの。 「再 drift したら発動」 は安全網に見えて、 実体は「誰かが DESIGN.md を読んで思い出せたら」 に依存する note にすぎない。
+
+→ user の問いを trigger として、 同 session で**既存 channel への相乗り**で機械発火に格上げ済 (= 新 standalone 検出器 / dashboard 項目は増やさない):
+
+- **発火面**: `public-precommit-runner.sh` が leak gate pass 後に chain する `<repo>/.claude/pre-commit-extra.sh` (= 既存の設計済み拡張口、 従来 claude-config 未使用) に check を実装。 commit の瞬間・drift を入れた本人に発火する決定的 surface
+- **検査**: CONVENTIONS.md 冒頭の全列挙 + CLAUDE.md 構造 tree の conventions/ block が、 実体 `conventions/*.md` と一致するか (.ja.md は列挙内 variant link として実体集合と一致)
+- **比例性**: §9.1 に従い **warning のみ・常に exit 0** (commit を block しない)。 annoyance 級に block を当てない
+- **検証**: 同期済で無音 / drift 注入で該当 file 名指し warning を self-test 済
+
+残課題: pre-commit は claude-config に commit する瞬間にしか発火しない (= 他 clone / 別経路で dir だけ増えた状態は次 commit まで未検出)。 ただし dir 追加は必ず commit を伴うため実害は最小。
+
+---
+
+## <a id="setup-clone-rename-skip"></a>2026-06-01: setup.sh の clone step — local dir rename による重複 clone を防ぐ
+
+### 問題
+
+Step 7 (= 認証ユーザーの全 repo を clone) は GitHub repo 名で `$CLAUDE_DIR/$REPO` に clone し、 同名 dir が無ければ clone する。 ところが local clone の **ディレクトリ名を GitHub 名と別名に rename** している場合 (= 表示名を非 ASCII 名にする等)、 setup.sh は rename 後の dir を「未取得」 と誤認し、 **毎回 GitHub 名で重複 clone を生成**してしまう。 同一 remote の 2 clone は独立に drift し、 片方が push すると他方が silent に behind 化する (= cross-clone drift の温床)。
+
+### 修復
+
+clone loop の前に、 既存の `$CLAUDE_DIR/*/.git` 各 dir の `remote.origin.url` を正規化 (= `owner/repo` に統一、 https / ssh / `.git` suffix / 大小文字を吸収) して集合化。 clone 判定で従来の「dir 名一致で既存 → skip」 に加え「**同一 remote を持つ dir が別名で既存なら skip**」 を追加。 これで rename された clone は再生成されない。 bash 3.2 / Windows 互換 (= 連想配列不使用、 `git config --get` 使用 [`git remote get-url` より移植性が高い]、 集合判定は `grep -qxF`)。 純粋に「clone する件数を減らす」 方向の変更なので後方互換 (= 既に同一 remote が手元にある = repo は既に存在する、 skip は安全)。
+
+### 発見経緯
+
+odakin の私的環境で同一 remote の二重 clone が session 間で drift し、 片方が session 開始時の sync 規律から漏れて behind 累積していた (= 詳細は個人層の SESSION 記録)。 個人層の SessionStart 全 repo sync sweep hook が症状を session 境界で機械回収する一方、 本 setup.sh 修正は **重複生成の根本**を断つ (= 症状回収と根本断ちの 2 層)。
+
+---
+
+## <a id="commit-msg-leak-guard-option-b"></a>2026-05-26: commit-msg leak guard option B (= git native BLOCK mode) を harness invoke bug の mitigation として投入
+
+### 起点
+
+2026-05-25 evening の言語移植 session で claude-config 公開リポに連続 leak 発生 (= 詳細は `個人層の leak-incidents.md` 5/25 entry)。 既存 layer 3 hook (= `commit-msg-leak-guard.sh`、 2026-05-20 MVP shipped、 PreToolUse Bash matcher、 warn mode) が **本 leak を捕まえなかった**。 5/26 follow-up session で root cause 究明、 仮説 5 件 verify → **真因 = claude-code 2.1.x の `PreToolUse[Bash]` matcher harness invoke bug** (= 既存 `conventions/hook-authoring.md §2 (d)` entry、 Anthropic issues [#52715](https://github.com/anthropics/claude-code/issues/52715) + [#59513](https://github.com/anthropics/claude-code/issues/59513)) と確定。 hook script + 配信 (a)(b)(c) は全 healthy、 harness が invoke しない silent failure で、 (a)(b)(c) audit だけでは expose できない。
+
+### 修復 candidate 4 案 evaluation
+
+| 案 | 概要 | reliability | 投入コスト | 副作用 |
+|---|---|---|---|---|
+| A: Anthropic fix 待ち | issue #52715/#59513 修復を待つ | 不明 (release date 未公開) | ゼロ | leak window 無期限 open |
+| **B: git-side commit-msg hook** | git native hook で harness を bypass、 同 logic を BLOCK mode で適用 | 高 (= git 自身が起動、 harness bug 影響なし) | 中 | 一部 `--no-verify` で bypass 可 |
+| C: dashboard post-hoc detect | 過去 commits を retrospective scan | 低 (= 検出は事後、 leak は既に焼き付き) | 既投入 | 予防 layer ではない |
+| D: workflow 強制 | Claude が commit 前に手動 invoke 規律 | 低 (= reflex に依存) | ゼロ | attention budget 圧迫 + skip で破綻 |
+
+### Resolution: 案 B (= git-side commit-msg BLOCK mode)
+
+新規 components:
+- `scripts/lib/commit-msg-leak-matcher.sh` — sourceable matcher library (= layer 3 claude-code hook + 本 runner の両方が source、 DRY)
+- `scripts/commit-msg-leak-guard-runner.sh` — git commit-msg hook 本体 (BLOCK = exit 1 on hit)、 `.claude/public-repo.marker` 確認 + comment 行 strip + merge/squash skip
+- `scripts/commit-msg-leak-guard-runner.test.sh` — 17 case、 mock personal layer pattern (= `CLAUDE_PERSONAL_LAYER` env で temp dir 注入、 layer 3 data を public test file に embed しない)
+- `scripts/install-public-commit-msg.sh` — installer (= `install-public-precommit.sh` と同 pattern: marker check + `core.hooksPath` cascade + 既存 hook backup + 冪等)
+
+統合:
+- `setup.sh` Step 8 を pre-commit + commit-msg 同時 install loop に拡張
+- 既存 layer 3 hook を shared library を source する形に refactor、 26 test 全 pass 維持
+
+### なぜ BLOCK mode を選ぶか
+
+claude-code hook は warn mode (= MVP 仕様で「dry-run 観察期間」 を経由する想定)、 但し git-side で再び warn にすると **同じ single-viewpoint trap** が再現する (= 規律 §13 + `hook-authoring.md §5.1` の「生成 stream 内で自己 gate できない」 問題)。 git 層で BLOCK にすることで:
+
+- claude-code harness が dead でも commit が止まる (= 本件の元 bug 症状を bypass)
+- Claude session の自己 reflex に依存しない (= 「読んだか」 が不問になる)
+- `--no-verify` は git 標準の escape hatch、 意図的 bypass は personal layer の leak-incidents 記録推奨
+
+既存 `public-precommit-runner.sh` も BLOCK mode で統一済、 design 整合。
+
+### なぜ matcher を layer 1 に置くか
+
+(a) algorithm 自体は public-safe (= 6 allowlist 名は既に `CLAUDE.md §例外 list` で public)、 (b) 2 caller (= layer 3 hook + layer 1 runner) が同 logic を共有する DRY、 (c) layer 3 data (= `repos.md` / `sensitive-terms.txt`) は `find-personal-layer.sh` cascade で動的解決、 layer 1 source に literal embed しない、 (d) foreign user は personal layer 不在で fail-open (= 既存 `public-precommit-runner.sh` Tier B と同 pattern)。
+
+### 影響範囲
+
+- 13 public repo に `.git/hooks/commit-msg` stub 配信完了 (= 2026-05-26 時点 marker 保有 repo 全件)
+- 新規 public repo は `.claude/public-repo.marker` 作成後の `setup.sh` 実行 (= 既存 missing-marker 警告は同 Step 8 内で出力) で自動 cover
+- 2-layer 防御: 既存 `public-precommit-runner.sh` (= file 本文 Tier A + Tier B) と本 hook (= commit message Tier A + B) が独立に gate、 過去 leak 事例の「file 本文 OK だが commit message に leak」 死角を埋める
+
+### 反省 (= meta)
+
+実装 commit `4f4e636` 自体で **self-leak が発生** (= `commit-msg-leak-guard-runner.test.sh` の test case literal に 非例外 private repo 名 4 種を embed、 hook 自身が file body を scope 外として通過した)。 同 session の §10 4 軸 sweep 安全性軸で発覚、 `c7a9144` で mock personal layer pattern に refactor。 git history `4f4e636` の leak は force push せず documented (= personal layer の leak-incidents 記録)。
+
+教訓: 「**leak 防御を実装する commit で自分の防御 scope の死角を踏む**」 trait family の同 session 内再演。 layer 1 test file は最初から mock pattern で書く reflex が要 (= 別 task: 個人層側の作業規律で追加候補)。
+
+### 残務
+
+- Anthropic fix (= 案 A) を background monitor、 fix released かつ 1 ヶ月安定 → claude-code hook の縮退判定 (= `hook-authoring.md §6` framework 適用)。 git-side BLOCK は継続維持 (= §5.1 trap 回避優先)
+- 既存 `public-precommit-runner.sh` Tier A を「private repo name list 由来 regex」 で拡張する case (= file body leak の死角を埋める structural 対応 candidate、 別 task)
+
+---
+
+## <a id="depend-vs-mention-distinction"></a>2026-05-19: 4 層 model の Core rule に「依存 vs 名指し」 区別を明示
+
+### 起点
+
+或る学科 web repo (L2) の責務境界 section で odakin の career DB upstream を記述するとき、 既存 wording は「odakin が別管理」 という abstract paraphrase 一本だった (= [shared-repo.md 旧版](conventions/shared-repo.md) §「公開前の Audit」 の grep が L3 repo 名 hit を 0 件要求していたため)。 しかし abstract paraphrase は collaborator にとって「upstream に何があるか」 を見えにくくし、 system 構造の理解を阻害する failure mode の方が強かった (= 何があるか分からない方が「何を訊くべきか」 も判断できない)。
+
+### 概念整理
+
+「**A が B を depend on する**」 と「**A の doc が B を mention する**」 は別の operation:
+
+| | 依存 (depend) | 名指し (mention) |
+|---|---|---|
+| 操作的定義 | A の動作・解読に B アクセスが構造的に要求される | A の reader に B の存在を informational に伝える、 A は standalone |
+| layer 違反? | smaller-audience layer (例: L3) を wider-audience layer (例: L2) から depend するのは違反 | boundary 明示付きであれば許容 |
+| reader への harm | B にアクセスできない reader は A を使えない | reader は B を知るだけ、 A は使える |
+
+旧 wording は両者を「参照」 という一語で一括 ban していた (= shared-repo.md 旧 L93「所有者の他の private リポへの参照 (= layer 3 の他リポ名)」)。 これは「mention も harm がある」 という暗黙の前提に立っていたが、 実際の harm は「reader が access 強要されて 404」 だけで、 boundary 明示付き mention にはこの harm は起きない。
+
+### Resolution
+
+[`docs/personal-layer.md` §「What \"depend\" means: structural dependency vs. mention」](docs/personal-layer.md) を canonical source として新設し、 以下を明示:
+
+1. depend は依然 ban (= Core rule 不変)
+2. mention は boundary statement 併記で許容 (= 新規定)
+3. **「name it, don't path into it」 が compact rule**: repo 名は OK、 内部 file path は dependency 形に格上げで NG
+4. 絶対 path / 個人 identifier (mail / cal ID / secret path) は別 reason (= privacy / portability) で依然 ban
+
+`conventions/shared-repo.md` (= L2 特化版) は本 canonical を pointer で参照する形に簡素化。 同様に `claude-config/CLAUDE.md` §「安全規則（公開リポ）」 (= L1 特化版) も将来必要に応じて pointer 化する余地あり。
+
+### 影響範囲
+
+- 既存 L2 リポの CLAUDE.md / DESIGN.md / README.md で「odakin が別管理」 paraphrase が残っていれば、 新規定に従って named + boundary 明示に書き直し可能。 break 互換性なし (= 旧 wording も依然 valid な「名指しの abstract 化形」 として読める)
+- audit grep の severity 二分: (a) repo 名 hit = warning (= boundary 文の有無を目視)、 (b) `<repo>/[a-z]` (= path 形) / 絶対 path / identifier hit = block (= 即修正)
+- `hooks/public-leak-guard.sh` / `scripts/public-precommit-runner.sh` は L1 (claude-config 自身、 public scope) 対象で本変更とは別軸 (= L1 では実名・mail・所属機関名等の private data leak 防止が主、 L3 repo 名は安全規則の例外 list で扱う)
+
+### 反省 (= meta)
+
+旧 wording を私 (Claude) が書いたとき、 「audit grep が 0 件を要求しているから ban が正しい」 と grep の design から rule を読み戻していた (= tool が rule を決める circular reasoning)。 user 訂正で「rule の harm 仮定 (= mention でも harm がある) が実は false」 と気付いた。 一般則: **audit tool の design は rule から derived されるべき、 逆ではない**。 tool design に rule を合わせていないか定期的に問い直す習慣を持つ。
+
+---
+
+## <a id="pre-commit-bib-all-repos"></a>2026-05-14: 全 repo に pre-commit-bib install (= 時点依存検出の撤廃)
+
+### 起点
+
+個人層 private repo (講義運営系、 例外リスト外なので名前は伏せる) で新規 `.tex` ファイルに literal Unicode em-dash (`—`) を直書き、 西欧 accent (`ö`) も Unicode で記述。 `conventions/latex.md` L186 で「`.tex/.bib` 内 Unicode は `pre-commit-bib` hook で自動修正」 と規定があり、 `setup.sh` Step 6 が hook を install するはずだったが、 当該 repo の `.git/hooks/pre-commit` が **未 install** だった。
+
+### 失敗構造の分解 (4 layer)
+
+| Layer | 状態 |
+|---|---|
+| L1 規約 | `conventions/latex.md` に規定あり ✓ |
+| L2 Tool | `scripts/fix-bib-unicode.py` 実装あり ✓ |
+| L3 Hook 本体 | `scripts/pre-commit-bib` 実装あり ✓ |
+| L4 Bootstrap (= setup.sh Step 6) | **時点依存の検出 logic で fail** ✗ |
+
+### L4 の 2 つの欠陥
+
+旧 setup.sh Step 6 は「`.tex/.bib` を含む repo にだけ install」 という検出 logic を採用:
+
+```bash
+for ext in tex bib; do
+    if ls "$REPO_DIR"*."$ext" "$REPO_DIR"**/*."$ext" 2>/dev/null | head -1 | grep -q .; then
+        HAS_LATEX=true
+    fi
+done
+```
+
+問題 1 (**時点依存**): setup.sh 実行時に `.tex/.bib` 不在の repo は skip → 後から `.tex` 追加されても hook 未 install のまま追従しない。
+
+問題 2 (**bash glob 深度不足**): `ls "$REPO_DIR"**/*.tex` は bash で globstar 無効時に 1 階層しか見ない。 該当 private repo の `.tex` は depth 4 で detection 失敗 (= 「`.tex` 追加された」 タイミングで再実行しても検出されない)。
+
+### 修正: 検出 logic 撤廃 + 全 repo install
+
+観察: `scripts/pre-commit-bib` 自体が staged file に `.tex/.bib/.bst/.cls/.sty` が無ければ `exit 0` で no-op skip する (L31-35)。 つまり LaTeX file 不在の repo に hook を install しても害無し (overhead = staged file の grep 1 回)。
+
+→ setup.sh Step 6 から検出 logic を撤廃し、 全 git repo に install するように変更。 これで:
+
+- **時点依存性が消える**: 後から `.tex` 追加されても catch される
+- **深度依存性が消える**: bash glob を使わなくなる
+- **コード単純化**: 検出 logic ~10 行が消える
+
+副次効果: hook install が repo の現在の物性ではなく「Claude エコシステムに属する repo であること」 をトリガーにするので、 同型の遅延 trigger 規約 (= setup 時の物性検出依存) の anti-pattern として参考になる。
+
+### 一般化された anti-pattern
+
+「**setup-time 物性検出による配備の condition gate**」 は時点依存 + 検出の robustness 依存で fragile。 代替 pattern:
+
+- **(a) 配備時 condition gate を撤廃**: install action を冪等 + 無害化して全対象に install (今回の選択)
+- **(b) runtime condition gate**: install は全対象、 hook 自身が runtime で条件判定 (= 今回の hook はこの形)
+- **(c) post-merge / event-triggered re-detection**: 物性変化のたびに再走 (overhead 高、 別 trigger 設計要)
+
+このうち (a) + (b) の組み合わせが最も robust。 setup.sh の他 step も同型の問題を持つか sweep する価値があるが、 公開 leak guard / git-crypt / dropbox-refs は明示的 marker / config file 経由の trigger なので時点依存問題は薄い (= marker 作成 = 意図的な setup action)。
+
+### 関連修正
+
+- `setup.sh` Step 6 の検出 logic 削除、 全 repo install に変更
+- `claude-config/CLAUDE.md` Step 8 説明を更新
+- `conventions/latex.md#pre-commit-hook` 節を全 repo install 方式 + Claude 規律の明示 + 旧設計失敗の経緯記述に拡張
+- 既存 36 repos に retroactive install + 1 repo update (= 旧 hook `../../scripts/pre-commit.sh` を上書き、 git history で復元可) + 13 repos で既存 hook を `.bak` backup して上書き
+
+### Claude 側の reflex 失敗 (sub-RCA)
+
+直接因とは別に: 私 (Claude) が `.tex` 新規作成前に `conventions/latex.md` を読まなかった。 CLAUDE.md table の「LaTeX」 entry は規約 file への pointer はあるが「いつ読むか」 (= 適用タイミング) の inline rule が無い。 機械化 (= hook 強化) で防げる範囲は強化したので、 reflex 規律追加は見送る (= `work-discipline.md` の 2026-04-17 教訓「規律を 1 つ増やすより hook 強化」 と整合)。
+
+---
+
+## <a id="path-two-layer-defense"></a>PATH 管理: 二層防御の設計
 
 Claude Code の Bash ツールは起動時に生成したシェルスナップショットを source する。スナップショットの `export PATH=...` がセッション中の PATH を決定するため、ここで PATH が壊れると全コマンドに影響する。
 
@@ -44,7 +842,7 @@ Claude Code の Bash ツールは起動時に生成したシェルスナップ�
 
 ---
 
-## 危険コマンドのブロック: deny ルール vs PreToolUse フック
+## <a id="dangerous-commands-deny-rules"></a>危険コマンドのブロック: deny ルール vs PreToolUse フック
 
 **判断:** settings.json の deny ルールのみ。フックは不要。
 
@@ -60,13 +858,13 @@ Claude Code の Bash ツールは起動時に生成したシェルスナップ�
 
 ---
 
-## ARCHITECTURE.md: 必須化せず任意ファイルに留める
+## <a id="architecture-md-optional"></a>ARCHITECTURE.md: 必須化せず任意ファイルに留める
 
 **判断:** §2 の必須ファイル（CLAUDE.md / SESSION.md / DESIGN.md / .gitignore）は変更しない。ARCHITECTURE.md は §2 の「任意ファイル」サブセクションに 5 行で位置づける（作る基準・作らない場合・前例リンク）。
 
 **Why:** 2026-04-06 に全 30 リポの CLAUDE.md を行数・コードファイル数・見出しで実地レビューした結果:
 
-1. **適用範囲が狭い:** ARCHITECTURE.md が筋良く効くのは ~3-4 リポのみ（LorentzArena / mhlw-ec-pharmacy-finder / arxiv-digest など複数レイヤを持つコードリポ）。残り 26-27 リポは LaTeX 論文・記事・データ運用・薄いスクリプト集で、構造説明が CLAUDE.md の表 1 つに収まる。必須化すると形だけのファイルが量産され、`docs/convention-design-principles.md` §3「過剰規約の害」と直接衝突する。
+1. **適用範囲が狭い:** ARCHITECTURE.md が筋良く効くのは ~3-4 リポのみ（LorentzArena / mhlw-ec-pharmacy-finder / arxiv-digest など複数レイヤを持つコードリポ）。残り 26-27 リポは LaTeX 論文・記事・データ運用・薄いスクリプト集で、構造説明が CLAUDE.md の表 1 つに収まる。必須化すると形だけのファイルが量産され、[`docs/convention-design-principles.md` §3](docs/convention-design-principles.md#rule-addition-criteria)「過剰規約の害」と直接衝突する。
 2. **CLAUDE.md 肥大化の救済策にならない:** 行数トップ群（300 行超 2 件、120-200 行 3 件）の見出しを精査すると、嵩を稼いでいるのは「動作プロトコル」「更新手順」「rotate チェックリスト」など**ランブック系**であって、構造説明ではない。ARCHITECTURE.md を切り出してもこれらは減らない。
 3. **§2 役割定義との衝突:** CLAUDE.md の役割に「構造」が既に含まれている。ARCHITECTURE.md を必須化すると CLAUDE.md の役割定義を書き換える必要があり、既存 30 リポに波及する。
 4. **実例不足:** 「ARCHITECTURE.md がなくて困った」事例は LorentzArena 1 件のみ。規約は実例から抽出するのが原則（`convention-design-principles.md` 冒頭）。1 サンプルでの規約化は早い。
@@ -80,7 +878,7 @@ Claude Code の Bash ツールは起動時に生成したシェルスナップ�
 
 ---
 
-## RUNBOOK 系ファイル: 規約化を待つ（実例先行）
+## <a id="runbook-files-defer"></a>RUNBOOK 系ファイル: 規約化を待つ（実例先行）
 
 **判断:** §2 に追加しない。`docs/runbook-*.md` 等の任意ファイル化も今は明文化しない。SESSION.md の残タスクとして「実例運用後に再検討」を残す。
 
@@ -94,155 +892,101 @@ Claude Code の Bash ツールは起動時に生成したシェルスナップ�
 
 ---
 
-## CONVENTIONS.md §2 記録判別表: user-specific instance を除去
+## <a id="history-scrubbing-declined"></a>claude-config git history scrubbing (確定: 見送り 2026-04-06)
 
-**判断:** §2 の「記録先の判別」表から「特定ドメインの参照データを特定の private リポの管理ツールに送る」instance 行を削除。同等のルールは個人規約リポ (odakin-prefs) に専用ファイルとして移管した。
+**判断**: 見送り。HEAD クリーン化で実用完了。
 
-**Why:** 元の行は表の他の行 (普遍的な情報種別 → 記録先の対応) と性質が異なり、user-specific な instance を universal table に混入させていた。匿名化するだけでは構造的問題が残る:
+**核となる理由**: (1) HEAD は既にクリーンで public リポ訪問者は基本 HEAD のみ閲覧 → 実用安全性は確保済み、(2) GitHub cache / fork / archive.org / Wayback / Code Search index に既取り込み分は force-push でも消せず「完全秘匿」は達成不可、(3) force-push は安全規則 §5.3 で原則禁止、他端末 clone との不整合 / 外部参照リンク切れリスクもあり、リスクが利得 (HEAD 以外の閲覧経路遮断) を上回る。
 
-1. **table の同質性が崩れる:** 他の 6 行はどれも universal な対応 (例: 「設計判断 → DESIGN.md」)。問題の行だけが特定のリポ・特定のスクリプトを名指ししており、claude-config を clone する他の利用者には無意味
-2. **public リポに private リポ名が露出:** 名指しされていた管理リポは private。claude-config の安全規則 (CLAUDE.md) は非公開リポ名のコミットを禁じており、その例外リストにも該当しない
-3. **一般化しても情報密度が失われる:** 「ドメイン固有の参照データは専用ツール参照」のような曖昧化では実用価値ゼロ
+**経緯**: 2026-04-06 に CONVENTIONS.md §2 から特定 private リポ名を削除。過去 commit には残存 (`git log -p CONVENTIONS.md` で特定可能)。
 
-**移管先の選定:** 候補は (a) odakin-prefs/CLAUDE.md (private cross-machine 個人規約), (b) memory (~/.claude/...), (c) 該当 private リポの CLAUDE.md。
+**再検討トリガー**:
+- 文字列検索などで該当 private リポ名が外部から発見・言及された
+- 「完全クリーン」への強い意向が新たに発生した
 
-- (b) memory はルール定義の置き場ではない (`docs/convention-design-principles.md` §5)
-- (c) 該当 private リポの CLAUDE.md に置くと、同ドメインの他リポで作業中にこの横断ルールが見えない (リポ単位のスコープでは届かない)
-- (a) odakin-prefs は cross-machine な個人規約のために設計された場所であり、最も適合する
-
-**odakin-prefs 側の構造:** odakin-prefs/CLAUDE.md は「1 ルール = 1 ファイル」「テーブルに載っているファイルだけが実効的」という原則を持つ。これに従い専用ファイルを新規作成し、CLAUDE.md のテーブルに追記した。
+上記以外では検討しない (スコープ外)。手段選択肢 (`git filter-repo` / `filter-branch` / BFG) は再検討時に調査。
 
 ---
 
-## ~/Claude/CLAUDE.md の symlink 化 (完了 2026-04-06)
+## <a id="self-mention-monitoring"></a>CONVENTIONS.md / conventions/ 内の自己言及的 odakin 記述 (確定: 現状維持 2026-04-06)
 
-**実行結果:** 戦略 **(b) 個別ファイル化 + symlink 置換** を採用して実行完了。`~/Claude/CLAUDE.md` は `odakin-prefs/CLAUDE.md` への symlink に置換済み。
+**判断**: 現状維持。claude-config は odakin の流儀を public に展示するリポであり、odakin の例示は「private leak」ではなく「設計選択」。完全匿名化すると設計判断の why が伝わらず、private 化は公開目的と矛盾する。
 
-**移管マッピング:**
-
-| 旧 `~/Claude/CLAUDE.md` のセクション | 移管先 |
-|---|---|
-| 作業ディレクトリ宣言 | `odakin-prefs/project-structure.md` |
-| プロジェクト構成ルール | `odakin-prefs/project-structure.md` |
-| preview_start リンク出力ルール | `odakin-prefs/project-structure.md` (bundle) |
-| ユーザー情報 (氏名・所属・メール) | `odakin-prefs/user-profile.md` |
-| CONVENTIONS.md 参照リスト | `odakin-prefs/CLAUDE.md` 本体「規約参照」セクションに統合 |
-
-**bundling 判断の根拠 (詳細は odakin-prefs DESIGN.md 該当セクション):** 「1 ルール = 1 ファイル」の厳格適用は 1 行ファイルを生む。pragmatic relaxation として「関連密接かつ合計 10 行未満」のルールは bundle 可とした。`project-structure.md` がこれに該当 (作業ディレクトリ + 配置 + preview)。
-
-**setup.sh step 7 (CLAUDE.md user-facing 番号) への影響:** 既存設計のまま機能する。新規端末では `odakin-prefs` clone 後、setup.sh 内の Step 5a (`setup.sh` L460-481) が `~/Claude/CLAUDE.md` (target なし or regular file) を symlink に置換する。本セッションの symlink は手動 `rm + ln -s` で作成したため、setup.sh 自身の冪等性 (regular file 上書きパス) の実地検証は次回 setup.sh 実行時に行う (TODO)。
-
-**今回の手動操作:** 旧 regular file は `~/Claude/CLAUDE.md.pre-symlink-backup` に退避後、symlink 経由読み込みを確認したうえで削除済み。
-
----
-
-## claude-config git history scrubbing (確定: 見送り 2026-04-06)
-
-**判断:** 見送り。HEAD クリーン化で実用的な対応は完了したと見なす。下記の trade-off 分析を踏まえてユーザーと再確認のうえ確定。
-
-**経緯:** 2026-04-06 に CONVENTIONS.md §2 記録判別表から特定 private リポを名指しした行を削除した。HEAD は既にクリーンだが、過去の commit には削除前の状態が残っている (`git log -p CONVENTIONS.md` で特定可能)。
-
-**手段の選択肢:**
-
-- `git filter-repo --replace-text` (推奨。filter-branch より高速・安全)
-- `git filter-branch --tree-filter` (古い方法、どこでも動く)
-- BFG Repo-Cleaner (file 単位の置換に便利、文字列単位はやや弱い)
-
-**リスクと制約:**
-
-1. **force-push が必要**: 公開リポへの force-push は安全規則 §5.3 で原則禁止。`--force-with-lease` でも履歴書き換えには変わりない
-2. **他端末 clone との不整合**: 他のマシン (別 PC) で同じリポを clone している場合、pull が失敗するか歴史が分岐する。再 clone が必要
-3. **外部キャッシュは消えない**: GitHub 自身の cache, fork, web view, archive.org, Wayback Machine, GitHub Code Search index, 各種 mirror に既に取り込まれている場合は除去できない。force-push しても "完全削除" は達成不可能
-4. **commit hash の変動**: 外部から該当 commit を参照しているリンク (PR コメント、blog post、issue 等) はリンク切れになる
-
-**価値の評価:**
-
-- HEAD は既にクリーンで、public リポを訪れる人は基本的に HEAD のみ閲覧する → 実用上の安全性は確保済み
-- 「string が史的に存在した」という事実は変えられない → scrubbing しても完全な秘匿は不可能
-- リスク (force-push, 他端末との不整合, 外部キャッシュ残留) が利得 (HEAD 以外の閲覧経路の遮断) を上回る
-
-**実行を再検討するトリガー:**
-
-- 文字列検索などで該当 private リポ名が外部から実際に発見・言及された
-- "完全クリーン" に強い意向が新たに発生した
-- 上記以外のタイミングでは検討しない (スコープ外)
-
----
-
-## CONVENTIONS.md / conventions/ 内の自己言及的 odakin 記述 (確定: 現状維持 2026-04-06)
-
-**判断:** 現状維持。意図的設計として残す。下記の trade-off 分析を踏まえてユーザーと再確認のうえ確定。
-
-**該当箇所** (2026-04-06 grep 結果):
+**該当箇所** (drift 監視のため定期 re-grep 推奨):
 
 | 場所 | 内容 | 意図 |
 |---|---|---|
-| `CONVENTIONS.md` L10 | `/Users/odakin/` をパス例として明示 | パス記述ルールの**反例**として使用。「ユーザー固有絶対パスを書かない」原則を可視化 |
-| `conventions/latex.md` L16-18 | JHEP.bst「個人的好み」、setup.sh の odakin-only 自動インストール | .bst 自体が public リポ内に置かれており、由来 (個人趣味) を honest に文書化 |
-| `conventions/research-email.md` L41 | `assignee: odakin | collaborator_id` 例示 | スキーマ説明の例示。匿名化すると意味が伝わらない |
-| `conventions/scheduled-tasks.md` L58 | 「現運用者(odakin)の全マシン」 | パス hardcode を選んだ理由として、現運用者が 1 人であることを正直に文書化 |
+| `CONVENTIONS.md` L10 | `/Users/odakin/` をパス例として明示 | パス記述ルールの**反例**として使用 |
+| `conventions/latex.md` L16-18 | JHEP.bst「個人的好み」、odakin-only 自動インストール | .bst が public リポ内にあるため由来を honest に記述 |
+| `conventions/research-email.md` L41 | `assignee: odakin \| collaborator_id` 例示 | スキーマ説明の例示、匿名化すると意味が伝わらない |
+| `conventions/scheduled-tasks.md` L58 | 「現運用者(odakin)の全マシン」 | パス hardcode を選んだ理由を honest に記述 |
 
-**性質:** これらは「private 情報の leak」ではなく「設計選択」。claude-config は odakin の流儀を public に展示するリポであり、運用者として odakin を例示することは設計目的と整合する。
+**削除トリガー**: (1) odakin 以外の co-maintainer が増えた、(2) claude-config を template として使う他ユーザーが現れた (流儀の押し付けを避けたい)。以外は現状維持。
 
-**削除を検討すべきトリガー:**
-
-- odakin 以外の co-maintainer が増えた
-- claude-config を template として使う他ユーザーが現れた (流儀の押し付けを避けたい)
-- 上記以外のタイミングでは現状維持
-
-**棄却した代替案:**
-
-- *全てを完全匿名化:* 設計判断の why が伝わらず、文書としての価値が下がる
-- *private 化:* claude-config を public にしている目的 (公開展示 + 他ユーザーへの参考) と矛盾
+**Scope**: 上の表は `CONVENTIONS.md` と `conventions/*.md` (= **docs**) 内の意図的な odakin 記述のみ対象。`scripts/`, `hooks/`, `setup.sh` 等の実行可能コードは foreign user の machine で実行されるため、 odakin literal は categorically 不可 (= 「監視」 ではなく「禁止」、 layer-1 audience contract 違反になる)。実行コード内に `odakin-prefs/` 等の literal が混入していたら本表ではなく即修復対象。 由来: 2026-05-10 self-audit で `hooks/memory-guard*.sh` の deny message に `odakin-prefs/` literal が混入していたことを発見、 abstract化 (commit `60a58c0`)。 本表は「監視」 の言葉に騙されて執行コードのチェックを skip しないための scope marker を持つ。 5/10 後段で `scripts/{public-precommit-runner,audit-public-repos,setup-dropbox-refs}.sh` 計 13 箇所の同 class 違反も全て修復済 (= `scripts/lib/find-personal-layer.sh` 経路の動的解決へ移行、 § 「個人層検出 helper」 参照)。 さらに 5/10 最終段で `setup.sh` L863 の `SECRETS_REPOS` runtime hardcode (= 所属機関名を含む repo 名を array literal に直書き) + L738/L856 の同 class comment literal (別 class = 所属機関名 leak、 CLAUDE.md L105 違反) も個人層外出し方式で修復 (§「SECRETS_REPOS の個人層外出し」 参照)。 これで `claude-config/` の executable surface (`hooks/`, `scripts/`, `setup.sh`) は odakin / 機関名 literal-free を達成。
 
 ---
 
-## DESIGN.md と EXPLORING.md の分離（2026-04-06）
-
-### What
-
-- `CONVENTIONS.md §2` の DESIGN.md 定義を「**決定した**設計判断（defer 含む）」に絞る
-- 任意ファイル `EXPLORING.md` を新設（ARCHITECTURE.md と同じ「任意ファイル」扱い）。未決定の思考・代替案・option space の棚卸し用
-- 境界判別・lifecycle・3 カテゴリ分析・棄却した代替案の詳細は `docs/convention-design-principles.md §6` を正本とする（重複を避けるためここでは書かない）
-
-### Why（ここに書く最小限）
-
-原則・3 カテゴリ分析の全文は `docs/convention-design-principles.md §6` 参照。**このファイルには決定固有の context だけを残す**:
-
-- **トリガー**: LorentzArena 2+1/DESIGN.md が 500+ 行に肥大化し、「残存する設計臭 defer」（決定記録）とスマホ UI 思考メモ（未決定）を同時に書く必要が生じた場面
-- **気づき**: DESIGN.md が既に「決定記録 / 未決定探索 / メタ決定（defer）」の 3 カテゴリ dumping ground になっていた（2+1 の用語再考セクションが前例として既に存在）
-- **選択**: 2 ファイル分割（決定 vs 探索）。3 ファイル分割やタグ付けは却下した（詳細は principles §6）
-
-### 初回適用
-
-- **2026-04-06**: `LorentzArena/2+1/EXPLORING.md` 新規作成。スマホ UI の設計思考を収容
-- **2026-04-07** (4 軸レビュー追加修正): 初回適用リポ内で用語再考セクションが DESIGN.md に orphan bullets として残っていた問題を検出し、同日 `2+1/EXPLORING.md` に migrate した
-  - 経緯: `88ed267` (2026-04-06) で残存する設計臭セクション追加時に `### 用語の再考` ヘッダーが誤って置換され、bullets が orphan 化していた。cadf135 の defer 拡張でさらに文脈から離れた
-  - 判断: 「retroactive migration はしない」の対象は **他リポ**。初回適用リポ内の既存 (b) コンテンツは EXPLORING.md 新設タイミングで同時 migrate するのが自然（1 件だけ例外にすると規約 purity を自ら毀損）
-
-### 適用方針（簡潔版）
-
-詳細は `docs/convention-design-principles.md §6` 参照。要点:
-
-- **他リポへの retroactive migration はしない**: 既存の既存 DESIGN.md は触らない
-- **新規探索が発生したリポから順に導入**: 上記 LorentzArena 2+1 が初回
-- **小リポ・決定しか書かないリポでは不要**: EXPLORING.md は任意ファイル
-
----
-
-## hooks/ の役割分担
+## <a id="hooks-role-table"></a>hooks/ の役割分担
 
 | ファイル | 呼び出し元 | 役割 |
 |---|---|---|
-| memory-guard.sh | PreToolUse (Edit/Write) | メモリディレクトリへの書き込み前に §2 判別を強制 |
-| memory-guard-bash.sh | PreToolUse (Bash) | Bash 経由のメモリ書き込みを警告（0.005秒/回） |
-| fix-snapshot-path-patch.sh | launchd WatchPaths | スナップショット PATH を REQUIRED_PATHS 方式で自動補完（Bash に介入しない） |
+| memory-guard.sh | PreToolUse (Edit/Write) | メモリディレクトリへの書き込みを `permissionDecision=deny` でブロック。escape hatch: content に `<!-- machine-local: <理由> -->` marker（[`docs/convention-design-principles.md` §8.3](docs/convention-design-principles.md#precedent-as-training-data)/[§8.7](docs/convention-design-principles.md#mechanism-application-example)）。 deny message は layer-1 abstract (foreign user 対応、 個人層名は仮定しない) |
+| memory-guard-bash.sh | PreToolUse (Bash) | Bash 経由のメモリ書き込みも同様に deny。escape hatch: command に `machine-local` 文字列。 deny message は layer-1 abstract |
+| public-leak-guard.sh | PreToolUse (Edit/Write/MultiEdit) | `.claude/public-repo.marker` 付きリポへの書き込みを Tier A 構造制約 regex (email / abs_path / non-private IPv4 / token prefix / discord_mention) で scan、 hit 時 `ask`。 literal blocklist は持たない (= 公開して安全な hook、 literal 正本は personal layer の `sensitive-terms.txt` + pre-commit 層 `public-precommit-runner.sh` に分離) |
+| google-url-guard.sh | PreToolUse (Edit/Write/MultiEdit/Bash) | Google URL の `/u/N/` パターン検出 + account-sensitive URL の `?authuser=<email>` 抜け検出 → `ask`。 placeholder URL (= path 末尾が `{...}` 等) は case glob で false positive を回避 |
+| git-state-nudge.sh | PostToolUse (Bash) | 直近 60 秒以内の commit 未 push を検出して push 督促、 4h 以上ぶりの repo に入った時 first-sighting で `git fetch` (5s timeout) + dirty / ahead / behind 警告。 clean / in-sync な repo では完全 silent |
+| fix-snapshot-path-patch.sh | launchd WatchPaths (Claude Code 外) | スナップショット PATH を REQUIRED_PATHS 方式で自動補完 (Bash に介入しない、 PATH 二層防御の第 2 層) |
 
-Bash の PreToolUse フックは memory-guard-bash.sh のみ（0.005秒/回）。
+PreToolUse Bash 系 hook は memory-guard-bash.sh と google-url-guard.sh の 2 つ。 いずれも silent pass の高速パスがあり (= jq 抽出で早期 exit、 google-url-guard は `google.com` / `googleapis.com` を含まなければ即 exit)、 平常時のオーバーヘッドは無視できる。
 
 ---
 
-## dropbox-refs convention: per-repo symlink + personal-layer registry (2026-04-07)
+## <a id="secrets-repos-externalization"></a>SECRETS_REPOS の個人層外出し (2026-05-10)
+
+**判断**: `setup.sh` Step 5d (= secrets symlink) で使う `SECRETS_REPOS` array (= secrets/ subdir を持つ git-crypt 暗号化 repo の一覧) を、 個人層の `<personal-layer>/secrets-repos.txt` から動的に読み取る方式に refactor。 `setup.sh` 内には特定 repo 名 literal を持たせない。
+
+**Why**: もともと `setup.sh:863` で `SECRETS_REPOS=(secrets-config <organization-named repo>)` 相当の hardcode を持っていたが、 後者は所属機関名を含む repo 名 (CLAUDE.md L105 「所属機関名」 禁止) で claude-config (= public layer 1) に持たせては駄目な literal。 `secrets-config` は L101 allow-list 内だが org-named repo は別 class の leak。 単に削除すると odakin の運用が壊れる (= 該当 repo の secrets が symlink されなくなる) ため、 値の正本を個人層に移動して `setup.sh` は path 経由で読み取る mechanism 化。
+
+**ファイル format**: 1 行 1 repo 名、 `#` 以降は行内 comment、 空行 / 末尾余白は awk で除去。 YAML / JSON ではなく plain text を採用した理由は (a) parser dependency 不要 (foreign user の machine で yq / jq の install 状態に依存しない)、 (b) inspect / 編集が単純、 (c) repo 名 list という用途に見合う最小 format。
+
+**foreign user 対応**:
+- 個人層なし or `secrets-repos.txt` 無しなら `SECRETS_REPOS=()` (= 空 array)
+- 後段の `for SECRETS_REPO in "${SECRETS_REPOS[@]}"; do ... done` ループは空 array で 0 回実行 → secrets handling 全体が skip
+- 既存 `~/.secrets/<name>` symlink は触られないため、 既存運用に regression なし
+
+**棄却した代替案**:
+- *array literal を残し comment で「foreign user は手で書き換える」 と注記*: 棄却。 setup.sh は `git pull` で update されるため、 foreign user の手書き変更が pull で上書きされる
+- *YAML / JSON config に upgrade*: 棄却。 parser dependency 増、 plain text で十分
+- *`SECRETS_REPOS` を完全削除して secrets handling 自体を撤去*: 棄却。 odakin の運用 (= 別 Mac での token rotate を `git-crypt` 経路で sync) が壊れる、 機能性自体は claude-config の価値ある提供物
+
+**migration 順序**: 個人層に `secrets-repos.txt` を先に commit (= odakin-prefs commit `b62bb7d`)、 claude-config setup.sh refactor を後に commit。 逆順でも functional regression は無い (= setup.sh が file 不在を見たら skip するだけ、 既存 symlink 維持)。
+
+**由来**: 2026-05-10 self-audit defer-完遂 phase の final cross-cutting sweep で発見。 `scripts/*` の修復 (= helper による動的解決) と同 class の問題だが、 `setup.sh` は claude-config の bootstrap で source 失敗の risk があるため `scripts/lib/find-personal-layer.sh` を source せず、 同等の dynamic read を `$LAYER` 変数 (= Step 5a で既に検出済) を再利用して inline で実装した。
+
+---
+
+## <a id="find-personal-layer-helper"></a>個人層検出 helper (scripts/lib/find-personal-layer.sh) (2026-05-10)
+
+**判断**: `setup.sh` Step 5a (= `.claude-personal-layer` marker file による個人層検出) と同じロジックを sourceable shell function `find_personal_layer` として `scripts/lib/find-personal-layer.sh` に extract、 layer-1 scripts (`public-precommit-runner.sh`, `audit-public-repos.sh`) から source して個人層 path を動的解決する。
+
+**Why**: もともと layer-1 scripts は `SENSITIVE_TERMS="$HOME/Claude/<personal-layer>/sensitive-terms.txt"` のように特定個人層名を hardcode していて、 layer-1 audience contract (= layer 1 は特定の layer 3 名を仮定しない) に違反していた。 foreign user の machine では path が存在せず silent skip → leak detection の literal layer が機能不全になる。 abstract に書き換えるだけでは path lookup が成立しないため、 実際に個人層を動的検出する mechanism が必要。
+
+**棄却した代替案**:
+- *env var (`CLAUDE_PERSONAL_LAYER`) を `setup.sh` が export して script は env 経由で path 解決*: 棄却。 pre-commit hook (git が起動する子 process) や scheduled-task (cron 系 process) で env が継承されない経路がある。 Helper の self-contained 検出ならどこから呼ばれても動く
+- *各 script で検出ロジックを inline 重複*: 棄却。 3 script 重複 + `setup.sh` = 4 箇所の同ロジック、 drift 確実
+- *`setup.sh` 自身も helper を source して DRY 化*: 一旦見送り。 `setup.sh` は bootstrap script (= claude-config を新マシンに cold install するため初回起動時 source 失敗のリスクを最小化したい)、 self-contained に保つ。 helper 側に「`setup.sh` Step 5a と sync」 のコメント marker を置き、 どちらかが変わったら両方を sync する責務を編集者に明示
+
+**Foreign user 対応**:
+- 個人層を持たない claude-config 利用者では `find_personal_layer` は空文字列を返す
+- 呼び出し側は `[ -n "$PERSONAL_LAYER" ]` チェックで graceful に skip
+- 既存の `[ -f "$SENSITIVE_TERMS" ]` チェックも空文字列を「ファイルなし」 として扱うため、 既存 control flow を破壊しない (= odakin の既存運用にも影響なし、 dry-run で同 path に解決することを 2026-05-10 に検証)
+
+**由来**: 2026-05-10 self-audit で memory-guard hooks の同 class 違反を発見・修復 (commit `60a58c0`) した後、 final cross-cutting sweep で `scripts/*` にも 13 箇所の同 class 違反 (= `個人層の sensitive-terms.txt` / `個人層の leak-incidents.md` の hardcode) を追加発見、 hooks のように abstract 文面では逃げられない (= path lookup が必要) ため mechanism 化で全 closure。
+
+---
+
+## <a id="dropbox-refs-design"></a>dropbox-refs convention: per-repo symlink + personal-layer registry (2026-04-07)
 
 ### What
 
@@ -300,7 +1044,7 @@ Bash の PreToolUse フックは memory-guard-bash.sh のみ（0.005秒/回）�
 
 **migration の落とし穴**: B → A に revert する際は、(i) `.git/` を Dropbox tree にコピーしたあと `git checkout -- .gitignore .gitattributes ...` で deleted tracked files を復元する、(ii) `dropbox-refs/` symlink と `.gitignore` の `/dropbox-refs` 行を削除する、(iii) `personal-layer/dropbox-collabs.yaml` から対応 entry を削除する、の 3 点をまとめて実行する。A → B の手順は dropbox-refs.md §3.4 参照。
 
-## git-state-nudge.sh: cross-session WIP leakage の検出 — STALE_DIRT (2026-04-08)
+## <a id="stale-dirt-detection"></a>git-state-nudge.sh: cross-session WIP leakage の検出 — STALE_DIRT (2026-04-08)
 
 ### What
 
@@ -414,18 +1158,18 @@ STALE_DIRT は **汎用 safety net**。各 repo の root cause level の対処�
 
 ---
 
-## 公開リポ leak 防止: 構造制約 hook + pre-commit ephemeral literal check
+## <a id="public-repo-leak-prevention"></a>公開リポ leak 防止: 構造制約 hook + pre-commit ephemeral literal check
 
 **状態**: 2026-04-09〜10 に 5 セッションで実装完了。受容 leak の記録は
-`odakin-prefs/leak-incidents.md`。将来課題 (段階 3 + 3-3 純粋化) は
-`odakin-prefs/next-steps.md`。
+`個人層の leak-incidents.md`。将来課題 (段階 3 + 3-3 純粋化) は
+`個人層の next-steps.md`。
 
 ### 契機
 2026-04-09、LorentzArena (public) の 5 ファイル 16 行に、組織環境を
 暗示する間接表現 (`<wifi_term>` 系) が複数セッションに渡って累積して
 いたのを user 指摘で発見、`ae25604` で一般化して修正した。Claude は
 drafting 中にも push 前にも catch しておらず、既存の指示層
-(`odakin-prefs/work-network.md` の「公開リポで組織名を書かない」
+(`個人層の work-network.md` の「公開リポで組織名を書かない」
 ルール) は reliably トリガーが引けないと判明した。`memory-guard.sh`
 (§「メモリ書き込みガード」) と `git-state-nudge.sh` (§「git-state-nudge.sh: cross-session WIP leakage の検出」)
 で既に確立している「指示 → hook 化」の pattern upgrade を、leak 防止
@@ -437,13 +1181,13 @@ drafting 中にも push 前にも catch しておらず、既存の指示層
    blocklist は乗せない。`sensitive-repo-patterns.ja.md §3-3`
    「構造制約の設計思想」を純粋に適用する層
 2. **pre-commit hook** (`public-precommit-runner.sh`) — 同じ Tier A
-   regex に加えて、`odakin-prefs/sensitive-terms.txt` が存在すれば
+   regex に加えて、`個人層の sensitive-terms.txt` が存在すれば
    **ephemeral に load** して staged diff に literal check をかける。
    script 本体には literal が埋め込まれない構造分離が核心
 3. **audit** (`audit-public-repos.sh`) — 週次で全 public repo を sweep、
    Tier A + sensitive-terms.txt の両方を適用して retroactive 検出
-4. **情報配置の分離 (段階 1)** — `odakin-prefs/work-network.md` の
-   組織名 literal を `sensitive-terms.txt` (gitignore + network-notes
+4. **情報配置の分離 (段階 1)** — `個人層の work-network.md` の
+   組織名 literal を `sensitive-terms.txt` (gitignore + `<sensitive-repo>`
    git-crypt symlink) に分離、本文は placeholder 化。odakin-prefs が万一 leak
    しても sensitive literal が git に乗っていない状態にする
 
@@ -480,8 +1224,8 @@ Tier A を完璧にしても、現実の事例類型に対する防御が致命�
 点に気付いた。具体的には:
 - hook **本体** には literal を埋め込まない (script source は
   claude-config の public に置いても literal leak しない)
-- literal **data** は `odakin-prefs/sensitive-terms.txt` (gitignore +
-  network-notes git-crypt symlink)、hook 実行時に読んで終了時に unload
+- literal **data** は `個人層の sensitive-terms.txt` (gitignore +
+  `<sensitive-repo>` git-crypt symlink)、hook 実行時に読んで終了時に unload
 - PreToolUse 層には literal を持ち込まない (3-3 純粋を維持)
 - pre-commit 層に限って ephemeral load を許す (stage 済み diff のみ
   scan、`--no-verify` で bypass 可能)
@@ -509,9 +1253,9 @@ sensitive-terms.txt に分離) で当面の risk は大きく下がる。段階 
 
 ### 副次的な設計判断
 
-**public/private 判定: marker file 一本** — `odakin-prefs/public-repos.yaml`
+**public/private 判定: marker file 一本** — `個人層の public-repos.yaml`
 一本化や `gh repo view` 自動判定とも比較した。各 repo の visibility
-は各 repo 固有の情報 (`convention-design-principles.md §1` 配置原則の
+は各 repo 固有の情報 ([`docs/convention-design-principles.md §1`](docs/convention-design-principles.md#placement-by-scope) 配置原則の
 「影響範囲の最大公約数」)、正本は repo 自身にあるべき。marker 付け
 忘れによる false negative は audit script の missing marker 検出と
 `setup.sh` の 2 点で補う。日常 hook は marker 1 ファイルのみ見る
@@ -525,7 +1269,7 @@ sensitive-terms.txt に分離) で当面の risk は大きく下がる。段階 
 **Tier A regex の 3 ファイル重複** — `public-leak-guard.sh` (PreToolUse)
 / `public-precommit-runner.sh` (pre-commit) / `audit-public-repos.sh`
 (audit) に同じ 4 regex + allowlist が独立に定義されている。
-`convention-design-principles.md §2` (定義は 1 箇所) に技術的に
+[`docs/convention-design-principles.md §2`](docs/convention-design-principles.md#no-duplicate-rules) (定義は 1 箇所) に技術的に
 違反するが、以下の理由で現状維持:
 (1) 3 ファイルの実行コンテキストが完全に独立 (Claude hook stdin /
 git diff / git grep)。共通 source file への extract は shell
@@ -574,7 +1318,7 @@ source から data file の中身が推測できないこと、の 2 条件を�
 | `gitignore_global` (修正) | claude-config | `.claude/*` + `!.claude/public-repo.marker` exception |
 | `setup.sh` Step 2 (修正) | claude-config | hook symlink + settings.json merge に leak guard 追加 |
 | `setup.sh` Step 8 (新規) | claude-config | marker 持ち repo に pre-commit install + missing marker 警告 |
-| `sensitive-terms.txt` | odakin-prefs (gitignore, network-notes git-crypt symlink) | literal 正本 (9 entries: 組織名 3 + 間接 context 4 + 部門名 1 + collaborator 名 1。TWCU は研究略称として公開使用 OK と判断し 2026-04-10 に除外) |
+| `sensitive-terms.txt` | odakin-prefs (gitignore, `<sensitive-repo>` git-crypt symlink) | literal 正本 (entry 数と内訳・除外判断は個人層 `work-network.md` 側 = denylist の構成は公開 layer に書かない) |
 | `work-network.md` (修正) | odakin-prefs | 組織名 literal → `<workplace>` placeholder 化 |
 | `leak-incidents.md` | odakin-prefs | 事例記録 (α/β/γ/δ/ε 類型 + 3 回ルール counter) |
 | `next-steps.md` | odakin-prefs | 段階 2-3 の情報配置分離 defer + un-defer トリガー |
@@ -582,8 +1326,315 @@ source から data file の中身が推測できないこと、の 2 条件を�
 
 検証: PreToolUse hook 11 ケース test matrix + pre-commit runner 10 ケース test matrix + LorentzArena in-situ literal catch 確認 + audit 初回実行 (12 repo, missing markers 0)。
 
+### 2026-04-14 追補: meta-locator と abstract-proposal 段階の未カバー領域
+
+本設計の 2 層 hook は **値 (literal) に対する検出** として完成しているが、
+β 類型 (対処フェーズで記録に pointer を残す 2 次 leak) の 2 件目発生で、
+現設計が **meta-locator** と **abstract-proposal 段階** の 2 軸で
+カバーを持たないことが明確になった。記録目的で整理する (構造対策の
+投入判定は β counter 3 件目まで保留)。
+
+**meta-locator (値でなく locator である情報):**
+暗号化 backup の置き場所名、命名規則、`.enc` / `.key` 等の拡張子と
+位置の組合せ、特定サブパス、rotation 頻度など。値そのものではないので
+Tier A 構造制約 regex では発火しない。attacker の検索空間を桁で削る
+効果を持つ意味で、値と同等の扱いが必要。配置は pre-commit 層の
+sensitive-terms.txt 管轄 (ephemeral load 原則維持)。ただし `webhook` /
+`backup` / `.enc` 等は一般技術用語で、普遍語を sensitive-terms に
+入れると false positive が急増するトレードオフがある。閾値到達時
+(β 3 件目) に導入形態を検討。候補: (i) sensitive-terms を 2 段化し
+「literal (固有名詞) / pattern (一般技術用語の近傍 context)」を分離、
+(ii) Tier B として新設、literal-free 原則との整合を再定義。
+
+**abstract-proposal 段階 (チャット層の提案):**
+現 hook は PreToolUse = Write/Edit で発火。Claude が chat で「TODO と
+して SESSION.md に書きましょうか」と **提案** した段階では発火しない。
+user が catch しない限り次 turn で Write に昇格する経路で、実害
+(git に literal が乗る) は Write 段階で確定するので、hook は実害防止
+としては機能する。ただし「ツール実行前に proposal を止める」仕組みは
+現アーキで構造的に不可能 (assistant text generation に対する pre-hook
+は存在しない)。対策は 2 方向:
+
+- (a) **canonical routing の先置き**: 話題に入る時点で正準保管先を
+  presented する (例: 読み込み必須テーブル経由で private な canonical
+  store を強制 read させる)。「どこに書くか」の生成時 reflex の出力先
+  を物理的に狭める方が、禁則 gate で事後ブロックするより予防的に強い
+- (b) **Write/Edit 層の maximal catch**: chat で流れた proposal が
+  実書き込みに到達した瞬間を確実に止める。既存 hook + 将来の
+  meta-locator 対応で埋める
+
+**失敗の時間軸分類 (観察):**
+β 2 件目は β 1 件目の修正時に新規規律 (public SESSION に PII pointer
+書かない) を昇格させた **直後** に同型を繰り返した。ルール articulation
+(文章化) と application (生成時適用) が別プロセスで、articulation 直後
+こそ application が緩む構造が観察された。本 DESIGN としては **prose
+追加 (規律層) を重ねても application 失敗は埋まらない** ことを前提に、
+構造対策 (routing + hook) の投入判定だけを forcing function 3 回
+ルールで管理する。prose 追加の衝動は「やった感」の即時報酬と
+trade-off にあり、mechanism 投入コストとの比較で後者を選ぶ。
+
+### 2026-04-28 追補: pre-commit extension hook (repo-local 規律の chain)
+
+**契機**: mhlw-ec-pharmacy-finder で `install-public-precommit.sh` の
+1 行 stub が、既存の repo-specific pre-commit (placeholder 検出 +
+docs↔SESSION.md 同期警告) を上書きしてしまった (2026-04-23)。leak
+gate (Tier A/B) は repo 横断で同一だが、repo 固有の commit 規律
+(placeholder 形式・review 必須ファイル等) は repo ごとに違う。
+
+**設計**: stub は触らず、`public-precommit-runner.sh` 側に optional
+chain を追加。leak gate を pass した時点で
+`<repo_root>/.claude/pre-commit-extra.sh` が executable なら call +
+exit で chain (exit code 透過)。`exec` ではなく call にしているのは、
+bash の `exec` が EXIT trap (runner が `$ADDED_BUF` の cleanup に使う)
+を skip するため — tempfile leak を避けるため親 shell に戻して trap を
+発火させる。
+
+利点:
+1. **stub の冪等性を保つ**: install-public-precommit.sh は STUB_MARKER
+   (`public-precommit-runner.sh`) で stub を識別して上書きするので、
+   stub 側に repo 固有 logic を埋めると次回 install 時に消える。
+   extension は stub の外 (= runner の chain) に逃がすことで、stub
+   は最小のまま再生成可能を維持。
+2. **extension は opt-in**: ファイルが無い repo は behavior 変化なし。
+   12 既存 public repo の hook chain は不変。
+3. **配置の一貫性**: marker (`.claude/public-repo.marker`) と同じ
+   `.claude/` 直下に置く。`scripts/hooks/` は `core.hooksPath` の
+   entry point なので非 hook ファイルを混ぜない。
+
+**実装**: `public-precommit-runner.sh` の最終 `exit 0` の直前に
+`git rev-parse --show-toplevel` で repo root を取り、
+`$REPO_ROOT/.claude/pre-commit-extra.sh` が `-x` なら呼び出し、戻り値
+で exit。chain された extension が `exit 1` すれば commit が reject
+されるのは leak gate と同じ挙動。
+
+**初回投入先**: mhlw-ec-pharmacy-finder の
+`.claude/pre-commit-extra.sh` に旧 hook の placeholder 検出 +
+docs↔SESSION.md 警告を移設。本機能の動作確認も兼ねた。
+
+**extension 作成ガイド** (新しい public repo に extension を入れる時):
+
+1. `chmod +x .claude/pre-commit-extra.sh`。non-executable は runner が
+   skip する。
+2. **gitignore exception**: `.claude/*` は gitignore_global で ignore
+   され、`!.claude/pre-commit-extra.sh` は同 global に登録済 (commit
+   8efeaac)。各 repo が独自 `.gitignore` で `.claude/*` を再宣言
+   している場合 (現状: 数 repo) は、その local `.gitignore` にも同じ
+   exception を追加する必要がある。`git check-ignore -v` で確認可。
+3. **self-collision 回避**: extension が grep / regex で pattern を検出
+   する場合、その pattern 文字列は extension 自身の source に出現する
+   ため、pathspec exclude (`':(exclude).claude/pre-commit-extra.sh'`)
+   で自分を除外しないと自身の commit が self-block する。mhlw の例
+   参照。
+4. **テスト**: stage に該当 pattern の fixture を仕込んで
+   `~/Claude/claude-config/scripts/public-precommit-runner.sh` を直接
+   実行 (commit を打たずに hook chain だけ走らせられる)。`git reset
+   HEAD <fixture>` で stage を巻き戻す。
+5. **stub には触らない**: `install-public-precommit.sh` の冪等性は
+   stub-only 前提 (STUB_MARKER で識別して上書き)。repo 固有 logic を
+   stub に埋めると次回 install 時に消える。
+
 ### 関連文書
 - `docs/sensitive-repo-patterns.ja.md` — 設計思想の出所 (§3-3, §5-1, §5-2)
-- `odakin-prefs/leak-incidents.md` — 受容 leak の記録と類型判断
-- `odakin-prefs/next-steps.md` — 段階 2-3 の分離計画と un-defer トリガー
+- `個人層の leak-incidents.md` — 受容 leak の記録と類型判断
+- `個人層の next-steps.md` — 段階 2-3 の分離計画と un-defer トリガー
+- `個人層の DESIGN.md §2026-04-14` — articulation→application gap と prose 追加バイアスの同定 (本追補の認知側対応)
 - `conventions/shared-repo.md §公開前 Audit` — 旧来の人間 audit 手順 (本設計で hook 化)
+
+## <a id="sensitive-terms-symlink-architecture"></a>sensitive-terms.txt の symlink architecture (2026-05-14 追補)
+
+個人層 (= layer 3) の `sensitive-terms.txt` は **gitignore** 対象で、 個人層 repo 本体に commit しない。 これは literal の正本を切り離すため (= `sensitive-repo-patterns.ja.md §3-3` の「blacklist 自体が leak 源」 批判への対応)。 実体は **git-crypt 化された別 repo** (= 個人層と並列に存在する layer 3 の sensitive repo) に置き、 そこへ symlink で参照する。
+
+**現状の運用 architecture**:
+
+```
+個人層の sensitive-terms.txt     →  ../<sensitive-repo>/sensitive-terms.txt
+  (gitignored、 symlink only)            (git-crypt encrypted、 layer 3 repo)
+```
+
+`public-precommit-runner.sh` は `lib/find-personal-layer.sh` で layer 3 を動的解決 → `$PERSONAL_LAYER/sensitive-terms.txt` を read。 symlink で透過的に sensitive repo 側 plaintext を参照する。
+
+### symlink target の選択肢と判断
+
+選択肢:
+- (a) `<sensitive-repo>/sensitive-terms.txt` (= git-crypt repo 内、 cross-machine sync は git pull)
+- (b) Dropbox 等の cloud sync folder 内 (= sync 経由、 git-crypt 不要)
+
+(a) を採用。 (a) の利点:
+- single source of truth (= git で履歴管理 + git-crypt で encrypted)
+- cloud sync の状態に依存しない (= 一部マシンで Dropbox folder が selective-sync 除外されていると symlink が切れる)
+- 学術 / 企業環境では cloud sync 利用が制限される場合あり、 git-crypt は universal
+
+**(b) 経路で発生した過去事故 (2026-05-14)**: 職場マシンで symlink target が cloud sync folder にあったが、 当該 folder が selective-sync で除外されていたため symlink が**壊れていた**。 結果 `[ -f $SENSITIVE_TERMS ]` が false → tier-b literal check が silent に **完全 skip**。 同日 commit で公開 repo の `office-automation.md` に ε 識別子を leak した際、 tier-b は disabled で catch せず commit が通った。 commit 直後の 4 軸 self-sweep (= `CLAUDE.md §10 + §13`) で発見、 5 min 以内に修復 commit (= placeholder 化)。 同セッション内で symlink を (a) sensitive-repo 直接参照に変更し、 tier-b が再び active に。
+
+### setup の依存順序
+
+setup.sh で git-crypt unlock が **symlink を貼る前 (or 同時)** に走る必要がある (= unlock 前に symlink を参照しても read できない = silent skip)。 現 `setup.sh` Step 10 で git-crypt unlock があり、 symlink は個人層 (= layer 3) の bootstrap 時に作成されるので順序は OK。 ただし foreign user (= 個人層なし) は symlink も sensitive-terms も持たないので tier-b は skip (= 設計通り、 layer-1 audience contract 維持)。
+
+### 検証手順 (新マシン setup 後)
+
+```bash
+# 1. symlink が壊れていないか
+file <personal-layer>/sensitive-terms.txt    # → "symbolic link to ..."
+ls -L <personal-layer>/sensitive-terms.txt   # 中身が読めることを確認
+
+# 2. tier-b check が active か (= public repo で test commit)
+cd /tmp && mkdir -p test-sens/.claude && cd test-sens
+git init && touch .claude/public-repo.marker
+<claude-config>/scripts/install-public-precommit.sh .
+echo "<sensitive-literal>" > test.md && git add test.md
+git commit -m "test"     # → 期待: tier-b で reject
+```
+
+### 関連事故 / 規律
+
+- 2026-05-14 leak (= ε 3 件目、 forcing function 閾値到達): 個人層 `leak-incidents.md` に詳細
+- setup.sh post-merge での symlink 自動 verify は未実装 (= 将来 enhancement、 `scripts/setup-dropbox-refs.sh` と同様の pattern で `scripts/setup-sensitive-terms.sh` を作る案あり)
+
+## <a id="pdf-read-fallback-hook"></a>2026-05-18: PDF Read tool fallback hook 設計判断
+
+### 起点 = 2 連続失敗の RCA
+
+2026-05-18 朝、 別 Claude session が個人層の private research repo plan ファイルでの議論中に arXiv preprint PDF を Read tool で読もうとして `Error: pdftoppm is not installed` で fail (= Intel Mac の Tier 2 で poppler の bottle 不在 + source build 失敗 という既知パターン)、 arXiv HTML v1 に lazy substitution → HTML v1 の section 構造から別 group の review と誤 attribution → 真は research paper で別著者 chain (= arXiv ID 自体は public、 攻撃面なし) で 1〜2 hour の議論が誤前提で進行。 個人層で規律化 (= 個人層 CLAUDE.md の PDF-read-fallback 規律 + work-discipline.md §「PDF Read tool error...」 + memory `reference_install_failures.md` の poppler entry に代替経路試行順序)。
+
+同日後続セッションで第二事例: CosmoVerse PDF (24 MB) を Read tool fail → 「Wolfram で完全に賄える」 と発話 + PyMuPDF / sips 試行 skip + 即 Mathematica で PDF text 抽出を実行。 Mathematica 実行自体は valid だったが、 規律された default 経路 (= PyMuPDF) を skip して別 valid path に jump した = 規律順守 reflex の gap。 旧 wording 「arXiv HTML への lazy substitution」 を別セッションが arXiv HTML specific と reflex 解釈、 「Wolfram への substitution は別 issue」 と読まれた。
+
+これは「規律 wording の reflex 解釈に依存する」 設計の脆弱性を実証 = **規律 commit のみでは不十分、 機械的 enforcement layer が必要**。
+
+### 設計選択
+
+**選択**: `claude-config/hooks/pdf-read-fallback-nudge.sh` を新規追加 (= layer 1、 universal 規律)、 `PostToolUse` の `matcher: "Read"` で hook、 stdin JSON の `.tool_input.file_path` (= `.pdf` 拡張子) + 全体 stdin に `pdftoppm is not installed` を含む条件で発火、 system reminder で PyMuPDF 1-liner を injection。
+
+**logic**:
+1. stdin JSON parse (jq 必須、 git-state-nudge.sh と同パターン)
+2. file_path が `.pdf` (case-insensitive) かつ stdin 全体に `pdftoppm is not installed` を含む → 発火条件成立
+3. `python3 -c 'import fitz'` で PyMuPDF 利用可能性を probe
+4. PyMuPDF 利用可能 → `python3 -c "import fitz; doc = fitz.open('<escaped-path>'); print(doc.metadata, doc.page_count); print(doc[0].get_text()[:500])"` の 1-liner を system reminder で emit
+5. PyMuPDF 利用不可 → `pip3 install --user pymupdf` の install hint + `sips` fallback hint を emit
+6. system reminder には arXiv HTML 代替の絶対条件 (= 版一致 + PyMuPDF metadata で attribution cross-check) も併記
+
+**Always exit 0**: 情報的 nudge であってブロックではない (= `permissionDecision: ask` は使わない、 既に Read tool が fail した後の事後 nudge)。
+
+**stateless**: state file 持たず per-call 完結。 何度発火しても同じ message。
+
+**silent 条件** (= false positive 防止):
+- jq / stdin 不在 (hook 環境不在)
+- `.pdf` 拡張子無し
+- pdftoppm 失敗 marker 不在 (= 別 error)
+- python3 不在 (= PyMuPDF も install できない環境)
+
+### 4 層モデル上の位置付け
+
+hook 本体 (script + settings.json schema) = **layer 1** (claude-config、 全 Claude Code ユーザー)。 「Read tool が PDF を pdftoppm で render する設計」 と「PyMuPDF が独立 path として valid」 は universal fact、 layer 1 で書ける。 ただし activation 自体は machine 環境依存:
+- PyMuPDF が install されていれば 1-liner が動く
+- PyMuPDF が install されていなければ install hint を emit
+- python3 が無ければ silent (= 発火条件不成立)
+
+これは layer 1 の「universal 規律 + machine 環境への conditional 反応」 という mixed pattern で、 既存 hook (= `expensive-tmp-guard.sh` が Audiveris / oemer 等の存在を probe するのと同型) と整合。
+
+### 規律 wording との併用設計
+
+規律本体 (= 個人層 CLAUDE.md の PDF-read-fallback 規律 + work-discipline-archive.md §「PDF Read tool error を別経路への lazy substitution で覆い隠さない」 + memory poppler entry) は **wording-level の reflex 起動**、 hook は **mechanical enforcement layer**。 2 重 (規律 + hook) で reflex の癖に依存しない設計。 加えて当該規律の冒頭 1 行を command-form punchy 化 (= 2026-05-18 同日 commit) して reflex 起動の起点を最短化、 これと hook の system reminder の wording を一致 (= 「`python3 -c "import fitz; ..."` を 1 回」) させて、 Claude が「規律で読んだ 1-liner」 = 「hook が injection した 1-liner」 と認識できるよう設計。
+
+### 既知の limitation
+
+- PyMuPDF が image-only PDF (= scanned) で text empty を返した場合は sips PNG 化に fallback、 sips も無ければ Claude が手動で別経路を探す必要 (= 規律本体に書いてある)
+- hook は `pdftoppm is not installed` symptom に依存。 別 PDF read failure mode (= PDF corrupt、 access denied 等) には発火しない (= 他 path で対応)
+- python3 path が PATH に無い環境 (= virtualenv 未 activate 等) で `command -v python3` が fail する場合は silent。 false negative。 setup.sh の PATH 二層防御で `/usr/bin/python3` が常に見える前提
+
+### 検証手順
+
+```bash
+# 1. hook script の手動 test (= stdin JSON 渡しで 3 scenarios)
+echo '{"tool_input":{"file_path":"/path/foo.pdf"},"tool_response":{"error":"Error: pdftoppm is not installed."}}' \
+  | ~/.claude/hooks/pdf-read-fallback-nudge.sh
+# → system reminder emit を確認 (exit 0)
+
+echo '{"tool_input":{"file_path":"/tmp/foo.md"},"tool_response":{"error":"x"}}' \
+  | ~/.claude/hooks/pdf-read-fallback-nudge.sh
+# → silent (exit 0)
+
+# 2. settings.json に entry 登録済か
+jq '.hooks.PostToolUse[] | select(.hooks[]?.command | contains("pdf-read-fallback-nudge"))' \
+  ~/.claude/settings.json
+# → entry 1 件返る
+
+# 3. 実 Read tool で fail を再現して hook 発火を観察 (= 次セッションで)
+# Read tool で .pdf を読む → fail → 次 turn の context に system reminder が
+# inject されているか確認
+```
+
+### 関連事故 / 規律
+
+- 2026-05-18 朝 arXiv preprint attribution 誤同定 RCA: 個人層 research repo の関連 plan + 個人層 work-discipline-archive.md §「PDF Read tool error を別経路への lazy substitution で覆い隠さない」 + 個人層 CLAUDE.md の PDF-read-fallback 規律
+- 2026-05-18 同日後続 Wolfram lazy substitution (= 第二事例): 同 plan の対応 sub-section + メタ層 RCA (= 規律を書く Claude も §16「context 構築での単一情報源 null 結論飛躍」 を起こす)
+
+## 2026-09-06: 検証サイクルを `ai-collaboration` (新 layer-1 repo) へ分離 — stub + forwarder で旧 path を生かす
+
+**判断**: 本 repo の名前 (`claude-config`) と実態 (Claude Code の設定 + 100 本超の domain 規約 + AI 協働の運用 kernel) の乖離を、 rename (A) / 中身を変えず README を書き換える rebrand (C) ではなく、 **AI 協働 platform を別 repo に切り出す (B)** で解く。 user 決定 (2026-09-06)。 新 repo = `odakin/ai-collaboration` (public、 vendor 中立 = Claude Code / Codex / 別ベンダーの pass を同じ規律で扱う)。
+
+**なぜ rename でないか**: `claude-config/` の literal path は owner の全 repo に約 500 件、 hooks / setup.sh / launchd routine / 他マシンの clone 先まで焼き込まれている。 rename は全部が同時に壊れる 1 点、 分離は「動く部分を残して新しい箱を隣に置く」 で段階可能。
+
+**なぜ rebrand でないか**: user 曰く「ありえん」。 名前と中身の不一致は書き換えで消えない — 箱を分けるのが実態に合う。
+
+**分離の方法 (from scratch + 履歴 import)**: clone して削る (= 数百 file の削除 commit と Claude Code 固有の設定が新 repo の履歴に残る) ではなく、 `git init` した空 repo に **移設 7 file の履歴だけ** を `git format-patch --root -- <files>` → `git am` で持ち込む (30 commit)。 履歴が要る理由 = 「実践が講演 (2026-08 PPP2026) に先行した」 等の credit 主張の一次証拠が commit 日付。
+
+**本 repo 側の残し方**:
+- doc 3 本 = **anchor 保持 stub**: doc-meta は残し、 本文を「正本はあちら + 旧 `<a id>` 全部の対応表」 に置換。 `#slug` を含む既存 link (層 3 に多数) は壊れず、 `check-slug-ref-compliance.py` の DANGLING にも落ちない。
+- script 4 本 = **forwarder**: 同 argv で `~/Claude/ai-collaboration/scripts/<same>` を exec。 library (`gpt_measurements.py`) は `import` 経路も要るので、 module として読まれた時は正本を importlib で load して symbol を re-export。 正本 clone が無い machine では明示 error (silent fallback しない)。
+- 移設先の doc 内の相対 link は `../../claude-config/...` に書き換え (同層の相互参照 = 4 層モデルは同層参照を許す)。 GitHub 上では repo 外 link として render されないが、 `~/Claude/` 配下の layout では解決する (odakin-prefs → claude-config の既存 pattern と同じ)。
+
+**Phase 2 (未実施、 trigger 付き)**: `conventions/multi-session-coordination.md` (委譲 / 返送 spine / cross-vendor board) と `codex/` (AGENTS / PARITY / setup-codex) は「AI 協働」 の一部だが Claude Code 固有の hook 配線と絡む。 移設 trigger = Codex Pilot A (常駐 runner の別ベンダー化) 開始時。 正本 = `ai-collaboration/DESIGN.md`。
+
+**stub の寿命**: 削除しない (= 外部 fork / 他マシンの古い clone からの literal 参照を切らない)。 forwarder は正本 clone を前提にするので、 `setup.sh` が ai-collaboration も clone するようにするかは Phase 2 で判断 (現状 = owner 全マシンに手動 clone、 無ければ明示 error)。
+
+## <a id="figure-replacement-information-design"></a>2026-09-11: 既存図の情報を inventory 後に置換する
+
+**判断**: collaborator や過去稿の図を生成図へ置き換える場合、旧図の各 semantic item を先に inventory 化し、新図へ一旦 hoist してから、混雑や重複を理由に item 単位で prune する。一般手順の正本は [`matplotlib-figure-qa.md#figure-replacement-information-audit`](conventions/matplotlib-figure-qa.md#figure-replacement-information-audit)。図の generator、parameter、caption、採否、復元 snapshot は owning project に残す。
+
+**Why**: source の artist と z-order が意図通りでも、実際の render では arrowhead が同色曲線に埋もれる。また、見た目を簡潔にする編集では旧図が運んでいた時間窓・方向・readout・記号対応が暗黙に消える。一旦 hoist は最終図を過密にする方針でなく、削除を明示判断へ変える review 順序である。bbox の機械 gate は文字の枠外だけを扱い、semantic 欠落と同色重なりには actual-render review が必要。
+
+## <a id="inspire-stable-id-fallback"></a>2026-09-11: INSPIRE 監査は texkey から安定 identifier へ fallback
+
+**判断**: `inspire-bib-audit.py` は local BibTeX key を最初に検索し、hit が無ければ entry の arXiv eprint、次に DOI で INSPIRE record を同定する。local key は原稿内の参照 label であり、INSPIRE canonical texkey と一致しないこと自体を未収録や metadata PASS とみなさない。record 同定後の field 比較は従来どおりで、引用内容の適切さは原文確認が所有する。
+
+**起点と検査**: private paper campaign で、arXiv ID と INSPIRE record が確認済みの2 entry が説明的 local key のため両方 SKIP した。query 順と fallback を offline selftest に固定し、同じ2 entryを live API で再実行して arXiv match、mismatch 0、skip 0 を確認した。一般化した script とその docstring が実装の正本で、paper 側は entry と確認記録だけを持つ。
+
+## <a id="link-guard-and-safe-edit-tools"></a>2026-09-13: link の壊れ方を止める guard と、安全に書き換え・commit する道具 — 極性と既定値の判断
+
+**判断 1 = link guard は全 repo の pre-commit に常時配線する (opt-in にしない)**。 壊れる操作 (sub-dir や `SESSION-archive/` への MOVE) はどの repo でも起き、 opt-in は必要な repo ほど入らない (fleet に 219 箇所の段数ずれが溜まっていたのは、 検出器が suite にしか無かったため)。 常時配線を安全にしているのは engine 側の契約: `fix-md-links.py --staged` は **exit 1 + finding の見出し**でだけ止め、 engine の内部失敗は exit 3 で WARN、 engine 不在・構文エラーは素通し ([`hook-authoring.md#engine-failure-must-not-block`](conventions/hook-authoring.md#engine-failure-must-not-block))。 escape = `CLAUDE_MD_LINKS_GUARD=0`、 例示は除外 list でなく engine が fence・code span・数式・`<!-- md-links:ignore -->` で見分ける。 却下案: rc だけで止める (engine の構文エラー 1 つで全 repo の commit が止まる) / repo ごとの除外 list (例示の置き場が増えるたびに腐る。 実際に 1 本あった除外は engine の字下げ fence 判定を直して撤去した)。
+
+**判断 2 = 手で呼ぶ gate は fail-closed、 全 repo の hook は fail-open**。 `--verify-diff` は内部 error でも exit 1 (commit を止める側) にする。 極性は「止まった時に誰が困るか」 で決める: hook が誤って止まると無関係な session の commit まで止まるが、 手で呼んだ gate が止まって困るのは呼んだ本人だけで、 通してはいけない変更を通す方が高くつく。 同じ engine の中で 2 つの極性が同居するので、 exit code の意味を mode ごとに docstring に書いた。
+
+**判断 3 = 書換え道具は既定値で安全側に倒し、 解除は明示 flag にする**。 [`scripts/apply-text-pairs.py`](scripts/apply-text-pairs.py): TARGET は必須引数 (既定値なし)、 挿入型 pair の再実行は拒否、 old の端が token の途中なら拒否 (`--allow-prefix` で解除)。 却下案: 冪等性と target の取り違えを patch 作者の注意に任せる (2026-09-13 に 1 回破れて engine の CLI が約 1 分落ちた = [`batch-text-edits.md#insertion-pair-rerun`](conventions/batch-text-edits.md#insertion-pair-rerun))。 TARGET は最初に実体の path へ解決し、 `--test` の写しでは TARGET 以外の symlink を link のまま写す (2026-09-14)。 却下案 = 写しの link を全部辿る: repo root の共有 folder への dir link まで複製し、 それでも test command が絶対 path に書く副作用は防げない (道具が保証できるのは TARGET だけ = [`batch-text-edits.md#symlink-target`](conventions/batch-text-edits.md#symlink-target))。 foil の歯は同梱の mutant spec で毎回確かめる ([`scripts/check-foil-teeth.py`](scripts/check-foil-teeth.py)、 一覧 = `scripts/*.mutants.json`)。 却下案 = 修正を外した版を scratch で作って確かめる: 次に回す人が再現できず、 実際に既存 foil の欠陥 2 件 (ラベルと別の検査で落ちる / 前の foil の状態で落ちる) は spec を書くまで見えなかった。 [`scripts/commit-from-origin-worktree.py`](scripts/commit-from-origin-worktree.py): 丸ごとの `--copy` は DST の live HEAD 版と origin 版が違えば拒否 (`--allow-overwrite` で解除)、 rebase が衝突したら自動解決せず push もせず worktree を残す (生成物を upstream 側で取り直すかは内容の判断)。 live で push する経路自体は廃止しない (相手の未 push commit が無ければ十分) が、 その確認を注意に頼る点が near-miss の原因だったので、 相手の WIP がありうる時の既定を worktree 側に置いた ([`multi-session-coordination.md#foreign-wip-scratch-worktree`](conventions/multi-session-coordination.md#foreign-wip-scratch-worktree))。
+
+**判断 4 = 事後監査は帰属を主張しない**。 [`scripts/audit-push-provenance.py`](scripts/audit-push-provenance.py) は reflog の `update by push` の範囲と `Agent-Session` trailer から「ある session の commit と他の commit が同じ push で公開された」 事実だけを出す。 git は誰が push したかを残さない (同じ clone を全 session が共有する) ので、 「誰が巻き込んだか」 までは言わない。 別 clone・別 machine の push と期限切れの reflog は範囲外と docstring に明記した。
+
+**判断 5 = SoT registry への追加は、 登録した日から赤くなる topic を WARN でなく拒否する** (道具は個人層 `odakin-prefs/scripts/sot-registry-add.py`)。 登録直後に drift 検出器が鳴るのは、 home 以外に既に同文があるか token が特異でないかのどちらかで、 どちらも登録前に人が決めること (pointer を足す / allow_globs に入れる / token を選び直す)。 WARN にすると suite が赤いまま commit され、 赤が常態化する。
+
+## <a id="wiring-lock-data-files-by-location"></a>2026-09-29: data 形式の file の配線 lock は場所で決める (名前の言及では lock しない)
+
+**判断**: engine の名前を含む file を全文 `authority:wiring` として lock する述語は、 code (.py .sh .js .ts と拡張子の無い script) だけに当て、 data 形式 (.json .toml .yaml .yml .rules) は組み込みの制御 path と manifest の宣言で守る ([`agent-rule-ownership.md#wiring-scope`](conventions/agent-rule-ownership.md#wiring-scope))。
+
+**根拠**: 記録の file (TODO の台帳・掲示板の event・検証の manifest) は engine を呼ばず設定もしないのに、 名前を書いただけで全文 lock になり、 auto mode では承認の記録の経路そのものが止まることがあった (実測)。 fleet を数えると、 data 形式で engine を配線する file はどれも制御 path か manifest の下にあり、 言及だけの file は記録だった。 失う保護 = 宣言していない場所に置いた data 形式の配線 (実測 0)、 置くなら manifest に宣言する。
+
+**test**: 述語 engine の selftest に「言及だけの data file は lock しない」 5 件 + 「制御 path / manifest / code は lock のまま」 3 件。 新しい 5 件は変更前の述語で失敗する (= 修正前の対照)。
+
+## <a id="approval-cli-allow-in-auto-mode"></a>2026-09-29: auto mode で承認 CLI が classifier に止まる経路は、 本人の狭い allow の宣言で開ける
+
+**判断**: guard の deny 文と規約が案内する承認の記録 (`approve` / `apply`) を auto mode の classifier が Self-Modification として止めることがある (context 依存 = 同じ command が別の session ではそのまま通る)。 直しは 3 つ: (1) deny 文と規約に「止められたら迂回せず本人に allow の宣言か mode 切替を頼む」 を足す ([`tool-call-robustness.md#classifier-blocks-guard-approval-cli`](conventions/tool-call-robustness.md#classifier-blocks-guard-approval-cli)) (2) 本人が settings の `permissions.allow` に engine の CLI を絶対 path で宣言する (狭い Bash の allow は公式 docs で classifier より先に解決される。 宣言は git に載る設定の層に置き、 session 開始の auto-apply が各機械に当てる) (3) hook の `--liveness` が、 mode が auto で宣言の無い機械に 🟡 を出す。
+
+**採らなかった案**: guard が transcript を直読して「名指し」 を判定する (意味判断を機械に置く = 既存の設計と矛盾) / 本人が打つ書式を hook が承認として記録する (裁定を自由文でなくする) / `autoMode.allow` の prose rule (classifier の中の例外で soft_deny にしか効かない) / ask rule (dialog 1 回ずつ = 本人不在の worker が止まる。 代案として残す)。
+
+**線**: allow は classifier の二重判定を外すだけ。 CLI 自身の照合 (本人の最新の発言だけを引く・候補の hash に束縛・Stop で返事に書かせる) は不変。 agent が宣言 file を commit する操作は classifier が止める (実測) = 宣言の commit と auto-apply の 1 command は本人の terminal。 直接の証拠: 止められていた session で、 宣言の後に同じ command (絶対 path) がそのまま通った (実測)。 相対 path や複合 command は rule に当たらず classifier に回る = deny 文は絶対 path の command を出す。
+
+## <a id="additive-echo-bookkeeping"></a>2026-09-29: 規則の文書の変更の報告 — 差し戻しの後も照合し、 他の session の分は file ごとに畳み、 書かれていた記録は証拠から照合し直す
+
+**判断**: 承認なしで入った規則の文書への変更を返事に書かせる仕組み (manuscript-claim-guard) を直した ([`agent-rule-ownership.md#additive-and-free-zones`](conventions/agent-rule-ownership.md#additive-and-free-zones))。 (1) 差し戻しの直後の Stop でも照合して処理済みに書く (差し戻しはしない) (2) 差し戻しは足りない行の追記だけを求める ([`hook-authoring.md#stop-hook-addendum-not-reemission`](conventions/hook-authoring.md#stop-hook-addendum-not-reemission)) (3) 他の session から回ってきた分は file ごとに 1 行、 表示がまったく同じ記録は 1 行 (×N) (4) 通った変更ごとに、 返事に書く行そのものを tool の結果と一緒に渡す (5) 持ち主の session がもう返事に書いていた記録は、 session の開始と `additive-log --reconcile` で処理済みにする。 処理状態の書き込みは lock の中で読み直して合わせる ([`hook-authoring.md#shared-state-file-merge`](conventions/hook-authoring.md#shared-state-file-merge))。 記録ごとの行方 (持ち主が書いたか・誰が処理済みにしたか) は `additive-log --audit` で数える (読むだけ、 機械ごと)。 照合し直しと `--audit` は同じ行の割り当て (`assign_owner_lines`) を使い、 Stop と同じ消費の照合 (1 行は 1 記録、 印字そのものを先に) = 双子の片方の行で両方を消さない・両方を「書いた」 と数えない。
+
+**根拠** (実測): 差し戻しの直後の Stop が照合せずに通していたので、 書き直した返事の行が処理済みにならず、 次の turn で要求の窓から外れ、 その session の終わりに別の session の開始へ回っていた。 処理済みが記録されるのは、 たまたま別の通知で Stop がもう一度走った時だけだった (transcript の「差し戻し → 書き直し → 素通りの Stop → 通知の Stop」 の並びと、 処理状態の記録時刻の一致で特定)。 回ってきた分は、 無関係な session の最初の返事に数十行を求め、 本人が読める量を超えていた。 同じ返事が 2 通並ぶのは、 差し戻しの文面が全文の出し直しを求めていたため。
+
+**採らなかった案**: 他の session の分に件数の上限を付け、 残りを file 名だけにする (上限の外が処理済みにならない) / 他の session の分を dashboard に回す (本人の既読の操作が戻る = 廃止した形) / 残った記録を state の手書きで処理済みにする (照合の証拠が残らない = [`convention-design-principles.md#reconcile-from-evidence`](docs/convention-design-principles.md#reconcile-from-evidence))。
+
+**線**: file ごとの 1 行は個々の before → after を返事に出さない (additive-log で読む)。 規則でない区画に緩和の語を書いた記録は畳まない。 照合は repo の名前 (最後の dir 名) と file で見る = 同じ名前の別の repo は区別しない。 照合の順序 = 印字そのものを持つ行を先にその記録へ、 残りを引用の冒頭で (冒頭が同じ別の記録に行を取られない)、 前の返事を出し直した再送の行は 1 本に数える。
+
+**test**: engine の selftest に差し戻し後の照合・文面・並行の書き込み・畳み・file ごとの行・返事の前の通知・照合の境目・書かれていた記録の照合を足し、 hook の試験の期待 2 件を新しい挙動に変えた。 新しい試験は直す前の実装 (と検品に出した途中の版) で失敗する。 別の context の検品 2 回。

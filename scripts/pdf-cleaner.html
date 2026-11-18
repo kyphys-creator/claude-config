@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<!-- pdf-cleaner.html — clipboard-cleaner.py のブラウザ版 fallback（非 macOS / pbcopy なし環境用、整形ロジックの正本は clipboard-cleaner.py で両実装を同期） -->
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDFテキスト整形ツール</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+      background: #f5f5f7;
+      color: #1d1d1f;
+      padding: 32px 24px;
+      min-height: 100vh;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    p.sub {
+      font-size: 14px;
+      color: #6e6e73;
+      margin-bottom: 28px;
+    }
+
+    .cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    @media (max-width: 700px) {
+      .cols { grid-template-columns: 1fr; }
+    }
+
+    .box {
+      background: #fff;
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #6e6e73;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      margin-bottom: 10px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 320px;
+      border: 1.5px solid #d2d2d7;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.7;
+      font-family: inherit;
+      resize: vertical;
+      outline: none;
+      transition: border-color .15s;
+    }
+
+    textarea:focus { border-color: #0071e3; }
+
+    textarea[readonly] {
+      background: #f5f5f7;
+      cursor: default;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 24px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 980px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+
+    button:active { transform: scale(.97); }
+
+    .btn-primary {
+      background: #0071e3;
+      color: #fff;
+    }
+
+    .btn-primary:hover { opacity: .88; }
+
+    .btn-secondary {
+      background: #e8e8ed;
+      color: #1d1d1f;
+    }
+
+    .btn-secondary:hover { opacity: .8; }
+
+    .btn-copy {
+      background: #34c759;
+      color: #fff;
+    }
+
+    .btn-copy:hover { opacity: .88; }
+
+    .toast {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: #1d1d1f;
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 980px;
+      font-size: 14px;
+      opacity: 0;
+      transition: opacity .2s, transform .2s;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .stats {
+      font-size: 12px;
+      color: #6e6e73;
+      margin-top: 8px;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>📄 PDFテキスト整形ツール</h1>
+  <p class="sub">PDFからコピーした文字を貼り付けて「整形する」を押すと、余分な改行を取り除きます。</p>
+
+  <div class="cols">
+    <div class="box">
+      <label>貼り付け（PDF からコピーしたテキスト）</label>
+      <textarea id="input" placeholder="ここにペーストしてください..."></textarea>
+      <div class="stats" id="inStats"></div>
+    </div>
+    <div class="box">
+      <label>結果（コピーしてWordへ）</label>
+      <textarea id="output" readonly placeholder="整形後のテキストが表示されます"></textarea>
+      <div class="stats" id="outStats"></div>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn-primary" onclick="clean()">整形する ▶</button>
+    <button class="btn-copy" onclick="copyResult()">結果をコピー</button>
+    <button class="btn-secondary" onclick="clearAll()">クリア</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const inputEl  = document.getElementById('input');
+    const outputEl = document.getElementById('output');
+
+    inputEl.addEventListener('input', updateInStats);
+
+    function updateInStats() {
+      const n = inputEl.value.length;
+      document.getElementById('inStats').textContent = n ? `${n.toLocaleString()} 文字` : '';
+    }
+
+    // 日本語判定: 全角スペース・記号・かな (U+3000-30FF)、CJK 統合漢字
+    // (U+4E00-9FFF)、全角英数 (U+FF00-FFEF)。
+    // 整形ロジックの正本は scripts/clipboard-cleaner.py — 変更時は両方を更新すること。
+    const JA_RE = /[\u3000-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF]/;
+
+    // \u300C\u610F\u56F3\u7684\u306A\u6539\u884C\u300D\u5224\u5B9A (1): \u6B21\u306E\u884C\u304C\u65B0\u3057\u3044\u69CB\u9020\u306E\u982D\u3067\u59CB\u307E\u308B
+    // \uFF08\u5B57\u4E0B\u3052 / \u7B87\u6761\u66F8\u304D / \u6761\u6587\u756A\u53F7\u3002\u6B63\u672C = clipboard-cleaner.py \u306E
+    //   INDENT_RE / MARKER_RE \u3068\u540C\u4E00\u5185\u5BB9\uFF09
+    const INDENT_RE = /^(\u3000|\t| {2,})/;
+    const MARKER_RE = /^(\u30FB|[\u25CF\u25CB\u25C6\u25C7\u25A0\u25A1\u25B6\u25B8]|[\uFF08(][0-9\uFF10-\uFF19\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341]+[\uFF09)]|[0-9\uFF10-\uFF19]+[\uFF0E.\u3001)\uFF09\u3000]|[\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341\u767E]+[\u3001\u3000]|\u7B2C[0-9\uFF10-\uFF19\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341\u767E\u5343]+[\u6761\u7AE0\u7BC0\u9805\u7DE8\u6B3E\u76EE]|[\u2460-\u2473])/;
+
+    // \u8868\u793A\u5E45\u306E\u8FD1\u4F3C\uFF08\u5168\u89D2 = 1.0\u3001\u534A\u89D2 = 0.5\u3002CJK\u30FB\u304B\u306A\u30FB\u5168\u89D2\u5F62\u3092\u5168\u89D2\u6271\u3044\uFF09
+    function width(s) {
+      let w = 0;
+      for (const ch of s) {
+        w += /[\u1100-\u115F\u2E80-\u303F\u3040-\u30FF\u3100-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(ch) ? 1.0 : 0.5;
+      }
+      return w;
+    }
+
+    // \u300C\u610F\u56F3\u7684\u306A\u6539\u884C\u300D\u5224\u5B9A (2): \u6298\u308A\u8FD4\u3057\u884C\u306F\u53F3\u7AEF\u8FD1\u304F\u307E\u3067\u8A70\u307E\u3063\u3066\u3044\u308B\u6027\u8CEA\u3092
+    // \u5229\u7528\u3002\u524D\u306E\u884C\u304C\u30D6\u30ED\u30C3\u30AF\u6700\u5927\u5E45\u3088\u308A\u5168\u89D2 2 \u6587\u5B57\u4EE5\u4E0A\u77ED\u3051\u308C\u3070\u610F\u56F3\u7684\u306A\u884C\u672B
+    // \uFF08\u6BB5\u843D\u672B\u30FB\u898B\u51FA\u3057\u30FB\u7B87\u6761\u66F8\u304D\u9805\u76EE\u672B\uFF09\u306A\u306E\u3067\u6539\u884C\u3092\u6B8B\u3059\u3002
+    function keepBreak(prevLine, nextLine, maxW) {
+      if (INDENT_RE.test(nextLine) || MARKER_RE.test(nextLine)) return true;
+      return maxW - width(prevLine) >= 2.0;
+    }
+
+    function clean() {
+      const raw = inputEl.value;
+      if (!raw.trim()) return;
+
+      // 空行（2つ以上の改行）で段落に分割
+      const paragraphs = raw.split(/\n{2,}/);
+
+      const result = [];
+      for (const para of paragraphs) {
+        const lines = para.split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+        if (!lines.length) continue;
+        const maxW = Math.max(...lines.map(width));
+        const outLines = [];
+        let joined = lines[0];
+        for (let i = 1; i < lines.length; i++) {
+          const prev = lines[i - 1], line = lines[i];
+          if (/[A-Za-z]-$/.test(prev)) {
+            // 英語のハイフネーション: 折り返し確定、ハイフンを除いて直結
+            joined = joined.slice(0, -1) + line;
+          } else if (keepBreak(prev, line, maxW)) {
+            // 意図的な改行: そのまま残す
+            outLines.push(joined);
+            joined = line;
+          } else if (JA_RE.test(joined.slice(-1)) || JA_RE.test(line.charAt(0))) {
+            // 折り返し・行境界のどちらかが日本語: スペース無しで直結
+            joined += line;
+          } else {
+            // 折り返し・英語同士: スペースを挟む
+            joined += ' ' + line;
+          }
+        }
+        outLines.push(joined);
+        result.push(outLines.join('\n'));
+      }
+
+      const cleaned = result.join('\n\n');
+      outputEl.value = cleaned;
+
+      const n = cleaned.length;
+      document.getElementById('outStats').textContent = n ? `${n.toLocaleString()} 文字` : '';
+    }
+
+    function copyResult() {
+      const text = outputEl.value;
+      if (!text) { showToast('整形後のテキストがありません'); return; }
+      navigator.clipboard.writeText(text).then(() => {
+        showToast('コピーしました ✓');
+      });
+    }
+
+    function clearAll() {
+      inputEl.value = '';
+      outputEl.value = '';
+      document.getElementById('inStats').textContent = '';
+      document.getElementById('outStats').textContent = '';
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 2000);
+    }
+  </script>
+
+</body>
+</html>

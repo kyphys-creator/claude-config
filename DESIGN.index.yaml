@@ -1,0 +1,195 @@
+# Stable slug index -- AUTO-GENERATED from the doc by scripts/generate-doc-index.py.
+# id/level/title are DERIVED from the markdown (edit the md + re-run, do NOT hand-edit
+# them here). legacy (a section's original §-number = a permanent forwarding address),
+# related, and any other hand field are PRESERVED. See convention-design-principles §14.7 (= #inbound-ref-robustness).
+# Validated by scripts/check-office-automation-index.py (dangling=0 / orphan=0).
+sections:
+  - id: toc
+    level: 2
+    title: "目次"
+  - id: policy-before-implementation-placement
+    legacy: "2026-11-07"
+    level: 2
+    title: "2026-11-07: 「方針を先に出してから実装する」 を独立の規約 file に置き、 返信版をそこへ統合する"
+  - id: rc-detail-and-unattended-refresh
+    legacy: "2026-10-31"
+    level: 2
+    title: "2026-10-31: RC server の中身を beat に載せ、 古い server は機械が起こし直す"
+  - id: session-shape-gate
+    legacy: "2026-09-28"
+    level: 2
+    title: "2026-09-28: SESSION.md の形を gate にする — 案件ごとの現在地を置き換える file にし、 日付の節・hash・messageId・育つ commit を止める"
+  - id: rule-doc-change-by-vocabulary-not-form
+    legacy: "2026-09-25"
+    level: 2
+    title: "2026-09-25: 規則の文書への変更は形 (追記か書き換えか) でなく語で見る — 追記の特権を外し、 書き換えだけを止める門も外す"
+  - id: sso-recovery-server-acceptance
+    legacy: "2026-09-25"
+    level: 2
+    title: "2026-09-25: SSO の入り直しは server の受け入れで決め、 入り直しの処理を部品 1 つに置く"
+  - id: memory-budget-gate
+    legacy: "2026-09-23"
+    level: 2
+    title: "2026-09-23: memory file の予算 gate — 予算を超えて育つ commit だけ止める (縮める commit は通す)"
+  - id: approve-quote-binding
+    legacy: "2026-09-23"
+    level: 2
+    title: "2026-09-23: approve の引用照合 — 引けるのは記録する時点で著者の最新の発言だけ (短い引用は発言の全体)"
+  - id: ci-runner-env-failures
+    legacy: "2026-09-22"
+    level: 2
+    title: "2026-09-22: CI の 6 件の赤は runner の環境差 — font・<base> の AGENTS.md・ext4 の inode 再利用 (検査の意図は保ち、 環境の欠落は宣言する)"
+  - id: killed-hook-recreate-design
+    legacy: "2026-09-19"
+    level: 2
+    title: "2026-09-19: macOS に exec で kill される git hook は、 同じ中身の新しい inode に作り直す (検査は SessionStart で毎回)"
+  - id: sso-session-recovery-design
+    legacy: "2026-09-17"
+    level: 2
+    title: "2026-09-17: SSO 保護サイトの login 切れは、 予告も推定もせず、 使う時に tab の行き先を見て復帰する"
+  - id: hook-retirement-registry
+    legacy: "2026-09-17"
+    level: 2
+    title: "2026-09-17: hook の退役は registry に書き、 毎回の sync が外す (installer の hardcode をやめる)"
+  - id: precommit-installer-respects-repo-hooks
+    legacy: "2026-09-16"
+    level: 2
+    title: "2026-09-16: 共通 pre-commit の installer は repo が管理する hook を置き換えない"
+  - id: public-gate-structural-exemptions
+    legacy: "2026-09-15"
+    level: 2
+    title: "2026-09-15: 公開 repo の gate の誤検知を構造で消す (書誌・複合語・生成データ) + 棚卸しと監査を 1 本に"
+  - id: pronunciation-evidence-and-delivery
+    legacy: "2026-09-15"
+    level: 2
+    title: "2026-09-15: 発音 evidence と user-visible 音声 delivery を分離する"
+  - id: public-gate-tier-e
+    legacy: "2026-09-14"
+    level: 2
+    title: "2026-09-14: 公開 repo の Tier E (owner の非公開の活動の事実)"
+  - id: public-gate-tier-d
+    legacy: "2026-09-13"
+    level: 2
+    title: "2026-09-13: 公開 repo の Tier D (未公開文書の逐語) と marker 点検"
+  - id: session-provenance-trailer-design
+    legacy: "2026-09-10"
+    level: 2
+    title: "2026-09-10/11: commit に agent/session/model/effort trailer (host/account は焼かない)"
+  - id: codex-layered-integration
+    legacy: "2026-09-01"
+    level: 2
+    title: "2026-09-01: Codex integration — L1 正本 + 明示 L4 wiring + 多層検証"
+  - id: auto-tree-autoload-slim
+    legacy: "2026-09-01"
+    level: 2
+    title: "2026-09-01: AUTO-TREE の auto-load 税 縮退 (when 表示 + hooks/scripts README 移設)"
+  - id: ci-and-single-list-wiring
+    legacy: "2026-07-10"
+    level: 2
+    title: "2026-07-10: 検証の発火面化 — CI + run-all-checks (検査リスト単一 SoT) + hook 配線の単一リスト駆動化"
+  - id: generated-docs-tree-autogen
+    legacy: "2026-07-10"
+    level: 2
+    title: "2026-07-10: 構造 tree / 冒頭列挙 / カテゴリ index の自動生成 (generate-tree.py)"
+  - id: design-reorg-archive-first
+    legacy: "2026-07-10"
+    level: 2
+    title: "2026-07-10: DESIGN.md の archive-first 再編 (DESIGN-archive.md 分離 + slug anchor + index 化)"
+  - id: office-files-router-hoist
+    legacy: "2026-06-27"
+    level: 2
+    title: "2026-06-27: Office handling 入口 router を layer 1 に hoist (`office-files.md` 新設)"
+  - id: layer1-firing-surface-tension
+    legacy: "2026-06-17"
+    level: 2
+    title: "2026-06-17: layer-1 convention の発火面 — 「正しい層配置」 と「発火確率」 の tension (= future work)"
+  - id: completion-gate-firing-resolution
+    level: 3
+    title: "部分 resolution (2026-09-11): completion boundary は global entry + blocking Stop へ"
+  - id: conventions-listing-regeneration
+    legacy: "2026-06-13"
+    level: 2
+    title: "2026-06-13: CONVENTIONS.md 冒頭の conventions/ 列挙 — 完全列挙と判定して再生成、機械 enforcement は defer"
+  - id: setup-clone-rename-skip
+    legacy: "2026-06-01"
+    level: 2
+    title: "2026-06-01: setup.sh の clone step — local dir rename による重複 clone を防ぐ"
+  - id: commit-msg-leak-guard-option-b
+    legacy: "2026-05-26"
+    level: 2
+    title: "2026-05-26: commit-msg leak guard option B (= git native BLOCK mode) を harness invoke bug の mitigation として投入"
+  - id: depend-vs-mention-distinction
+    legacy: "2026-05-19"
+    level: 2
+    title: "2026-05-19: 4 層 model の Core rule に「依存 vs 名指し」 区別を明示"
+  - id: pre-commit-bib-all-repos
+    legacy: "2026-05-14"
+    level: 2
+    title: "2026-05-14: 全 repo に pre-commit-bib install (= 時点依存検出の撤廃)"
+  - id: path-two-layer-defense
+    level: 2
+    title: "PATH 管理: 二層防御の設計"
+  - id: dangerous-commands-deny-rules
+    level: 2
+    title: "危険コマンドのブロック: deny ルール vs PreToolUse フック"
+  - id: architecture-md-optional
+    level: 2
+    title: "ARCHITECTURE.md: 必須化せず任意ファイルに留める"
+  - id: runbook-files-defer
+    level: 2
+    title: "RUNBOOK 系ファイル: 規約化を待つ（実例先行）"
+  - id: history-scrubbing-declined
+    level: 2
+    title: "claude-config git history scrubbing (確定: 見送り 2026-04-06)"
+  - id: self-mention-monitoring
+    level: 2
+    title: "CONVENTIONS.md / conventions/ 内の自己言及的 odakin 記述 (確定: 現状維持 2026-04-06)"
+  - id: hooks-role-table
+    level: 2
+    title: "hooks/ の役割分担"
+  - id: secrets-repos-externalization
+    level: 2
+    title: "SECRETS_REPOS の個人層外出し (2026-05-10)"
+  - id: find-personal-layer-helper
+    level: 2
+    title: "個人層検出 helper (scripts/lib/find-personal-layer.sh) (2026-05-10)"
+  - id: dropbox-refs-design
+    level: 2
+    title: "dropbox-refs convention: per-repo symlink + personal-layer registry (2026-04-07)"
+  - id: stale-dirt-detection
+    level: 2
+    title: "git-state-nudge.sh: cross-session WIP leakage の検出 — STALE_DIRT (2026-04-08)"
+  - id: public-repo-leak-prevention
+    level: 2
+    title: "公開リポ leak 防止: 構造制約 hook + pre-commit ephemeral literal check"
+  - id: sensitive-terms-symlink-architecture
+    level: 2
+    title: "sensitive-terms.txt の symlink architecture (2026-05-14 追補)"
+  - id: pdf-read-fallback-hook
+    legacy: "2026-05-18"
+    level: 2
+    title: "2026-05-18: PDF Read tool fallback hook 設計判断"
+  - id: figure-replacement-information-design
+    legacy: "2026-09-11"
+    level: 2
+    title: "2026-09-11: 既存図の情報を inventory 後に置換する"
+  - id: inspire-stable-id-fallback
+    legacy: "2026-09-11"
+    level: 2
+    title: "2026-09-11: INSPIRE 監査は texkey から安定 identifier へ fallback"
+  - id: link-guard-and-safe-edit-tools
+    legacy: "2026-09-13"
+    level: 2
+    title: "2026-09-13: link の壊れ方を止める guard と、安全に書き換え・commit する道具 — 極性と既定値の判断"
+  - id: wiring-lock-data-files-by-location
+    legacy: "2026-09-29"
+    level: 2
+    title: "2026-09-29: data 形式の file の配線 lock は場所で決める (名前の言及では lock しない)"
+  - id: approval-cli-allow-in-auto-mode
+    legacy: "2026-09-29"
+    level: 2
+    title: "2026-09-29: auto mode で承認 CLI が classifier に止まる経路は、 本人の狭い allow の宣言で開ける"
+  - id: additive-echo-bookkeeping
+    legacy: "2026-09-29"
+    level: 2
+    title: "2026-09-29: 規則の文書の変更の報告 — 差し戻しの後も照合し、 他の session の分は file ごとに畳み、 書かれていた記録は証拠から照合し直す"

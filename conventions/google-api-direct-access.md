@@ -1,0 +1,484 @@
+<!-- doc-meta
+when: Google API を Python から直接叩く setup をするとき + ML (Google Groups) 宛に送る前に、 購読者一覧を読めない ML に入っていない人を見分けるとき (#group-membership-without-owner) + Calendar の予定を読んで日付・時刻を出す・日ごとに数える道具を書くとき (#calendar-read-timezone-and-span)
+category: infra
+summary: Google API を Python から直接アクセスする setup pattern (= GCP project の 3 layer 構造、 API enable + propagate、 OAuth scope 設計、 mimeType 判別 Sheets vs xlsx、 Drive の検索 query に入れる値のエスケープ 〔' と \ を逃がさないと 400 → 同名なし扱いで重複を作る、 #drive-query-escaping〕、 Drive folder 一括 download 〔list pagination + native-export map + 再帰 + manifest、 #drive-folder-bulk-download〕、 他人から共有された folder を読み続ける 〔宛先 account の token (別 account では 404) + 台帳 + id/modifiedTime の差分 + 共有通知メールの照合、 #shared-folder-watch〕、 Gmail 一括掃除 〔batchModify TRASH 30日undo + レビュー済み ID list 駆動 + 送信者別集計 + 本文入り通知の salvage、 判断基準 = 唯一の機械検索可能な記録か、 #gmail-bulk-cleanup〕、 storage quota 監視 〔Drive about.get storageQuota = Gmail+フォト+Drive 合算容量の唯一の API 監視点、 最小 scope drive.metadata.readonly、 反映ラグ + ゴミ箱 usage 込みの解釈 gotcha、 #storage-quota-monitoring〕、 Cloud Identity Groups API は group OWNER level で memberships CRUD 可能で Admin SDK の Workspace admin 制約を回避、 loopback OAuth consent フローの CSRF/横取り対策 〔state nonce + PKCE S256 + request-loop + 手動貼付の state 検証 + 補償制御 hard-fail + 識別子 charset 検証、 #oauth-loopback-hardening〕) + #drive-xlsx-inplace-update (= 他人 owner の共有 xlsx に書く: full drive 別 token / revisions.get_media が truth / openpyxl round-trip の損失 / files.update 同 ID / 再 download literal verify)
+-->
+# Google API を Python から直接アクセスする setup
+
+MCP では cover できない (= bulk 操作・xlsx parse・特殊 scope) Google API call を Python から直接行うときの setup と運用規約。 個別 MCP (Gmail / Calendar / Classroom 等) と並存して動かす想定。 CLAUDE.md から参照: `~/Claude/claude-config/conventions/google-api-direct-access.md`
+
+関連: [`mcp.md` api-direct-access](mcp.md#api-direct-access) (= 使い分け基準)、 [`google-url.md` gcp-project-management](google-url.md#gcp-project-management) (= URL 規約)。
+
+## 全体像 (= 3 layer)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 1: GCP project (= 全 owner 操作の単位)               │
+│   project_id / project_number / owner email                 │
+│   各 API は project レベルで個別 enable 必要 (Sheets/Drive)│
+│   project owner にしか API enable・OAuth client 編集不可    │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 2: OAuth client (= consent UI を出す主体)            │
+│   1 つの GCP project に複数 OAuth client 可、 通常 1 つで充分│
+│   gcp-oauth.keys.json を file system に保管                 │
+│   複数アカウント (個人 + Workspace) の token 発行に共有可  │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 3: Account token (= 各 Google アカウントの承諾結果) │
+│   {account}-credentials.json として保管 (= access + refresh)│
+│   scope 別に複数 token 並存可 (= Gmail scope vs Sheets scope)│
+│   refresh_token で永続使用、 access_token は自動更新       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**重要な区別**: project 管理 (= layer 1) と token 発行 (= layer 3) は別 layer。 owner アカウント (= layer 1) が個人 Google で、 token 発行 (= layer 3) を Workspace アカウントで行う構成は normal。
+
+## まず: そもそも OAuth API が要るか (= published sheet は no-auth CSV で取れる)
+
+read-only でよく、 対象の Google Sheet が **「ウェブに公開 (publish to web)」** 済なら、 OAuth も GCP project も**一切不要**で CSV を取れる。 publish 済 sheet の URL 形 `…/d/e/2PACX-…/pubhtml` に対し、 tab ごとに:
+
+```
+https://docs.google.com/spreadsheets/d/e/<published-id>/pub?gid=<gid>&single=true&output=csv
+```
+
+を `curl` / `urllib` で GET すれば CSV が返る (= 認証なし、 誰でも)。 他人が公開している sheet (= 自分が owner でない upstream) を mirror source にする時に特に有用。
+
+- 見つけ方: 対象が GitHub Pages 等に sheet を iframe 埋め込みしているなら、 その `iframe src` の `…/pub?…` URL から `<published-id>` と各 `gid` を拾える。 `pubhtml` (gid なし) は全 tab を返す。
+- 保守: tab (= 年度別シート等) ごとに `gid` が違うので、 必要な gid を script に小さな map で持つ (= 1 行/tab)。 publish が解除されると endpoint は HTML error を返すので、 取得失敗は silent skip にして pipeline を止めない。
+- 制約: read-only かつ「公開済」 が前提。 private sheet / write / 細かい権限が要るなら下記の OAuth API 経由。
+
+## GCP project の API enable
+
+各 Google API (Gmail / Sheets / Drive / Calendar / Classroom / etc.) は GCP project ごとに**個別 enable 必要**。 1 つ enable しても他は別。
+
+**URL 規約** (= [`google-url.md` gcp-project-management](google-url.md#gcp-project-management)):
+```
+https://console.developers.google.com/apis/api/{api}.googleapis.com/overview?project={projectNumber}&authuser=<project_owner_email>
+```
+
+- `authuser=` は project owner のメールアドレス。 active account が違うと「project が見つかりません」 で弾かれる
+- API enable 後は **propagate 5-10 分** かかる場合あり (= typical は 1-2 分、 上限近い retry が必要なケースあり)。 立て続けに 403 `SERVICE_DISABLED` が返るのは propagate 待ち中の signal
+
+**propagate 中の polling pattern** (Bash で背景 retry):
+```bash
+until python3 -c "<API call test>; sys.exit(0)" 2>/dev/null; do
+  echo "$(date +%H:%M:%S) - not yet, sleeping 30s..."; sleep 30
+done
+```
+
+通れば background 完了通知が返る。 sleep 90 のような単発長 sleep は harness が block するケースあり、 until-loop で polling する。
+
+## OAuth scope の設計
+
+### scope を最小化する原則
+
+各 token は **必要最小限の scope** で発行する。 Drive 全体読み放題の `drive.readonly` よりも `drive.metadata.readonly` (= ファイル名・サイズ等のみ) や `drive.file` (= picker UI で grant されたファイルのみ) を優先。
+
+ただし**読みたい対象が xlsx (= Office file) を含む**場合は `drive.readonly` が必須 (= `drive.metadata.readonly` では binary download 不可)。 Sheets native のみなら `spreadsheets.readonly` で済む。
+
+### 既存 OAuth client に scope 追加 vs 新規 client
+
+| 選択 | Pros | Cons |
+|---|---|---|
+| 既存 client + 既存 token に scope 追加 | OAuth client が 1 つで管理シンプル | 全 token が scope 拡大、 影響範囲不明、 既存 token は再 reauth 必要 |
+| 既存 client + 別 scope set で新 token (separate directory) | 既存 token に影響なし、 用途別に独立 | directory + reauth 1 回ずつ、 token が増える |
+| 新 OAuth client + 新 token | 完全独立 | GCP コンソールで client 作成必要、 user 承諾の consent screen も別物 |
+
+**推奨**: 既存 client + 別 directory + 別 scope token (= 中段)。 既存 MCP の動作に影響を与えず、 用途別に独立管理。
+
+### scope 増やし方の手順
+
+1. 新 directory を `<mcp-config-repo>/<service>/` に作成 (例: `sheets/`)
+2. `gcp-oauth.keys.json` を既存 directory (= 同じ GCP project の OAuth client) からコピー
+3. `auth.mjs` (node.js) または auth Python script を作成
+   - SCOPES を必要分のみ列挙
+   - 既存 directory と被らない localhost port (e.g. 8370/8371/8372 → 新規 8373)
+   - login_hint に対象アカウントを指定
+4. node auth.mjs 実行 → ブラウザで承諾 → callback で token 保存
+5. token は git-crypt で encrypt して commit (= `.gitattributes` で filter=git-crypt 指定)
+
+### Scope 不足の error message
+
+```
+HttpError 403: ... insufficient_scope ...
+```
+
+→ scope 追加 + reauth が必要。 既存 token を上書きする (= 同じ credentials.json path を再書き込み)。
+
+## mimeType による分岐 (= Sheets vs xlsx)
+
+Google Drive 上のスプレッドシートには 2 形式がある:
+
+| mimeType | 形式 | 読み方 |
+|---|---|---|
+| `application/vnd.google-apps.spreadsheet` | Google Sheets native | Sheets API (`spreadsheets().values().get`) |
+| `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | xlsx (= Excel アップロード) | Drive API `files().get_media` で download → `openpyxl` で parse |
+| `application/vnd.ms-excel` | xls (= 旧 Excel) | Drive API download → `xlrd` 等で parse (= openpyxl 不可) |
+
+**Sheets API は xlsx に対して `FAILED_PRECONDITION` を返す** (= "The document must not be an Office file.")。 mimeType を見て分岐する code path が必要。
+
+**URL からの事前 hint**: 共有 URL に `?rtpof=true&sd=true` が付いている = 「Retain the original format」 = xlsx (= 元 file 形式を保持して開いている) の signal。
+
+### Pattern: 統一 reader
+
+```python
+drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+meta = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
+mime = meta["mimeType"]
+
+if mime == "application/vnd.google-apps.spreadsheet":
+    # Sheets API
+    sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    data = sheets.spreadsheets().values().get(spreadsheetId=file_id, range="A1:Z500").execute()
+elif mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+    # Drive download + openpyxl parse
+    import io, openpyxl
+    from googleapiclient.http import MediaIoBaseDownload
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, drive.files().get_media(fileId=file_id))
+    done = False
+    while not done: _, done = downloader.next_chunk()
+    buf.seek(0)
+    wb = openpyxl.load_workbook(buf, data_only=True)
+    # wb.sheetnames + wb[name].iter_rows(values_only=True)
+```
+
+## <a id="drive-query-escaping"></a>Drive の検索 query (`files.list` の `q`) に値を入れるときはエスケープする
+
+`q` の文字列リテラルは `'…'` で囲む。 中に入れる値 (file 名・フォルダ名など人が付けた名前) は **`\` を `\\`、 `'` を `\'` に置き換えてから**埋める (順序はこの順 = 先に `\`)。 しないと名前に `'` がある file で `files.list` が 400 を返す (実測)。
+
+- **壊れ方が見えない**: 「同名を探して、 あれば上書き・無ければ新規」 の code が 400 の HttpError を握って None を返すと、 「同名なし」 と同じ道に入り、 上書きされずに**同名の file を新しく作る** (共有の URL も変わる)。 エラーが出ないので気づかない
+- Drive の file / folder ID (英数字と `-` `_`) を `'<id>' in parents` に入れるだけなら壊れないが、 外から来た値を入れるなら同じ関数を通す
+- selftest は `'` と `\` を含む名前で、 組み上がった `q` を文字列で見る (fake の client は 400 を返さないので、 query の形を見ないと検出できない)
+
+```python
+def _q(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+q = f"name = '{_q(name)}' and trashed = false"
+```
+
+## <a id="drive-xlsx-inplace-update"></a>共有 xlsx の in-place 更新 (= 他人 owner の Office file に自分の行を書く)
+
+主任 / 委員会が「各自記入してください」 と Drive に置く sheet は、 xlsx のまま (= `rtpof=true`) のことが多い。 Sheets API は使えず (上表)、 画面で書くと他人の記入を壊す ([`machine-route-first.md #shared-document-write`](machine-route-first.md#shared-document-write))。 経路は **Drive API の media round-trip** 一択:
+
+1. **scope**: `drive.file` は app が作った file にしか効かない → 他人 owner の file には **full `drive`** が要る。 既存の最小権限 token に混ぜず、 **別 directory / 別 token file** で発行 (上 §「既存 client + 別 scope token」)。 consent は 1 回、 click は user
+2. **保存済 truth は `revisions.list` → 最新 revision の `revisions.get_media`** で読む。 `files.get_media` は Office 編集 mode の autosave 直後に**数分 stale な content を返す**ことがある (2026-09-05 実測: 画面で undo 済なのに旧内容が返り、 revisions は新しかった)。 verify・diff・restore の基準は常に revision
+3. **編集前 snapshot を残す** (= 復元用。 Drive 側にも revision 履歴が残るが、 手元にも 1 枚)
+4. **openpyxl で cell を書く** — round-trip で落ちるもの: 画像 / chart / 一部の条件付き書式。 残るもの: cell comment (legacy note)、 merged、 基本書式。 事前に `load_workbook` で `_images` / `_charts` / comment を列挙し、 単純な記入 sheet であることを確認してから使う。 数値は `8.0` → `8` に正規化されうる (無害)、 複数行は `\n`
+   ⚠️ (2026-09-24 追記) **openpyxl の `_images` / `_charts` の列挙では textbox・図形・checkbox (form control)・拡張の入力規則は見えない** (load の時点で捨てる = 0 に見え、 保存で相手の file から消える)。 事前の列挙は zip の XML で数える = `xl/drawings/drawingN.xml` の anchor 数・`xl/ctrlProps/*`・sheet XML の `x14:dataValidation`。 1 つでもあれば openpyxl で書かない (本人に頼む / 値だけの zip 直編集 = [`office-automation.md#xlsx-cell-value-zip-surgery`](office-automation.md#xlsx-cell-value-zip-surgery))。 機構 = [`office-automation.md#drawings-lost-in-temp-pdf`](office-automation.md#drawings-lost-in-temp-pdf)
+5. **`files().update(fileId, media_body=MediaIoBaseUpload(..., mimetype=xlsx))`** で**同じ file ID** に書く (= URL 不変、 revision に積まれる、 owner も共有設定も不変)。 `files.create` で別 file を作ってはいけない
+6. **再 download (revision) して指定 cell を literal 比較**、 不一致は exit 1。 「upload が 200 だった」 は verify ではない
+
+他人の file を書き換える操作なので、 実行は user 明示 OK 経由 (= 対外 side effect と同格)。 実装例 = 個人層の `drive-xlsx-set-cells.py` (download → snapshot → set → update → verify を 1 コマンド化、 `--inspect` / `--dry-run` 付き)。 native Sheets なら同じ位置づけの経路は Sheets API `values.update` で、 こちらは round-trip の損失が無い。
+
+## <a id="drive-folder-bulk-download"></a>Drive folder の一括 download (= list + native-export map + 再帰)
+
+配布資料が「Drive folder ごと」 で来る場合 (= 説明会資料・様式 template 一式・委員会配布物 等) に、 folder 内の全 file を local に落として保存する recipe。 scope は `drive.readonly` で足りる (= write token 不要)。 手で 1 file ずつ開いて DL するより速く、 provenance (= いつの版を取ったか) が manifest に残る。
+
+⚠️ <a id="bulk-download-restricted-copies"></a>**落とす前に配布の要領を読む** — 一括取得は folder の中を全部落とすので、 個人情報の別紙 (要領に「コピーは回収・処分」 と指定があるもの) や、 他の人の提出物の subfolder も手元に来る (実測)。 指定があるものは repo に入れず、 落としたら消して manifest からも外す。
+
+### 手順の骨格 (= 4 step、 このまま実装できる)
+
+1. **folder listing** (pagination 必須):
+   ```python
+   resp = drive.files().list(
+       q=f"'{folder_id}' in parents and trashed = false",
+       fields="nextPageToken, files(id, name, mimeType, modifiedTime, size)",
+       pageSize=200, pageToken=page,
+       supportsAllDrives=True, includeItemsFromAllDrives=True,  # 共有 drive 対応
+   ).execute()
+   # nextPageToken が尽きるまで loop
+   ```
+2. **file 種別で download 経路を分岐**:
+   - Google native (= mimeType が `application/vnd.google-apps.*`) → `files().export_media(fileId=…, mimeType=<export 先>)` (= binary 実体を持たないため export 必須、 下表)
+   - それ以外 (= PDF / xlsx / docx 等の binary) → `files().get_media(fileId=…, supportsAllDrives=True)`
+   - どちらも `MediaIoBaseDownload` で chunk 読み → `BytesIO` → file 書き出し
+3. **subfolder** (= mimeType `application/vnd.google-apps.folder`) は download せず**再帰** (dest 側にも同名 dir を掘る)。
+4. **manifest 保存**: listing の json を dest に `_drive_manifest.json` として落とす (= file 名・id・modifiedTime の provenance。 後日「更新されたか」 の diff 基準になる)。
+
+### native → export の対応表
+
+| Google native mimeType | export mimeType | 拡張子 |
+|---|---|---|
+| `…google-apps.document` | `application/pdf` (or docx) | `.pdf` |
+| `…google-apps.spreadsheet` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `.xlsx` |
+| `…google-apps.presentation` | `…presentationml.presentation` | `.pptx` |
+
+### gotchas
+
+- **native file は listing の `size` が None**: 「空 file」 と誤判定しない (= binary 実体を持たないだけで中身はある)。
+- **`export_media` は ~10 MB 上限**: 超える native doc は export が fail する — その時は UI 経由等の代替に切り替え (無理に chunk しても回避できない)。
+- **file 名は原名のまま保存** (= 「〜のコピー」 等の重複 suffix 含む): rename すると manifest との対応が切れる。 名前衝突時のみ連番 suffix。
+- **DL した様式はそのまま雛形として保存し、 fill は copy に対して行う** (= [`office-files.md`](office-files.md) の template-provenance 原則。 提出物で雛形を上書きすると再 fill・diff 検証が死ぬ)。
+
+worked example: 配布 folder 30 file (root 6 + subfolder 24、 PDF + xlsx 混在) を 1 script で取得し、 repo docs/ に binary + manifest を保存 (2026-07)。
+
+**実装**: [`scripts/drive-download-folder.py`](../scripts/drive-download-folder.py) (上の 4 step + 衝突 suffix + 失敗を数えて exit 1。 token と OAuth client は引数で受ける。 account 名で選びたいなら、 対応表を持つ薄い wrapper から `build_service` / `run` を呼ぶ)。
+
+## <a id="shared-folder-watch"></a>他人から共有された folder を読み続ける (= 宛先 account の token + 台帳 + 版の差分 + 共有通知の照合)
+
+共同作業者が Drive folder を自分の account 宛てに共有し、 以後も資料が足されていくときの配線。 一回だけ取るなら上の [一括 download](#drive-folder-bulk-download) で足りる。 読み続けるなら次の 4 点を揃える。
+
+1. **token は共有を受けた account で発行する**。 共有は宛先 account からしか見えない。 別 account の token で `files.get` すると 403 ではなく **404 (File not found)** が返り、 「folder が無い」 と見分けがつかない (実測)。 404 を見たら不在と結論する前に、 共有通知の宛先と token の account を突き合わせる。 読むだけなら scope は `drive.readonly`。 発行の直後に `about.get` の `user.emailAddress` を照合し、 違う account で承認した token は保存しない (下の §OAuth token のアカウント検証 の Drive 版)。
+2. **読みに行く folder を台帳に書く**。 folder ID・宛先 account・写しの置き場・関係する project を 1 entry にする。 folder ID と共有者名は通知メールから取り、 推測で埋めない。
+3. **版の差分で取る**。 再帰 listing の `id` と `modifiedTime` を、 前回取った版の記録 (写しの横に置く state file) と比べ、 新規と更新だけを落とす。 Drive から消えた file は写しから消さず、 件数だけ知らせる (消すかは人が決める)。 写しも state もマシンごとに持つ。
+4. **知らせる面と取る面を分ける**。 session 開始時の通知は listing だけにし (速い)、 download は明示的な sync で行う (大きな file で hook の時間制限に当たらない)。 未承認の account は、 承認されるまで通知に出し続ける。 これが人が 1 回やる操作の carrier を兼ねる。 **download の read timeout は listing と別に長く取る**: 大きなスキャン PDF では、 listing 用の短い timeout (数十秒) で 同じ file の取得が続けて切れた (実測)。 途中まで書いた file は `.part` に置き、 読み終えてから名前を変える (切れた写しを完成品と取り違えない)。
+
+**台帳に無い共有を拾う**: Drive の共有通知メール (送信元は Google の共有通知用の noreply アドレス。 手元の通知 1 通から取って query に使う) の本文から `drive/folders/<id>` / `file/d/<id>` / `docs.google.com/<type>/d/<id>` を抜き、 台帳にも無視リストにも無い id を知らせる。 共有 1 回に通知 1 通なので、 「共有に気づいた session が終わると誰も読みに行かない」 状態をこれで塞げる。
+
+**写しは git に入れない**: 第三者の資料 (スキャン・原稿) を commit しない。 project の `.gitignore` に写しの dir を入れてから台帳に足す。
+
+**取り込まないと決めた file を 1 回だけ見る**: 台帳で除外した file の奥付だけ確かめる、 のような 1 回きりの下見は、 写しと state を変えずに別 dir へ落とす (`--fetch-to DIR --only 語`。 除外した file も対象)。 写しに入れて後から消すと、 state と写しがずれる。 落とした先は一時 dir にし、 見終えたら消す。
+
+**hook 環境の依存**: 通知 hook は client library の無い python でも動くように、 REST を標準ライブラリで叩く (token の refresh → `files.list` → `alt=media` / `export`)。 refresh した access token は credential file に書き戻さない (下の §Token refresh の運用)。
+
+**実装**: [`scripts/shared-drive-folder-watch.py`](../scripts/shared-drive-folder-watch.py) が上の 4 点と通知 id の判定を持つ (標準ライブラリだけ。 台帳は YAML か JSON、 account → token の対応は台帳に書くか呼び出し側が注入)。 共有通知メールを取ってくる部分は持たない — 手元のメール経路で本文を読み、 `extract_drive_ids` と `share_notice` に渡す薄い wrapper を個人側に置く。
+
+## <a id="gmail-bulk-cleanup"></a>Gmail 一括掃除 (= batchModify TRASH + 送信者別集計 + 本文入り通知の salvage)
+
+storage 満杯対策等で Gmail を数千〜数万通単位で掃除するときの安全 pattern。 query 一発の削除より 1 段精密な「集計 → レビュー → ID list 削除 → salvage」 の流れ。
+
+### 安全機構 (= 不可逆にしない)
+
+- **削除は `messages.delete` でなく `messages.batchModify` の `addLabelIds:["TRASH"]`** (= 30 日間 undo 可能、 `removeLabelIds:["TRASH"]` で復元。 完全削除 = ゴミ箱を空にする、 は user の手操作に残す)。 batchModify は 1 call 1,000 ids 上限。
+- **削除対象はレビュー済み ID list で駆動する** (= 集計時に sender→message-ids を JSON 保存し、 削除はその ids に対して実行。 削除時に fresh query し直すと「レビューした集合」 と乖離しうる)。 trash 前に件数 assert、 trash 後に元 query 0 件 + ゴミ箱件数一致を検証。
+- **`from:` query の限界**: `+` 付き alias アドレス (`noreply+xxx@…`) に `from:` 部分一致が効かないことがある / 古いメールで query が実在数より少なく返る観測例あり (= 機構未検証)。 「残す」 と決めた送信者は事後に `in:trash from:X` で取りこぼし点呼するのが安全。
+
+### 集計 → bucket → 承認
+
+metadata batch fetch (= 本 doc §Batch request、 429 retry 込み) で From + sizeEstimate を集め、 **送信者別に件数 + 合計 MB** を出す (= サイズ帯別 〔larger:/smaller: の排他帯〕 も並用)。 削除判断は送信者 bucket 単位で人間の承認を取る。
+
+### Salvage pattern (= 一括削除の必須の対、 削除前後に回す)
+
+機械送信者のカテゴリ一括削除は「**通知メールに本文が埋まっているもの**」 を巻き込む。 purge 前にゴミ箱内の件名を pattern スキャンして外科的に復元する:
+
+- SNS 通知に **DM / メッセージ本文** (= 旧 Twitter / Facebook の「〜さんからメッセージ」 通知は本文入り。 platform 側アカウントが消えるとメールが唯一の記録。 実測で SNS 通知の過半が DM 通知だった例あり)
+- noreply 送信者に**購入レシート** (= note 等は宣伝と購入完了通知を同一アドレスから送る)
+- **全文入りのブログ更新通知** (= WordPress 系。 ブログが消えると唯一のアーカイブ)
+
+**残す / 消すの判断基準 = 「そのメールは唯一の機械検索可能な記録か」**: サービス側 (注文履歴・web) に正本があっても、 **agent がログイン必須のサイト側履歴に確実にアクセスできるとは限らない** — mail box は agent にとって最も確実な検索経路なので、 タイムライン記録 (購入・旅行・予約・人とのやりとり) は容量僅少なら残す。 配達通知のような「鮮度が命」 の類は「直近 1 ヶ月だけ残す」 折衷が効く。
+
+quota への反映 (= ゴミ箱 purge・ラグ) は次節 #storage-quota-monitoring 参照。
+
+## <a id="storage-quota-monitoring"></a>Storage quota 監視 (= about.get、 アカウント容量の唯一の機械監視点)
+
+Google アカウントの保存容量 (= Gmail + フォト + Drive の**合算** 15GB 等) を API で監視する recipe。 満杯になると**メールの送受信が止まる**ため、 溢れやすいアカウント (= フォト backup 専用サブアカウント・長年運用の主アカウント) は閾値監視の価値が高い。
+
+### 機構 fact
+
+- **Drive API `about.get` の `storageQuota` が合算 usage の唯一の API 取得点**: `GET https://www.googleapis.com/drive/v3/about?fields=storageQuota,user` → `{limit, usage, usageInDrive, usageInDriveTrash}`。 Gmail 単体 / フォト単体の内訳 field は **API に存在しない** (= 内訳は storage 管理 UI でしか見えない)。 API で分離できるのは `usage - usageInDrive` (= Gmail + フォトの合算) まで。
+- **Photos Library API は 2025-03-31 以降 app-created content 限定**: フォトの中身 (= 列挙・削除・整理) は外部 app から API 不可 → フォト起因の容量問題も **storageQuota 経由の監視が唯一の機械化点** (= 取り込み側は Picker API = user が UI で選択する半自動のみ)。
+- **最小 scope = `drive.metadata.readonly`**: about.get はこれで足りる (= file 中身への access なし)。 監視専用 token は write 系 scope と分けて発行する (= least privilege、 §OAuth scope の設計)。
+- **`limit` は GiB 基準**: 無料 15 GB plan の `limit` は `16106127360` bytes (= 15 × 2³⁰)。 10⁹ 割りで表示すると「16.1 GB」 に見える — 表示単位の混同に注意。
+
+### Gotchas (= 監視値の解釈)
+
+- **反映ラグ**: ゴミ箱 purge / 大量削除後、 usage への反映は数分〜最大 48h 遅れる。 「消したのに減らない」 の第一仮説はラグ (= 慌てて追加削除しない)。
+- **ゴミ箱も usage に乗る**: Gmail もフォトも「ゴミ箱へ移動」 では解放されない (= 空にして初めて減る。 Gmail trash は 30 日で自動 purge されるので放置でも最終的には解放)。
+- **token の account 検証**: about.get 応答の `user.emailAddress` を期待 account と照合する (= 下記 §OAuth token のアカウント検証 の about.get 版。 サブアカウント運用 = 同一ブラウザに複数 account が並ぶ環境では consent 画面の選択ミスが silent に残るので、 発行直後の 1 query 検証を必須にする)。
+
+### 運用 pattern
+
+発行は本 doc の通常手順 (= installed-app flow + localhost redirect + refresh_token 保存)。 check script は `--warn <pct>` (= 閾値超で exit 非 0) を付けておくと cron / dashboard 統合が 1 行で済む。 実装 instance (= 対象 account・保管場所・port 割当) は personal layer 側の各 API 設定リポに置く。
+
+## <a id="calendar-read-timezone-and-span"></a>Calendar の予定を読むとき — timeZone を渡し、 終わりの日まで見る
+
+Calendar API の予定を読んで日付・時刻を出す・日ごとに数える道具は、 次の 3 つを外すと、 予定のある日を空きと読む (実測)。
+
+- **読むときも `timeZone` を渡す** — `events.list` / `events.get` に `timeZone` を渡さないと、 `dateTime` は calendar 自身の timeZone で返る。
+  import した calendar などは UTC のことがあり、 文字列を切って表示する道具は 9 時間ずれた時刻を出し、 朝の予定を前の日に載せる (実測)。
+  書くときに使う timeZone と同じ値を、 読むときも渡す (読んだ現在値と新しい指定を比べる検査 = 変更後の end <= start なども、 揃えないと狂う)。
+- **終日の予定の `end.date` は排他** (最後の日の翌日)。 最後の日 = その前日。 時刻つきの予定は終わりの日まで掛かり、 翌日 0:00 ちょうどに終わる予定は 1 日の予定として扱う。
+- **複数日の予定を開始日だけで扱わない** — 一覧には終わりの日も出す (例 `2030-01-07〜01-11 終日`)。 日ごとの判定 (同じ日に在る予定・空き時間・重なり) は、 予定が掛かる日すべてに掛ける。
+  開始日だけを出した一覧から、 期間の途中の日を空きと読んで人に出した (実測)。
+  空き時間では、 時刻つきの予定を開始日は開始時刻〜24:00、 間の日は 1 日中、 最後の日は 0:00〜終了時刻に割る。 終日の予定を空きの計算に入れるかは道具の用途で決め (学会の会期のような印は入れない、 など)、 入れない場合も掛かる日の一覧には出す。
+  ⚠️ **日付を落として時刻だけを持つ写し** (開始日 + 開始・終了の時刻) を作ると、 終わりの日は戻らない。 その写しでは、 13:00〜翌日 13:00 の予定は開始 = 終了に見え、 長さ 0 の印として捨てられる。 写しを作る段で終わりの日を持たせる。
+
+実装例 = [`../scripts/calendar-events.py`](../scripts/calendar-events.py) の `last_day` / `event_days` / `day_busy` と、 `fetch` の `timeZone`。 最後の日を持たせた写し (1 件 = 開始日 `date` + 最後の日 `end_date` + 時刻) を日ごとの占有に割る例 = [`../scripts/calendar_conflicts.py`](../scripts/calendar_conflicts.py) の `event_last_day` / `event_occupancies` (規則 = [`calendar-conflict-detection.md#multi-day-events`](calendar-conflict-detection.md#multi-day-events))。
+
+## Token refresh の運用
+
+`google-auth` の `Credentials.refresh(Request())` で access_token を自動更新する。 refresh_token は通常 rotate しないが、 まれに Google 側で rotate される場合あり (= 7 日以上の長期未使用後等)。 rotate された場合は古い token が invalid_grant になるので、 再 reauth が必要。
+
+実装パターン:
+```python
+import datetime as dt
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
+# token file の expiry_date (ms epoch UTC) を naive UTC datetime に変換
+expiry = None
+if tok.get("expiry_date"):
+    expiry = dt.datetime.fromtimestamp(
+        tok["expiry_date"] / 1000, tz=dt.timezone.utc
+    ).replace(tzinfo=None)
+
+creds = Credentials(
+    token=tok["access_token"], refresh_token=tok["refresh_token"],
+    token_uri=oauth["token_uri"], client_id=oauth["client_id"],
+    client_secret=oauth["client_secret"], scopes=tok["scope"].split(" "),
+    expiry=expiry,  # ← 必須。 渡さないと creds.valid が永久 True 扱いとなり refresh 起動しない
+)
+if not creds.valid:
+    creds.refresh(Request())
+# 必要なら更新後の creds.token / creds.expiry を file に書き戻す
+```
+
+### ⚠️ Pitfall: `expiry` kwarg 不在 → refresh path が dead code
+
+`Credentials()` 構築時に `expiry` を渡し忘れると、 内部の `self.expiry = None` 状態となり `creds.expired` が False を返す (= None 比較が False)。 結果 `creds.valid = (not creds.expired) and (token is not None)` が **常に True**、 「if not creds.valid: creds.refresh(...)」 の refresh path が永久 dead code となる。 token file 内に `expiry_date` (ms epoch) を保存していても、 Credentials object に渡されなければ意味がない。
+
+**症状**: stale token (= 数日〜数週経過) で API 呼び出しが `401 Unauthorized` で fail、 script 内の「自動 refresh」 は無動作、 手動 `creds.refresh(Request())` を独立 1-liner で呼ぶと復旧する。 手動 refresh で復旧するため「token が rotate された」 と誤診しがちだが、 root は expiry kwarg 不在で refresh path が起動していないだけ。
+
+**実証** (= 2026-05-26、 `fetch-board-photos.py` で観察): 11 日経過の token で Picker session create が 401、 手動 `creds.refresh(Request())` で正常復帰 → root は load_credentials() の `Credentials()` 構築で expiry を渡していなかった。 expiry kwarg を追加した修正後、 21:11 JST に stale token (= expiry 13:11 UTC = 22:11 JST 前) で load を呼ぶと expired 判定 → refresh trigger → 新 expiry が token に書き戻される動作を smoke test で確認。
+
+**確認手段**: 既存 google-auth 利用 script の `Credentials(` 呼び出しを grep、 `expiry=` kwarg が指定されているか sweep。 大量にある場合は wrapper 関数化を検討。
+
+MCP server と Python script の同時実行で refresh が競合する可能性は理論上ある (= 両方が同時に refresh を試みて、 Google が新 refresh_token を rotate した瞬間に片方が古い token をファイルに書き戻す)。 実害は希だが、 long-running script 中は MCP 経由の同 account 操作を避けるのが安全。
+
+## Batch request で round-trip 削減 + 429 rate-limit handling
+
+多数の id を 1 件ずつ `service.users().messages().get()` (等) で逐次取得すると **HTTP round-trip 数がそのまま律速**になる (= 特に LibreSSL 等で TLS handshake が遅い環境では 1 件 ~200ms、 数百件 × 複数 account で分単位。 実例: dashboard が 540s timeout)。 `service.new_batch_http_request()` で **1 batch 最大 100 件**を 1 HTTP にまとめると round-trip を ~50-100 分の 1 にできる。
+
+```python
+def batch_get(service, ids, headers, batch_size=50):
+    results, pending, attempt = {}, list(range(len(ids))), 0
+    while pending and attempt <= 6:
+        retry = []
+        def cb(rid, resp, exc, _r=retry):
+            i = int(rid)
+            if exc is None: results[i] = resp
+            else:
+                st = getattr(getattr(exc, "resp", None), "status", None)
+                if st in (429, 500, 502, 503, 504) or st is None: _r.append(i)
+        for s in range(0, len(pending), batch_size):
+            chunk = pending[s:s + batch_size]
+            b = service.new_batch_http_request(callback=cb)
+            for i in chunk:
+                b.add(service.users().messages().get(userId="me", id=ids[i],
+                      format="metadata", metadataHeaders=headers), request_id=str(i))
+            try: b.execute()
+            except Exception: retry.extend(chunk)   # batch 全体の transport 失敗 → chunk 丸ごと
+        pending = retry; attempt += 1
+        if pending: time.sleep(min(0.5 * 2 ** attempt, 4.0))
+    return [results[i] for i in range(len(ids)) if i in results]   # 入力順を保つ
+```
+
+### ⚠️ 核心の pitfall: 429 で **半分が silent drop** → retry 必須
+
+Gmail API は **per-user 250 quota units/sec**、 `messages.get` = 5 units。 batch 100 件 = 500 units を一度に投げると **超過分 (= 約半分) が `429 rateLimitExceeded` で個別失敗**する (= 実測 288 件中 112 件)。 `new_batch_http_request` の callback は失敗を **例外として渡すだけで自動 retry しない**ため、 素朴に書くと**出力件数が黙って減る** (= 「逐次版と一致」 が壊れる)。 → 429 / 5xx / transport 失敗を callback で集めて**指数 backoff で retry** し全件取得を保証 (実測 retry で 288/288 収束)。
+
+- **batch_size は 100 ではなく 50** が良い: 単発 batch を 250 units 以下に抑えると初回 429 が減り retry round が減って **wall-time はむしろ速い** (実測 50: 5.7s/3round < 100: 9.8s/4round)。
+- **入力順保持**: callback は順不同発火なので `request_id` に入力 index を渡し最後に index 順で reassemble。
+- **fail-open**: retry 上限超過の未取得 id は drop (= 逐次版の get 例外 drop と同等)。 1 batch ≤ 100 を超えると batch 全体が HTTP 400。
+- **fmt 使い分け**: header 不要で id↔threadId 解決だけなら `format="minimal"` (= metadataHeaders 不要)、 header 要なら `format="metadata"` + metadataHeaders。
+- **検証の落とし穴**: live data を触る refactor なので「変更前 run の出力 vs 変更後 run の出力」 の件数 diff は新着 mail / slide する date 窓 / 並行 session の triage で揺れ、 真の regression と churn を区別できない。 → **同一 id 集合を逐次版と batch 版で fetch して正規化 record を同一プロセス内で比較**するのが drift-free (= message の threadId は不変なので churn 非依存)。
+
+## OAuth token のアカウント検証 (= account 取り違えの silent 化を防ぐ)
+
+OAuth token JSON (= credentials.json) には **どの account の token か** が記録されない (= access_token / refresh_token / scope のみ)。 そのため reauth フローで consent 画面のアカウント選択を誤ると、 alias と中身の乖離 (= 「業務用」 dir に「個人用」 token が入る) が **silent に残り**、 後から file を見ても判別できない。 実害: その alias を使う検索・送信が全部別 account に対して実行され、 「検索しても 0 件」 (= 別 account を見ているから当然) を「source 不在」 と誤結論する。
+
+### 防止策 (2 段)
+
+1. **reauth 時に login_hint で正しい account を事前選択**: consent URL に `&login_hint=<email>` を付けると Google が該当 account を事前選択し、 手動選択ミスを減らす (= email は平文 git に hardcode せず、 暗号化済 config から実行時取得)。
+2. **token 取得後に getProfile で account 検証**: 保存した token で `users().getProfile(userId='me')` (gmail) / userinfo (他 API) を叩き、 emailAddress を期待値と照合。 不一致なら token を削除して fail させる (= silent 保存を構造的に防ぐ)。 token JSON に email が無いので、 この 1 query が唯一の判別手段。
+   ⚠️ **この検証は hard-fail であること (= 空振り禁止)**: 期待 email の解決 (= 暗号化 config の読取り) や getProfile 呼び出しは「config が locked / 欠落」「network 一時失敗」で**黙って skip されがち** = 補償制御が自分で自分を無効化する。期待値を解決できない consent は**既定で中止**し (config unlock を案内)、 意図して未検証で進むときだけ明示 flag で override。 getProfile 失敗も quiet skip でなく retry + 「未検証」 の明示表示にする。 これは「条件付き発火 mechanism の非活性を可視信号化せよ」 ([`convention-design-principles.md#conditional-firing-visibility`](../docs/convention-design-principles.md#conditional-firing-visibility)) の security-control 版。 (⚠️ 区別: hard-fail は**守り** 〔= 通す/止めるを決める gate〕 の規範。 監視・surfacing 系 script の fail-open 〔= 壊れても他の作業を止めず「未チェック」 を可視化する〕 とは責務が逆で矛盾しない — 守りの失敗は進行を止める、 監視の失敗は報せる。)
+
+### 検索結果が「らしくない」 時の reflex
+
+MCP / API の検索結果が期待と違う account の中身ばかり返る (= 業務 account のはずが個人購読 newsletter ばかり) なら、 token が別 account を指している疑い。 `getProfile` で接続先 account を直接確認する。 一般原則は [`debugging-discipline.md` mcp-zero-result-not-absence](debugging-discipline.md#mcp-zero-result-not-absence) 状態 (c) tool 接続先誤り。 reauth フローの login_hint + getProfile 検証の実装は各 MCP 設定リポ側 (= personal layer)。
+
+## <a id="oauth-loopback-hardening"></a>OAuth consent フロー (loopback) の CSRF / code 横取り対策
+
+デスクトップ / native app 型 OAuth は `http://127.0.0.1:<port>` に consent 結果を受ける loopback listener を立てる。この listener は **同一マシンの他プロセス / ブラウザ上の drive-by web page** から触れる (= `fetch("http://127.0.0.1:PORT/?code=…")` は cross-origin でも fire-and-forget で届く)。素朴実装は 3 つの穴を持つ:
+
+- **偽 code の先着 (login-CSRF)**: consent 待ちの窓に攻撃者が自分の authorization code を先着させると、**攻撃者アカウントの token が user の alias に保存**され、以後の読み書きが攻撃者側 mailbox を向く (= data exfiltration)。
+- **単発 listener の DoS**: `server.handle_request()` 1 回だけだと、無関係 / 偽 request 1 発で本物の callback も潰せる。
+- **手動 URL 貼付 fallback の phishing**: 「localhost refused」 画面の URL を貼らせる経路は、別フロー / phishing された URL を貼らせる窓。
+
+対策 (Python stdlib だけで実装可能):
+
+1. **state nonce**: consent URL に `&state=<secrets.token_urlsafe(24)>` を付け、callback は **state 一致の request だけ受理**。不一致は 400 で無視し、**deadline まで本物を待ち続ける loop** にする (= per-request timeout を短くして `while` で回す。単発 `handle_request` にしない)。
+2. **PKCE (S256)**: `code_verifier` (48B) + `code_challenge = BASE64URL(SHA256(verifier))` を consent に付け、token 交換に `code_verifier` を必須化。万一 code を横取りされても、verifier を知らない攻撃者は交換できない。
+3. **手動貼付でも state を検証**: 貼られた URL の state を照合し、不一致は拒否 (= phishing URL は貼っても弾かれる)。
+4. **補償制御は hard-fail**: 上記「account 検証」節の getProfile 照合が空振りする状態 (期待 email 未解決) では consent に進まない。
+
++ **入口で識別子を検証**: reauth engine は alias / account 名を **filesystem path** と **`pgrep -f "…/${alias}/…"` pattern** に流すことが多い。alias を plain token (`A-Za-z0-9_-`) に検証しないと、`..` で path traversal / `|` で pgrep の ERE が alternation 化し **kill 対象が任意プロセスに化ける** (confused-deputy)。引数は入口で charset 検証する。
+
+⚠️ **consent URL 自体が secret を運ぶ (= 1-3 の残余経路)**: URL には `state` と `code_challenge` が載る。browser 起動でこれを **argv** に渡す (`open <url>` / `xdg-open <url>`) と、他 local user が `ps` で読める窓ができる (macOS は他 user の argv を隠さない。drive-by web page は ps を読めないのでこの経路は「別 local user」脅威モデル限定)。採取した URL のまま自分の account で consent を完了した攻撃者の code は、採取した challenge に bound され本物の verifier で交換が通り state も一致 = **1-3 を全部通過する**。∴ **4 (account 検証の hard-fail) がこの経路の backstop** — 期待 account 照合を持たない flow では 1-3 だけだと login-CSRF がここから復活する (= 4 点 set から削らない。緩和 = URL を argv に載せない起動経路: macOS は `osascript -e 'open location (system attribute "VAR")'` + env 経由で argv には env **変数名**しか出ない — reference 実装は 2026-08-18 にこの経路へ移行済。Linux の `xdg-open` は URL を argv に取る以外の汎用入口が無く**残余として残る** — 他 local user の居る Linux では stdout 印字 URL の手動 click を推奨)。
+
+実装済 reference: gmail MCP reauth engine ([`gmail-mcp-multiaccount.md`](gmail-mcp-multiaccount.md) invariant 7-8、hermetic test 付き)。**同型の loopback OAuth フローを他にも持つなら同じ hardening を横展開する** (どのフローが未対応かは公開面に書かず個人層で追跡)。
+
+## documentation の義務
+
+GCP project に紐づく以下の情報は**個人層 (= layer 3) の secrets-related docs に明記**しておく:
+
+- **project owner email**: 管理操作 (API enable / OAuth client / quota / billing) に使うアカウント
+- **project_id + project_number**: URL 組み立てに使う stable identifier
+- **enable 済 API のリスト**: 新 setup 時の参考、 API 追加時の更新対象
+- **OAuth client 共有 status**: 同じ client を複数 directory (e.g. gmail-mcp + calendar + classroom + sheets) で使い回す pattern なら、 client rotate 時の影響範囲
+
+これがないと、 multi-account 持ち user / Claude が「どのアカウントで GCP コンソール開けばいいか」 で繰り返し混乱する。 owner email は public docs (= claude-config 等) では PII になるので、 個人層に書く。
+
+## Cloud Identity Groups API (= group owner level CRUD)
+
+Workspace 内の Google Groups (= ML) の購読者管理を **caller が Workspace admin でなくても group owner なら API 経由で実行できる**経路。 Admin SDK Directory API (= `admin.googleapis.com`) との分離を理解する。
+
+### 2 API の使い分け
+
+| API | endpoint | 権限要件 | 用途 |
+|---|---|---|---|
+| **Admin SDK Directory API** | `admin.googleapis.com` | **Workspace admin 必須** | 全 group / 全 user を横断管理 (= Workspace 全体) |
+| **Cloud Identity Groups API** | `cloudidentity.googleapis.com` | group OWNER role で OK (= Workspace admin 不要) | 自分の所有 group の memberships を CRUD |
+
+「Workspace admin 権限がない member が自分の所有 group を管理する」 use case では Admin SDK は使えないが、 Cloud Identity Groups API で代替できる。 **「Workspace admin = なし」 で諦めずに Cloud Identity 経路を試す**のが reflex。
+
+### OAuth scope
+
+- `https://www.googleapis.com/auth/cloud-identity.groups.readonly` — read only (= memberships.list 等)
+- `https://www.googleapis.com/auth/cloud-identity.groups` — full read + write (= memberships.create / delete 含む)
+
+owner level の write には `cloud-identity.groups` (= full) が必要だが、 caller の権限が「group OWNER」 なら scope は通る (= Workspace admin role は不要)。
+
+### 主要 method
+
+- `groups.lookup` (= email → group resource name): query param `groupKey.id` に group email を渡して `groups/{group_id}` 形式の resource name を取得
+- `groups.memberships.list` (parent=`groups/{id}`): membership 一覧
+- `groups.memberships.create` (parent=`groups/{id}`, body=`{preferredMemberKey: {id: <email>}, roles: [{name: "MEMBER"}]}`): add
+- `groups.memberships.delete` (name=`groups/{id}/memberships/{membership_id}`): delete
+
+### caveat
+
+- **`memberships.list` の default view では `createTime` が返らない** (= 簡略 view、 `(no time)` で出力)。 詳細 view (`view=FULL` query param) で取れる可能性、 当面未検証
+- **delivery 状態 (= 配信エラー有無) は API 経由では取得不能**: UI からの CSV export なら取れる。 audit には UI export を quarterly / yearly で取って diff 取る運用が推奨
+- **`nickname` field (= UI 表示名 hint) も API 経由では取得不能**: 同上 CSV 経由
+- **組織外 address の add は Google アカウントに紐づくかで分かれる** (実測): 個人 gmail のように Google アカウントを持つ address は `memberships.create` で入る。 大学・ISP の独自ドメインのように Google アカウントに紐づかない address は error 2028 で拒否され、 group owner が Groups の web UI から足すしかない。 「外部 address は API 不可」 と一括りにせず、 まず API で試し、 2028 が返った address だけ web UI に回す
+
+### 実証 / 動作確認パターン
+
+新規 setup の検証は read → write の 2 段:
+
+1. **read 実証**: `groups.lookup` + `memberships.list` で member 数が UI 表示と一致するか
+2. **write 実証**: 自分の別 alias (= 副作用最小、 add → list 確認 → delete → list 確認の cycle) で create + delete が success するか、 ML state 原状復帰確認
+
+caller permission が API server 側でどう扱われるか docs に明記されていない部分があるため、 試行で実証して確度を確定するのが効率的。 setup コスト ~30 分 vs UI 操作の生涯コストを比較すれば実証投資は ペイする。
+
+### Admin SDK 経路が NG と判明したときの reflex
+
+1. user 確認「Workspace admin か?」 → `admin.google.com` ログイン可否で判定 (= 「管理者アカウントでログインしてください」 表示なら admin なし)
+2. admin なし → **Admin SDK Directory API の前に Cloud Identity Groups API を試す** (= 「admin なし = 全 API NG」 と短絡しない)
+3. group の OWNER role を caller が持っていれば Cloud Identity 経路で write OK の可能性高、 試行で確定
+
+これは「**user 確認 = mechanism 確定と短絡しない**」 reflex の典型 application (= confidence escalation 防止、 user の claim level fact 〔= 「admin かどうか」〕 から mechanism level 〔= 「全 API NG かどうか」〕 への jump を避ける)。
+
+### <a id="group-membership-without-owner"></a>owner でない group の購読者を知りたいとき (ML 宛に送る前に「入っていない人」 を見分ける)
+
+ML 宛に送る用件で、 **届けたい人がその ML に入っているとは限らない** (新任・後から加わった分野の人・ML ができた後の異動)。
+自分が owner / manager でない group では `groups.lookup` が 403 (`Permission denied for resource <group> (or it may not exist)`) になり、 購読者一覧は読めない (実測)。 そのときは過去のメールから推す:
+
+1. その ML 宛の過去のメールを数か月分引き、 **To / Cc の全体**を並べる (件名だけでなく header を読む。 `account-direct.py <account> get <id>` 等)。
+2. **他の送り手が毎回 ML と並べて個別に宛先に足している人は、 ML に入っていない**と読む (送り手たちがそれを知っているから足している)。
+3. 投稿が `'<名前>' via <ML>` と表示される人は、 ドメイン外のアドレス (私用アドレス) で ML に入っている。 ドメインのアドレス宛の用件はそこに届かない可能性がある。
+4. 組織の公開の名簿 (学科・部署の教員一覧) と突き合わせ、 ML に一度も出てこない人を拾う。
+5. 送るときは ML を To に置き、 入っていないと推した人を**個別に To に足す** (重複して届くのは害が小さい)。 宛名は ML の宛名 1 つにし、 足した人の名前は並べない。
+6. これは推定であって一覧の確認ではない。 誰が入っていないと推したかを、 非公開の連絡先の記録に書いておく (次に送る人が同じ調査をしない)。

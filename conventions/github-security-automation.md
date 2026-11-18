@@ -1,0 +1,405 @@
+<!-- doc-meta
+when: repo の Dependabot/CodeQL/Semgrep baseline や Dependabot PR を扱うとき + private repo の workflow が一斉に数秒で red になったとき / private に検査の workflow を置くとき (#private-actions-minutes) + Dependabot の PR と人の PR を毎日の定期の仕事で片づける仕組みを作る・直すとき (#daily-pr-routine)
+category: infra
+summary: 全 repo 横断の Dependabot/CodeQL/Semgrep/auto-merge baseline + Free plan silent rejection + private repo の Actions 分数上限 (= per-push 検査で枠を使い切ると全 workflow が未起動 red、 検査は手元へ = local-ci.py、 #private-actions-minutes) + Dependabot PR tier-based merge discipline + supply-chain hardening (= cooldown + action SHA pin + dependabot.yml 編集で即時 scan burst #supply-chain-hardening) + ESM migration backwards-compatible normalizer + `gh` CLI gotcha (= users/X/repos public-only / mergeStateStatus UNKNOWN retry) + bash set -e + heredoc + $() interaction fix + monorepo dependabot.yml directories+groups + cascading PR convergence loop + 毎日の PR の対応 (= Free private の Dependabot の patch・minor を決定的に merge、 残りは道具なしの model の判断と文案を人に渡す、 #daily-pr-routine)。 finding の読み書きは sibling semgrep-ci.md
+-->
+# GitHub Security Automation
+
+Repo 群を横断する **Dependabot / CodeQL / Semgrep / auto-merge** 系の自動化 + 関連 gotcha の規約。 ある GitHub user / org が一定数 (= ~10+) の repo を抱えるようになった時点から有用。
+
+## <a id="baseline-config"></a>1. Baseline 構成 (= 全 repo 共通)
+
+```
+[1] Dependabot alerts (= vulnerability-alerts) ─── 全 plan 無料、 全 repo に有効化
+[2] Dependabot security updates (= automated-security-fixes) ── 全 plan 無料、 自動 PR
+[3] Dependabot version updates (= .github/dependabot.yml) ──── code repo に monthly schedule
+[4] CodeQL Default (= 公開 repo は無料、 private は GHAS 必要) ── 公開 code repo に対し有効化
+[5] Semgrep ─────── private code repo に対し。 Actions の分数を食うので、 お金をかけないなら手元で回す (#private-actions-minutes)
+[6] Dependabot auto-merge workflow ─── github-actions + patch/minor を自動 merge
+[7] branch protection (= main の force-push / delete 禁止) ── 公開 repo は無料、 private は Pro 必要
+[8] Push protection + Private vulnerability reporting ────── 公開 repo は無料
+```
+
+各 step は **idempotent** に design すること (= 既設定なら no-op)、 新 repo 作成時の reproducibility を担保。
+
+## <a id="free-plan-silent-rejection"></a>2. Free plan の silent rejection に注意
+
+GitHub Free plan + private repo で **API は 200 を返すが設定は反映されない** silent rejection が複数機能で発生:
+
+| API | Free private 挙動 | 対処 |
+|---|---|---|
+| `PATCH repos/{r} -F allow_auto_merge=true` | 200 OK だが state は false のまま | verify-after-write (= GET で実 state 確認) |
+| `PUT repos/{r}/branches/{b}/protection` | 403 "Upgrade to GitHub Pro" | error 期待、 set +e / set -e で wrap |
+| `PATCH repos/{r}/code-scanning/default-setup -F state=configured` | 403 "Advanced Security must be enabled" | error 期待 |
+| `PATCH repos/{r} -F security_and_analysis[secret_scanning_push_protection][status]=enabled` | 200 OK だが state は disabled | verify-after-write |
+
+**規律**: setting 変更系 API は必ず write 後に read で verify、 報告は実 state ベース。 「API が 200 返したから success」 を rely しない。
+
+### <a id="visibility-change-drops-settings"></a>public → private に倒すと、 既に効いていた設定が黙って外れる
+
+上の表は **private repo に設定しようとした**ときの話だが、 逆向き — **public で有効だった設定を持つ repo を
+private に変える** — でも同じことが起きる。 baseline を適用済みの公開 repo を非公開にすると、
+Free plan では次が**警告なしに無効化される**:
+
+| 機能 | public (Free) | private に倒した後 |
+|---|---|---|
+| CodeQL default setup | 有効 | `403 Code scanning is not enabled for this repository` |
+| branch protection (force-push / delete 禁止) | 有効 | `403 Upgrade to GitHub Pro or make this repository public` |
+
+**課金は発生しない** (= 有料 plan へ勝手に上がるのではなく、 機能が消える)。 問題は
+**setup 時の記録が「適用済」 のまま残ること** — 後から見ると守られているように読めるので、
+visibility を変えた turn に **実 state を読み直して記録を訂正する** (= 上と同じ verify-after-write の、
+write が visibility 変更である場合)。
+
+⚠️ 失われるのは「事故を止める側」 の設定なので、 非公開に倒した repo では
+force-push と branch 削除が素通りになる。 その repo を扱う手順の側で補う。
+
+### <a id="private-actions-minutes"></a>private repo の Actions は月の分数に上限がある — per-push の検査は枠を使い切る
+
+public repo の GitHub-hosted runner は無料で上限が無いが、 **private repo は account 全体で月の分数に上限がある**
+(Free plan。 超過分は支払い方法と spending limit しだい)。 上限を越えると以後の run は **数秒で failure** になり、
+job は runner に載らないまま残る (`runner_name` 空・steps 0、 annotation = 「recent account payments have failed or
+your spending limit needs to be increased」)。 **コードの失敗ではない**のに、 その account の private repo の
+全 workflow が一斉に red に見える (検査でない定期 job も、 Dependabot の PR に反応する auto-merge の workflow も止まる。 Dependabot が PR を作る更新そのものは、 枠が切れている間も PR を作った = 実測)。
+
+- **枠に収まる形** (実測): 食うのは「毎 push の Semgrep」 で、 `paths` filter つきの軽い検査 (code を触った push だけ走る、 1 run 1〜2 分) は月の枠に収まる。 戻すなら Semgrep は `schedule` (weekly) + `workflow_dispatch` だけにして push / pull_request の trigger を外し、 軽い検査は per-push のまま enable する。 どの repo を戻したかは非公開層の記録が正本。 ⚠️ 使い切った月の残りは enable しても起動されない (枠が戻る月初から)
+- **使い切る形**: push の多い private repo に per-push の検査 (Semgrep / test) を置く。 実測: push の多い private
+  repo 1 本の per-push Semgrep が月の枠の大半を占めた。 `paths` filter を持たない workflow と、 無人 commit
+  (heartbeat 等) を受ける repo が危ない
+- **見分け方**: red の run の jobs を読み、 全 job が `runner_name` 空かつ steps 0 なら未起動。 検出器 =
+  [`scripts/check-ci-red.py`](../scripts/check-ci-red.py) (未起動を件数に数えず 🧾 の 1 行に分ける)。
+  使用量の API (`/users/<u>/settings/billing/usage`) は token に `user` scope が要る (`gh auth refresh -h github.com -s user` → ブラウザで device code を承認)。
+  token は機械ごと: 権限はコードを発行した機械の gh に入る (承認に使うブラウザがどの機械かは関係しない)。 別の機械で打った refresh のコードを入れると、 そちらの機械の gh に入る (実測)。
+  scope があれば正式な値 = [`scripts/actions-billing-usage.py`](../scripts/actions-billing-usage.py) (private repo の分を SKU の倍率つきで枠と比べ、
+  今月なら月末の見込み、 請求の net 合計。 請求 0 でも枠を超えた月は spending limit で止まった可能性として出す)。
+  **人が覚えて見に行く形にしない** = 手元の定期の検査 (local-ci など) に `--alert <PCT>` で入れ、 月末の見込みが枠の PCT% を超えた日だけ落ちるようにする
+  (PATH の細い hook から呼ばれても gh を Homebrew の既定の場所で探す)。 scope が無いときの見積もり =
+  [`scripts/actions-usage-estimate.py`](../scripts/actions-usage-estimate.py) (run の履歴を repo 全部で集め、 workflow ごとに
+  回数と run 単位で切り上げた分を出す。 請求額そのものではない。 `--since` で、 止めた後に漏れが無いかを見る)
+- **お金をかけないなら private の検査は手元へ**: 検査の workflow を止め (`gh workflow disable` = 可逆、 file は
+  残る)、 同じ検査を手元で回す。 ⚠️ **「手元で回す」 は放っておくと「誰も回さない」 になる** — 実行と結果の
+  表示を、 人が毎回見る面 (session 開始の hook など) に置く。 runner = [`scripts/local-ci.py`](../scripts/local-ci.py)
+  (repo × 検査の一覧を config に持ち、 対象 path の最終 commit が変わったものだけ回し、 red / 回せない /
+  長く回っていない を 1 行ずつ出す)
+- **手元の scan は平文を読む**: git-crypt で暗号化して保存した secret は、 remote では暗号文なので CI の secret
+  検出には掛からないが、 手元では毎回掛かる。 暗号化 file を scan から外す (local-ci.py の `@exclude-git-crypt`)
+- **CI が止まっている間に、 鍵の無い環境を手元で再現する**: git-crypt の repo を unlock せずに
+  `git clone <手元の path> <一時 dir>` すると、 暗号化 file は CI と同じく暗号のまま置かれる。 その clone の中で
+  検査を回せば、 「鍵の無い環境で暗号化 file を読む検査が落ちないか」 を CI を待たずに確かめられる。 sibling repo を
+  読む検査は手元の unlock 済みの repo を見るので、 この方法で確かめられるのはその repo の中で閉じた検査だけ
+- **`|| true` の検査は CI にあっても何も知らせていない**: SARIF を artifact に置くだけの Semgrep は red にならず、
+  artifact を読みに行かない限り新しい finding は誰にも見えない。 手元へ移すときに finding で落ちる形
+  (`--error`) にすると、 置き換えが監視の強化になる
+- **新しい private repo を作る道具** (baseline を配る script) も同じ判断に揃える。 揃えないと、 止めた
+  per-push の検査が次の repo で復活する
+
+## <a id="auto-merge-workflow"></a>3. Auto-merge workflow の設計
+
+### Trigger 選定
+
+```yaml
+on: pull_request_target
+```
+
+`pull_request` ではなく `pull_request_target` を使う。 理由:
+
+- `pull_request` = fork PR で secrets 不可、 Dependabot bot もこれに該当
+- `pull_request_target` = base branch context で動作、 `GITHUB_TOKEN` の write 権限あり
+
+**Security note**: `pull_request_target` は PR の HEAD コードを `actions/checkout` で取り込むと untrusted code 実行リスク (= GitHub Actions security docs 頻出警告)。 本 pattern は **checkout なし**で `gh pr merge` のみ呼ぶため typical vuln を構造的に回避。
+
+### Capability check で Free private 対応
+
+`allow_auto_merge=false` な repo で `gh pr merge --auto` を呼ぶと "Auto-merge is not allowed" で job fail → user が毎 PR で red X を見る。 これを notice 化:
+
+```yaml
+- name: Check auto-merge capability
+  id: capability
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: |
+    available=$(gh api "repos/${{ github.repository }}" --jq '.allow_auto_merge')
+    echo "available=$available" >> "$GITHUB_OUTPUT"
+    if [ "$available" != "true" ]; then
+      echo "::notice::auto-merge unavailable (likely Free plan + private). PR will remain open for manual merge."
+    fi
+
+- name: Auto-merge safe updates
+  if: |
+    steps.capability.outputs.available == 'true' && (
+      steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+      steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+      steps.meta.outputs.package-ecosystem == 'github-actions'
+    )
+  run: gh pr merge --auto --squash --delete-branch "$PR_URL"
+```
+
+Pro / 公開 repo では auto-merge 動作、 Free private では notice + 手動 merge。
+
+### Auto-merge 対象の safety cutoff
+
+- 全 `github-actions` ecosystem (= deterministic action name + version 変更のみ)
+- 他 ecosystem の `patch` + `minor` semver update
+
+`major` は **review に残す** (= semver で breaking 可)。 composite (= 1 PR で複数 package) も判定不能なので残す。
+
+## <a id="workflow-permissions"></a>4. Workflow permissions: explicit declaration
+
+CodeQL の `actions/missing-workflow-permissions` 警告は **default token が write 過剰** なため。 minimum 権限を explicit に宣言:
+
+```yaml
+permissions:
+  contents: read   # 読み取りのみ workflow
+  # または
+  contents: write  # commit/release/tag が必要なら
+  pull-requests: write  # PR コメント / merge
+  security-events: write  # SARIF upload
+```
+
+migration 時の判定:
+- workflow が `git push` / `gh release create` / `gh pr create` / `peter-evans/create-pull-request` / `EndBug/add-and-commit` 等 write 系 keyword を含む → `contents: write`
+- それ以外 (= checkout + test + upload-artifact) → `contents: read` で足りる
+
+upload-artifact は contents 権限と独立 (= 必要なら `actions: write` を別途)。
+
+## <a id="monorepo-dependabot-yml"></a>5. Monorepo dependabot.yml
+
+サブディレクトリに manifest がある (= e.g. `package.json` が `/sheets/`, `/classroom/` 等に分散) repo は `directory: "/"` 単独では検出不能。 `directories:` (= plural、 list) + `groups:` で対処:
+
+```yaml
+version: 2
+# ⚠️ 各 update block に `cooldown:` を足す (= 2026-09-02 追記、 §Semgrep 定型 finding 参照。
+#    無いと dependabot-missing-cooldown が毎回鳴る)
+updates:
+  - package-ecosystem: "npm"
+    directories:
+      - "/sheets"
+      - "/classroom"
+      - "/photos-picker"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 10
+    groups:
+      monorepo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+```
+
+`groups:` で minor/patch を 1 PR に集約、 major は個別 PR でレビュー。 limit を 10 程度に上げる (= subdir × ecosystem × group で PR 数増加するため)。
+
+## <a id="dependabot-pr-tier-discipline"></a>6. Dependabot PR review tier discipline
+
+PR を流入させた時の **risk 分類 + 判断基準**:
+
+| Tier | 内容 | 判断 |
+|---|---|---|
+| 1 | patch / constraint update (= 例: `>=6.0 → >=6.0.3`) | semver 後方互換、 即 merge OK |
+| 2 | github-actions major (= 例: `actions/checkout 4→6`) | release notes で output 互換確認後 merge。 通常 backward compat |
+| 3 | 同 major 内 minor/patch composite (= 複数 package を 1 PR で) | diff が lock file のみなら merge、 source 変更含むなら manual review |
+| 3 | huge version jumps (= 例: `googleapis 144→171`) で **同 monorepo 内の sibling subdir に migration 適用済**な場合 | migration pattern proven、 merge |
+| 4 | library 自体の major 移行 (= 例: `Eleventy 2→3`、 `Express 4→5`) | **local build test 必須**、 必要なら backwards-compatible normalizer を先 land + Dependabot PR は後追い merge |
+
+Tier 4 の例:
+- `@11ty/eleventy-plugin-rss` v2 → v3 で ESM 化、 `require()` が `{default: fn}` 返す → `addPlugin(obj)` reject
+- Fix: `const x = raw.default || raw;` で normalize (= v2 でも v3 でも動く)
+- 順序: 1) normalizer fix を main に commit、 2) Dependabot PR merge で実バンプ、 3) normalizer の fallback が活きる
+
+### Tier 4 の「local build test」 が build を持たない project (= 自作 MCP server 等) では何を指すか
+
+build step を持たない runtime project (= 自作 MCP server、 CLI、 script 群) の major dep bump では「build test」 の中身を明示する必要がある。 特に **自作 MCP server は API client (`googleapis` 等) を lazy 構築する** (= 初回 `tools/call` まで未構築) ため、 stdio `initialize` handshake は server boot + protocol negotiation のみ確認し、 **その依存を一切 exercise しない**。 → handshake PASS は major dep bump の検証として **不十分**、 read-only な `tools/call` を投げて**実 API round-trip**まで確認する (= 手順は [`mcp.md` handshake-not-dependency-check](mcp.md#handshake-not-dependency-check))。 staged verification (= 1 dir bump → bump 前と live 結果比較 → 全 dir 展開) で blast radius 最小化。
+
+### <a id="node-modules-follow-lockfile"></a>merge しても各マシンの node_modules は追従しない (2026-10-03)
+
+依存の版上げ PR を merge / pull しても、 git が運ぶのは `package.json` と `package-lock.json` だけで、 各マシンの `node_modules` は最後に install した版のまま残る = lockfile の版と実際に動く版が黙ってずれる (検証した版が本番で動いていない)。 自作 stdio MCP server なら session 開始の bootstrap が、 lockfile と npm の hidden lockfile (`node_modules/.package-lock.json`) の版を突き合わせ、 ずれていれば `npm install` する ([`scripts/bootstrap-stdio-mcps.sh`](../scripts/bootstrap-stdio-mcps.sh)。 他 platform 用で入っていない package は数えない)。 無人で全マシンに入るので `--ignore-scripts` で入れ、 lockfile に install script を持つ package (`hasInstallScript`) があれば自動では入れず 1 行出して人の確認に回す (= 供給網の悪意ある postinstall を session 開始で全マシンに走らせない)。 registry に載らない dir (OAuth の consent だけの helper 等) は追従の射程外 = その dir の script を走らせる直前に `npm install`。
+
+### <a id="requirement-floor-vs-python"></a>pip の「update X requirement」 は下限と一緒に Python の版の下限も上げることがある (2026-10-03)
+
+`requirements.txt` の `>=` の下限を最新へ引き上げる PR は、 CI (新しい Python) では緑でも、 新しい下限の版が `requires_python` で古い Python を切っていれば、 その Python の利用者は `pip install -r` が通らなくなる (実測: numpy `>=2.5.3` = Python 3.12 以上、 Pillow `>=12.3.0` = 3.10 以上、 fonttools `>=4.66.0` = 3.11 以上。 macOS の `/usr/bin/python3` は 3.9)。 merge の前に `https://pypi.org/pypi/<pkg>/<ver>/json` の `requires_python` を見る。 下限を上げる理由 (security alert・使う API) が無いなら閉じ、 繰り返し来るなら dependabot.yml の pip に `versioning-strategy: increase-if-necessary` (= 今の範囲で満たせるなら下限を動かさない)。 依存を `==` で固定した repo で、 その固定が要る Python の下限を PyPI から機械で出す道具 = [`scripts/python-pin-floor.py`](../scripts/python-pin-floor.py) (宣言 `.python-version` と照合する。 宣言の書き方 = [`python-env.md#python-env-declare`](python-env.md#python-env-declare))。
+
+### <a id="local-bump-respects-cooldown"></a>手元でまとめて上げる時も cooldown を守る (2026-10-03)
+
+手元で版を上げる command (lockfile が重なる monorepo の PR をまとめて当てる `npm install <pkg>@^X`、 PR の出なかった dir の警告を直す `npm update <pkg>` / `npm audit fix` = [§6 の下の節](#security-update-partial-dirs)) は、 どれも npm が範囲内の最新を解決するので、 Dependabot が cooldown で見送った公開直後の版が入る (実測: `@modelcontextprotocol/sdk@^1.30.1` が前日公開の 1.32.0 に解決。 `npm update` でも cooldown より新しい版を引いた)。 当てた後に、 変わった package の公開日 (`npm view <pkg> time`) を cooldown 日数と突き合わせ、 新しすぎるものは Dependabot の提案した版に固定する。 Dependabot は main に同じ版が入ると元の PR を自分で閉じる。
+
+### <a id="pinned-env-lockfile-major-bump"></a>版を固定した解析環境で、 lock file だけを変える間接の依存の major の上げ (2026-11-09)
+
+脆弱性の修正が間接の依存 (repo の code は直接使わず、 別の library が引く) の major の上げで、 PR の差分が lock file だけのとき、 当てる前に 2 つを確かめる:
+
+- **lock を使う人の道具の版で読めるか**: PR の lock は Dependabot の側の新しい道具が書くので、 書式の番号 (uv.lock の `revision` など) が上がっていることがある。 lock を使う人の手元の版 (結果の記録に書いた版) を一時 venv に入れ (`pip install 'uv==<版>'`)、 PR の lock で `uv lock --check` と `uv sync --locked` を回し、 lock が書き換わらないことを `cmp` で見る (実測: 書式の番号が 2 つ上がった lock を、 古い版の uv がそのまま受け入れた)。
+- **その依存の役目で出力が変わらないか**: 先に何に使われているかを確かめ (repo の code が直接 import するか、 どの library が引くか)、 その役目の出力を新旧の環境で比べる。 図を読み書きする画像の library なら、 同じ図を PNG・JPG・TIFF・PDF・SVG に書いて byte で比べ、 書き出し中の非推奨の警告を数える (PDF・SVG は作成日時と乱数の ID が毎回変わるので、 その差だけかを見る)。 数値の library の版が lock の差分で動いていないことも見る。
+
+実測で通った当て方 = PR の merge でなく、 PR の head の lock を main に写して path を明示して commit する (確かめたことを commit message に書ける)。 ⚠️ 警告は GitHub の依存の一覧 (dependency graph = `repos/<r>/dependency-graph/sbom` で読める) が数え直されて初めて閉じる。 uv の lock では、 lock を足したときには走った数え直しの job (Actions の一覧の `Graph Update: uv in <dir>`) が、 直した lock を main に push してから 45 分たっても走らず、 警告も PR も開いたままだった (実測)。 push の後に「閉じた」 と報告せず、 依存の一覧の版を読んで確かめ、 閉じていなければ開いた警告を毎日出す surface に任せる。
+
+### <a id="security-update-partial-dirs"></a>Dependabot security-update PR は monorepo の全 manifest を cover しないことがある
+
+`directories:` 設定の monorepo で、 同一脆弱 package が複数 subdir の lockfile に出ても、 Dependabot の **security-update PR は一部 dir のみ生成される** ことがある (= rate-limit / batching)。 partial PR だけ merge すると残 dir の alert を見逃す。 → **全 affected dir 横断の local `npm audit fix` (non-`--force`) の方が完全**。 local fix → push → 残った partial PR は supersede として close、 が確実 (= §10 cascading loop に乗せて PR を 1 件ずつ追う より速い)。
+
+- **残った dir と包みは PR の一覧でなく警告の一覧から読む** (PR の無い dir は PR の一覧に出ない): `gh api --paginate 'repos/<owner>/<repo>/dependabot/alerts?state=open&per_page=100' --jq '.[] | [.dependency.manifest_path, .dependency.package.name, .security_vulnerability.first_patched_version.identifier] | @tsv'`。 lock の版と突き合わせ、 警告の数え直しの遅れでなく直る前の版が残っていることを確かめてから直す。
+- **間接の依存の警告の包みだけを上げる形** = dir ごとに `npm update <警告の包み…> --package-lock-only --ignore-scripts`。 親の依存の semver の範囲で上がるので major は動かず、 package.json は変わらない (実測)。 上げた後に lock の差分の版を数え、 名指さなかった包み (警告の包みの下の依存) が動いていればそれも報告に書く。
+- **当てた後に公開日を cooldown と照らす** ([#local-bump-respects-cooldown](#local-bump-respects-cooldown))。 新しすぎる版は、 警告の直る版のうち同じ repo のほかの lock がすでに使っている版に、 lock の項目 (version・resolved・integrity) を写して戻し、 `npm install --package-lock-only` を回し直しても戻した版が残ることを確かめる。
+- 確かめは PR を当てるときと同じ (自作 MCP server なら [§6 の Tier 4 の節](#dependabot-pr-tier-discipline)、 本番の checkout でなく clone で `npm ci`)。 npm の lock では push から 1 分以内に警告が閉じた (実測。 uv の lock では数え直しが走らなかった実測 = [#pinned-env-lockfile-major-bump](#pinned-env-lockfile-major-bump))。 どちらも push の後に警告の一覧を読み直して確かめる。
+
+## <a id="esm-migration-normalizer"></a>7. ESM migration backwards-compatible normalizer
+
+CommonJS → ESM library で `require()` の戻り型が変わる (= bare function → `{default: fn, ...}`) ケースに reusable な pattern:
+
+```javascript
+// v1 (CommonJS): module.exports = pluginFn  →  require() returns pluginFn
+// v3 (ESM):      export default pluginFn      →  require() returns {default: pluginFn, ...}
+const raw = require('@some/library');
+const usable = raw.default || raw;
+```
+
+`raw.default || raw` で:
+- v1 (= old CJS): `raw.default` is undefined、 fallback to `raw` (= bare function) ✓
+- v3 (= new ESM): `raw.default` is the function ✓
+
+**Edge case (= 知っていれば足りる)**: `.default` が falsy 値 (= 0 / null / "" 等) を取る ESM module では fallthrough して raw 全体を返す。 plugin library で `.default` が function 以外になることは実務的に稀だが、 numerical / data library で `.default` に数値を export している場合は `raw.default ?? raw` (= nullish coalescing) や明示的 `'default' in raw ? raw.default : raw` で対処。
+
+**運用順序**:
+
+1. Backwards-compatible normalizer を main に先 land (= 現在の v1 でも動く)
+2. local で v3 + normalizer の組み合わせを build test (= 動くことを確認)
+3. Dependabot PR (= v3 への bump) を merge
+4. Normalizer の `.default` 側 fallback が活性化、 build 通る
+
+逆順 (= bumping PR を先 merge) だと CI 落ちる + 修正の commit が分かれて不便。
+
+## <a id="gh-cli-gotchas"></a>8. `gh` CLI の subtle な gotcha
+
+### `users/X/repos` vs `gh repo list X`
+
+`gh api users/<user>/repos` は **public 限定** (= owner authenticated でも public のみ)。 自分の private repo 含めるには:
+
+```bash
+gh repo list <owner> --limit 200 --no-archived --json nameWithOwner
+```
+
+Cross-repo automation で repo 列挙する時、 `users/X/repos` を使うと private が漏れる silent bug。
+
+### `gh pr merge` mergeStateStatus = UNKNOWN の対処
+
+`gh pr view N --json mergeStateStatus` が `UNKNOWN` を返す時、 これは「merge 不能」 ではなく **「GitHub が mergeability を計算中」**。 主要 cause:
+
+1. PR 作成直後 (= 数秒〜数分で CLEAN/UNSTABLE/DIRTY に確定)
+2. base branch が動いた直後 (= Dependabot PR は自動 rebase されるが、 数十秒〜分かかる)
+3. 同 repo の他 PR が merge された直後 (= sibling re-eval)
+
+**対処**: `sleep 30` 〜 `sleep 60` の retry loop。 5 iteration くらいで converge。
+
+```bash
+state=$(gh pr view $n -R $r --json mergeStateStatus --jq '.mergeStateStatus')
+if [ "$state" = "CLEAN" ] || [ "$state" = "UNSTABLE" ] || [ "$state" = "HAS_HOOKS" ]; then
+  gh pr merge $n -R $r --squash --delete-branch
+fi
+```
+
+`CLEAN`, `UNSTABLE`, `HAS_HOOKS` は merge 可。 `DIRTY` は conflict (= 別対応)、 `BLOCKED` は required check failing (= 別対応)。
+
+### <a id="workflow-file-pr-merge-scope"></a>workflow file を変える PR の merge と `workflow` scope (2026-10-03)
+
+`gh pr merge` は token に `workflow` scope が無くても workflow file (`.github/workflows/*`) を変える PR を merge できる — merge 結果の workflow file が PR の head と同じ内容になる時は。 同じ workflow file を変える PR を続けて merge して base 側も変わると、 GitHub が 3-way で新しい内容を作ることになり `refusing to allow an OAuth App to create or update workflow ... without workflow scope` で止まる。 その PR に `@dependabot rebase` を comment し、 head が base を含んでから merge すれば通る。
+
+### `gh search prs --author=app/dependabot` で横断検索
+
+`gh pr list` は単一 repo 専用。 複数 repo 横断で Dependabot PR を集約するなら:
+
+```bash
+gh search prs --author "app/dependabot" --state open \
+  --owner <user1> --owner <user2> \
+  --json repository,number,title --limit 100
+```
+
+`--owner` は repeat 可 (= 複数 user/org 跨ぐ)。 dashboard 系 script で頻出。
+
+## <a id="bash-set-e-heredoc"></a>9. Bash `set -e` + heredoc + `$(...)` の interaction
+
+`set -euo pipefail` 下で heredoc 入りの `$(...)` を書くと、 内部 command の非 0 終了で `set -e` が trip する場合がある (= bash version + `inherit_errexit` shopt 依存)。
+
+**Anti-pattern**:
+
+```bash
+set -e
+out=$(gh api ... <<EOF
+{ ... }
+EOF
+)
+# ↑ gh api が non-zero で exit すると set -e 発火、 以降のコードが走らない
+```
+
+**Fix** (= 明示的 bracket):
+
+```bash
+set +e
+out=$(gh api ... <<EOF
+{ ... }
+EOF
+)
+set -e
+# ここで $out parse して error message を判定
+```
+
+`if ... then ... else ... fi` で wrap する方法もあるが、 heredoc + 複数行 + 出力 capture が絡むと syntax が読みにくくなる。 set +e / set -e bracketing が最も読みやすい。
+
+## <a id="cascading-pr-convergence"></a>10. Cascading Dependabot PR の convergence loop
+
+Monorepo + `directories:` 設定で 1 PR を merge すると、 **sibling subdir で同 package の同 version bump PR が次々に開く** (= 1 merge → main 動く → Dependabot scan → 別 subdir で同 vuln 検出 → PR open)。
+
+複数 iteration 必要:
+
+```bash
+iter=0
+while [ $iter -lt 5 ]; do
+  iter=$((iter+1))
+  prs=$(gh search prs --author "app/dependabot" --state open --owner ... --json repository,number)
+  [ "$prs" = "[]" ] && break
+  # process each PR
+  sleep 30  # let rebase settle
+done
+```
+
+5 iteration で typically converge。 alert count が一定値以下になったら手動 review に shift。
+
+## <a id="supply-chain-hardening"></a>11. Supply-chain hardening: Dependabot cooldown + action SHA pinning (2026-08-29)
+
+Semgrep の warning 級定型 finding 2 種 (`dependabot-missing-cooldown` / `github-actions-mutable-action-tag`) は、 annotate して黙らせるより**設定側を直す方が実益がある**:
+
+- **Dependabot cooldown**: dependabot.yml の各 update block に
+
+  ```yaml
+  - package-ecosystem: "npm"
+    cooldown:
+      default-days: 7
+  ```
+
+  を足すと、 release 後 N 日は version-update PR を作らない = **day-0 供給網攻撃 (malicious release / 即 yank) の窓を避ける**。 auto-merge 運用と両立 (N 日過ぎた release は即 PR)。 security update は cooldown の影響を受けない。
+- ⚠️ **dependabot.yml を編集して push すると即時 scan が走り、 溜まっていた outdated 依存の version-update PR が一斉に生える** (= burst)。 cooldown 追加の直後に PR が増えるのは矛盾ではない (既存 release は N 日経過済のため) — 想定して triage 時間を確保する。
+- ⚠️ <a id="dependabot-ecosystem-must-exist"></a>**dependabot.yml にはその repo に manifest がある ecosystem だけを書く** — 無い ecosystem (例: `package.json` の無い repo の `npm`) の update job は毎回 `Error during file fetching; aborting: ... not found` で失敗し、 Dependabot Updates が恒常 red になる。 manifest を git-crypt で暗号化している repo も同じ (Dependabot は平文を読めない)。 全 repo に同じ template を配る baseline はここで壊れる — 配置時に repo の tree を見て entry を選び、 後から manifest を足した repo は逆向きに拾う。 道具 = [`scripts/dependabot-ecosystems.py`](../scripts/dependabot-ecosystems.py) (検出 / `--apply` で entry を削る / `--render` で配置時に template から選ぶ / manifest があるのに未設定は ℹ️)。 `--render` は github-actions も tree の workflow で判定する (棚卸しと同じ判定) = 配置の道具が workflow を置いてから render を呼ぶ形で、 workflow の置き込みが失敗すると (contents API の PUT は token に `workflow` scope が無いと `.github/workflows/` だけ 404 になる)、 「置く前提」 で残した github-actions の行だけが残って毎月 manifest 無しで失敗する (実測)。 何も残らなければ render は何も出さず、 呼ぶ側は dependabot.yml を置かない。 恒常 red を拾う検出器 = [`scripts/check-ci-red.py`](../scripts/check-ci-red.py) の Dependabot 枠 (2026-09-11 に owner の約 20 repo でこの形の常時失敗を発見して解消)。 ⚠️ Dependabot Updates の run 履歴は **job ごとに分けて読む**: 1 workflow に全 job が相乗りし (`display_title` = `<ecosystem> in <dir> - Update #N`)、 success / failure が交互に並ぶので workflow 単位の「連続 red」 は意味を持たない。 config を push すると version update の全 job が即時に走り直す (= それ以降に run の無い job は config から消えた job)。 security update の job (`... for <pkg>`) は alert 起点で走るので、 open alert が無ければその古い失敗は現状を表さない。
+- ⚠️ <a id="dependency-graph-text-named-manifest"></a>**依存グラフは dependabot.yml に無い ecosystem の file も読む = 名前が manifest に見える text を repo に置かない** — 依存グラフの自動更新 (Actions の workflow = Dependency Graph、 run 名 `Graph Update: pip in <dir>`) は tree の `*requirements*.txt`・`setup.py`・`pyproject.toml`・`Pipfile` を pip の依存の file と読む。 web 頁の写しを頁の URL に合わせて `<名>-requirements.txt` と名付けると、 1 行目の自然文を package 名として読めず `dependency_file_not_evaluatable` (`Invalid requirement: '…': Expected package name at the start of dependency specifier`) で落ちる (実測)。 dependabot.yml の update job ではないので、 dependabot.yml から pip を外しても止まらない。 直し = 写しの名前から manifest の語を外す (取得元の URL は記録の列に残す)。 写しを置く場所の手順に、 名前の注意を 1 行書いておく。
+- **action の SHA pin**: `uses: owner/action@v7` の tag は mutable (= 移し替え可能) なので `uses: owner/action@<40hex>  # v7` の commit SHA pin にする。 SHA の解決は `gh api repos/<owner>/<action>/commits/<tag> --jq .sha`。 **Dependabot の github-actions ecosystem は SHA pin を認識して更新し、 `# vN` comment も保守する** = pin しても追従コストは増えない。
+
+## <a id="daily-pr-routine"></a>12. 毎日の PR の対応 (Free plan の private repo の Dependabot と、 人の PR) (2026-11-09)
+
+Free plan の private repo では auto-merge が使えない (§2) ので、 Dependabot の PR は workflow を置いても開いたまま積もる。 常時起動の機械で 1 日 1 回、 決定的な script が下の条件を全部満たす PR を merge し、 残りは道具なしの model に判断を書かせ、 判断で merge する門 (config で開いたとき) を通らなければ判断と返事の文案を添えて人に渡す形にする。 engine = [`scripts/pr-routine.py`](../scripts/pr-routine.py) (見る owner・merge しない repo・掲示板の宛先・試験の command は呼び手の config)。
+
+- **決まった形で merge する条件は全部を満たすときだけ**: PR の作者が Dependabot / 全 commit の作者が Dependabot (人が branch に push した commit が混ざらない) / 依存が 1 つ (group・composite は人へ) / 版の上げ幅が patch か minor / CI の check が全部 green で、 通った check が 1 本以上 (何も試さず通る job は config の `non_test_checks` で数えない = Free の private の repo の Dependabot の PR に付くのは §3 の auto-merge の job だけで、 notice を出して成功で終わる、 実測) / merge の状態が `CLEAN` か `HAS_HOOKS` / repo が merge しない repo の一覧 (公開の規約 hub・fork など) に無い。 1 つでも欠ければ merge せず判断に回す (待てば満たされるもの = CI の実行中・`UNKNOWN`・衝突・base に遅れ、 は翌日に回し、 一定の日数を越えたら判断に回す)。
+- **版の上げ幅は重い方を採る**: commit の metadata の `update-type` は**間接の依存では書かれない** (実測)。 title・本文の `from A to B` からも出し、 両方の重い方。 0.x の minor と 0.0.x の patch は major と数える (semver が互換を約束しない範囲)。 SHA・`>=` の範囲・prerelease は「読めない」 = 人へ。 github-actions の major も人へ (§3 の workflow は actions を全部通すが、 ここで merge するのは patch・minor だけ)。
+- **確かめた commit だけを merge する**: merge の直前に PR を読み直して同じ分類になることを確かめ、 `gh pr merge --match-head-commit <sha>` (読んだ後に head が動いたら GitHub が断る)。 同じ lock file を触る sibling も、 重なる行が無ければ続けて merge できる (別の package の行は 3-way で入る、 実測)。 衝突に変わるのは同じ package の行を変える PR どうし (まとめの PR と 1 本ずつの PR など) = 翌日 (Dependabot が rebase する) に回る (§10)。 workflow file を変える PR の失敗は §8 の `workflow` scope。
+- **判断を書く model には道具を渡さない**: PR の本文・diff・commit message は他人が書いた data。 判断は `claude -p --tools "" --strict-mcp-config` に材料を stdin で渡して JSON (推し・理由・気になる点・merge の前に確かめること・返事の文案) を受け取る。 merge・PR への書き込み・掲示板への投稿・commit は決定的な script だけが行う = 本文に AI 宛ての指示を埋めた PR でも、 PR への書き込みは起きず、 merge は判断で merge する門の決定的な条件を通ったときだけ起きる。 試験は config に command がある repo で、 使い捨ての clone の中で、 Dependabot の PR だけを走らせる (人の PR の code を無人で走らせない。 走らせる作者は config で名指す)。
+- **判断で merge する門** (config で開いたとき): 判断に回った PR のうち major・composite・版の読めない PR・check の足りない PR・人の PR は、 判断の推しが merge / merge の前に確かめることが無い / 材料に AI 宛ての文が無いと判断が答えた / CI が全部 green / config の試験が通った / merge の状態が `CLEAN` / 人の PR は fork でなく作者の権限が config の下限以上、 の全部を満たすとき merge する。 merge しない repo・他人の commit・CI の失敗・branch の保護は門に入らない (いつも人へ)。 判断の file を公開してから、 判断した head のまま同じ門を今の状態で通ることを読み直して確かめる。 PR への返事は merge の後に人に渡す (書き込みは人の OK の後)。 推しの語は本文に埋めた指示に引きずられうるので、 門は推しだけでなく決定的な条件 (CI・試験・権限・fork) と合わせ、 試験の command は PR の側でなく本番の checkout の側の script を指す (PR が試験を書き換えられない。 一般形 = [`prompt-injection.md#unattended-untrusted-input`](prompt-injection.md#unattended-untrusted-input))。
+- **渡すのは 1 PR 1 件、 渡し直さない**: 判断の markdown を repo に commit してから、 人の答えを待つ宛先 (掲示板なら `role-<project>-<owner>-rulings`、 [CONTRACT#rulings-role](../../ai-collaboration/board/CONTRACT.md#rulings-role)) へ。 渡した印は Dependabot = 上げる先の版、 人の PR = head の commit で持ち、 変わったときだけ渡し直す。 PR が閉じたら依頼に 1 行書いて印を外す = 閉じたかは検索に出ないことで決めず、 PR を読み直して OPEN でないと確かめる (検索は index の遅れ・件数の上限・読み損ねで開いた PR を落とす。 落とした PR を閉じたと見ると、 依頼に誤った 1 行を書き、 次の回に同じ PR を渡し直す)。 1 回に作る判断の数に上限を置く (1 件に数分かかる、 残りは次の回)。
+- **止める鍵と初回**: config の `enabled` が false の間は本番で何もしない (空回し `--dry-run` は GitHub を読むだけ)。 新しい機械・止めていた後は、 その機械で空回し → 分類を目で確かめる → `enabled` を true、 の順。 結果 (merge・判断待ち・失敗) は state の `last_run` に残し、 人が毎日見る一覧から 1 行ずつ出す。
+
+## <a id="cross-references"></a>13. Cross-references
+
+- 各 user の repo 集合に対する具体 baseline 適用は **layer 3** (= 個人 prefs) で記録 (= 各自の personal layer に、 例えば security-automation.md のような file を置く)
+- 新 repo onboarding script の template は **layer 3** で保持 (= 各自の personal layer、 例えば scripts/secure-new-repo.sh + scripts/templates/)
+- visibility 判断 framework も **layer 3** (= 各自の personal layer、 例えば repo-visibility-criteria.md)
+- 本 file (= layer 1) は generic pattern + tool-level gotcha のみ
+- **Semgrep finding の読み方・nosemgrep 注記・local 再現** は sibling [`semgrep-ci.md`](semgrep-ci.md) (= 本 file が「配置・merge 運用」、 あちらが「finding の読み書き」)

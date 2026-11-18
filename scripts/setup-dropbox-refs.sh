@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# setup-dropbox-refs.sh — personal layer の dropbox-collabs.yaml を読んで symlink を生成
 # claude-config/scripts/setup-dropbox-refs.sh
 #
 # Read a personal-layer YAML registry of "collaboration name → Dropbox
@@ -60,7 +61,7 @@ fi
 
 if [ -z "$BASE_DIR" ]; then
     # Default: parent of the yaml's parent.
-    # e.g. ~/Claude/odakin-prefs/dropbox-collabs.yaml → ~/Claude
+    # e.g. ~/Claude/<personal-layer>/dropbox-collabs.yaml → ~/Claude
     BASE_DIR="$(cd "$(dirname "$(dirname "$YAML")")" && pwd -P)"
 fi
 

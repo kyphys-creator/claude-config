@@ -1,0 +1,322 @@
+<!-- doc-meta
+when: Overleaf↔GitHub 連携 repo を設定・sync するとき
+category: paper
+summary: Overleaf↔GitHub 連携 (= canonical は Overleaf web UI の GitHub linking、 sync script 契約 〔--status が ahead/behind を出す + PROJECT_ID hardcode = ID の SoT〕、 新規連携 checklist + ID 回収 runbook、 drift 検出は scripts/check-overleaf-drift.py)
+-->
+# Overleaf <-> GitHub Integration
+
+複数 author で論文を書くとき (= 共著者 1 人以上、 Overleaf project + GitHub repo を併用) の同期経路。
+
+## TL;DR
+
+**Canonical = Overleaf project の web UI で設定する GitHub linking**。 user が Overleaf web で "Pull GitHub changes into Overleaf" / "Push Overleaf changes to GitHub" ボタン 1 つで bidirectional sync 可能 (= linking active 中は user 操作で生成された commit が自動 propagate)。
+
+**Secondary = local mirror clone (`.overleaf-mirror/`)**。 共著者等の共著者が Overleaf で編集中の最新状態を local で `diff -r` 確認したい用途のみ。 **mirror から直接 git push は禁止** (= GitHub linking と競合して 403 timeout)。
+
+⚠️ **Overleaf が正本の repo では、 GitHub/local の `git pull` が "Already up to date" でも Overleaf 最新とは限らない** (= 三例目で 3 ヶ月 drift)。 連携形態を問わず **`scripts/overleaf-sync.sh` を必ず整備** (= project ID の SoT + `--status` drift probe、 §Sync script 契約)。
+
+## 推奨 setup 手順
+
+1. Overleaf project を user が作成 (= `overleaf.com`)
+2. paper repo を GitHub に作成 (= `odakin/<paper-name>` 等、 paper の真の master)
+3. user が Overleaf web で **Menu → Sync → GitHub → Link with a GitHub repository** をクリック、 GitHub repo を選択 + collaborator 設定
+4. linking 完了後、 Overleaf web の Sync メニューに "Pull GitHub changes into Overleaf" / "Push Overleaf changes to GitHub" ボタン出現
+5. (任意) local read-only mirror を追加:
+   ```bash
+   OVERLEAF_TOKEN=$(tr -d '\n' < ~/.secrets/overleaf-token)
+   cd <repo_root>
+   git clone "https://git:${OVERLEAF_TOKEN}@git.overleaf.com/<project_id>" .overleaf-mirror
+   unset OVERLEAF_TOKEN
+   echo ".overleaf-mirror/" >> .gitignore   # mirror を main repo から隔離
+   ```
+
+## Sync 経路の使い分け
+
+| 場面 | 操作 |
+|---|---|
+| Local / GitHub main 更新 → Overleaf に反映 | user が Overleaf web で **"Pull GitHub changes into Overleaf"** クリック |
+| 共著者の Overleaf 編集 → GitHub に反映 | 通常は **auto-sync** (= linking active で自動)、 もしくは user が "Push Overleaf changes to GitHub" クリック |
+| 共著者が Overleaf で編集中の最新状態を Claude が確認 | `cd .overleaf-mirror && git pull` で取得 → `diff -r` で本文と比較 |
+| Local edit を Overleaf に流す | (1) local で commit + push to GitHub main、 (2) user が Overleaf web で "Pull GitHub changes into Overleaf" |
+
+## bidirectional auto-sync の挙動
+
+linking active 中、 user の Overleaf web 操作で生成された commit は **自動的に GitHub にも push 戻る**。 例えば:
+- user が "Pull GitHub changes into Overleaf" クリック → Overleaf に merge commit (= 例: `78e8cc6`) → 自動的に GitHub にも push (= `Updates from Overleaf` + `Merge overleaf-... into main` の 2 commits)
+- 結果: 同じ content だが commit hash が異なる版が両 remote に存在 (= bookkeeping commits)
+
+paper の content は不変、 commit graph が複雑化する程度。 local main を update する側は **pull → push** の merge 流儀になる。
+
+## ⚠️ mirror 経由の直接 push 禁止
+
+mirror clone (= `.overleaf-mirror/`) から `git push origin master` しようとすると **403 timeout**:
+- 元の push: Overleaf server で 360 秒以上応答なし → reject
+- retry: GitHub linking との競合で 403
+
+対処: **mirror から直接 push しない、 GitHub linking 経由で auto-sync**。
+
+mirror script (= sync-overleaf.sh template) を作る場合は、 冒頭 comment で「逆方向 push は動作しない」 warning を明示。
+
+## Token 管理
+
+Overleaf personal access token (= `olp_*` で始まる ~40 char):
+- 取得: Overleaf web の **Account Settings → Git Integration → Generate token**
+- 保管: `~/.secrets/overleaf-token` (= mode 600)。 別の場所に置くなら環境変数 `OVERLEAF_TOKEN_FILE` (template の sync script が読む)
+- token は account 単位 = 共有リポでは共同編集者が各自の token を発行して置く。 招待の連絡に手順を書かず、 repo の collaborator-check に `file ~/.secrets/overleaf-token OVERLEAF_TOKEN_FILE -- <直し方>` を宣言して session 開始時に点検させる ([`shared-repo.md#collaborator-check`](shared-repo.md#collaborator-check))
+- Dropbox encrypted backup の方針は odakin の case で `secrets-config/CLAUDE.md §Overleaf` 参照
+
+token は account 単位、 project access 権限とは別 layer。 token 期限切れと collaborator 権限 deny を切り分ける手順:
+- fetch + push 両方 403 + 新 token でも 403 → permission/timing issue (= token は関係ない)
+- 元の push が timeout → Overleaf 側の server 状態 (= rate limit、 GitHub linking 競合)
+
+## 変種: direct remote + 手動 merge (GitHub repo 併用、 GitHub linking 無し)
+
+Overleaf project と GitHub repo を併用するが GitHub linking を張らない場合。 共著者は
+Overleaf を直接編集し、 owner が overleaf remote から fetch + merge して GitHub 側へ
+取り込む (= `git fetch "https://git:<token>@git.overleaf.com/<project_id>" "+master:refs/remotes/overleaf/master"` →
+`git merge overleaf/master`。 URL 直指定 fetch なら token が `.git/config` に永続化しない)。
+
+- merge conflict をどちら側採用で解決するか (通常 = 正本である Overleaf 側) を repo に明記
+- ⚠️ **この変種は「GitHub pull = 最新」 という錯覚が最も起きやすい** (= 下記 三例目)。
+  GitHub に届くのは「誰かがどこかのマシンで merge した時点」 までで、 以降の Overleaf
+  編集は **どの clone の `git pull` にも現れない**。 Overleaf が正本の repo では
+  up-to-date 判定は overleaf remote への fetch でしか確定しない
+- merge は特定マシンの clone で行われがち = その clone が消えると remote 設定ごと
+  project ID も消える (= 三例目の ID 喪失経路)。 下記 §Sync script 契約 が必須
+
+## <a id="sync-script-contract"></a>Sync script 契約 (= 全変種共通の標準、 三例目 2026-06-12 で標準化)
+
+Overleaf 連携 repo には **`scripts/overleaf-sync.sh` を必ず置く** (= 連携を張った
+session 内で作る。 「あとで整備」 は ID 喪失の前兆)。 **汎用 template =
+`templates/overleaf-sync.sh.template`** (= copy → PROJECT_ID + conflict 方針を記入 →
+`chmod +x` → commit の 3 手):
+
+- **PROJECT_ID を script 冒頭に hardcode して commit** = ID の single source of truth
+  (= 一例目 / 二例目 / 三例目すべて ID の置き場所が原因系)。 ID 未確定でも placeholder
+  (例 `FIXME_PROJECT_ID`) で script を先に commit し、 script は exit 2 で拒否する
+  (= drift 検出器が「ID 未設定」 を surface し続け、 忘却で消えない)
+- **`--status` mode**: read-only probe。 fetch して `ahead=N behind=M` を 1 行出力
+  (= 機械可読契約、 behind>0 = Overleaf に未取込みの共著者編集)。 設定不足
+  (token 無し / ID placeholder) は exit 2
+- **恒常 ahead の宣言 (任意)**: 管理 file (CLAUDE.md / scripts 等) を Overleaf に
+  push しない運用の repo は local が恒久的に ahead になる。 status 行末尾に
+  `ahead-expected` token を付ける (= template の `AHEAD_EXPECTED=1`) と検出器が
+  ahead INFO を抑制する (= dashboard を恒久 INFO で汚さない。 behind 検出は不変)
+- **中身の照合**: status 行に `content-diff=K [file,…]` を出す (= Overleaf が持つ file の
+  うち、 HEAD の中身が `overleaf/master` と違う数と名前。 template が出す)。 検出器は K>0 を
+  WARN にする。 理由と直し方 = 下の [#content-parity](#content-parity)
+- token は `~/.secrets/overleaf-token` から読み、 出力は `olp_…` を自動マスク
+  (上記 §Token 管理)
+- 連携を廃止したら script を削除せず **冒頭で `DEPRECATED` を表示して exit 0** に
+  置換する (= 検出器が「廃止済」 と機械判別でき、 既存 hook も壊れない)
+- Overleaf への push は共著者の編集環境に直接影響 → script で自動化しない、
+  user 明示確認必須
+- repo の CLAUDE.md に同期 mode (= GitHub linking / direct remote + 手動 merge /
+  direct nested clone のどれか) + merge conflict 方針を明記
+
+**drift 監視**: 横断 dashboard / cron から各 repo の `--status` を並列実行し、
+behind>0 / ID 未設定 / 未 bootstrap / 「Overleaf 連携の記述があるのに script 未整備」
+を surface する。 **汎用実装 = `scripts/check-overleaf-drift.py`** (本 repo、 finding
+0 件なら silent / `--selftest` 内蔵 / `--root` で走査 root 変更)。 個人層の dashboard
+末尾から呼んで毎 session 発火させる (odakin の case: unified-dashboard 統合)。
+
+### <a id="content-parity"></a>取り込み済み (behind=0) は「同じ中身」 を意味しない
+
+`behind=0` は `overleaf/master` が手元の履歴の祖先になったことしか言わない。 Overleaf が持つ file の
+中身が手元と同じかは別に確かめる。
+
+**実測した壊れ方**: Overleaf 側で file を改名した commit (旧版を別名で残し、 新版を新しい名前で足す) を、
+改名前の file を手元で編集していた branch に merge すると、 git の rename 検出が手元の編集を**改名先の
+file に適用する**。 conflict は出ず、 `behind=0` になる。 結果、 「旧版をそのまま保存した」 はずの file が
+手元でだけ新版の中身になる。 その file を基準に作る成果物 (latexdiff の旧側など) は、 差分がほぼ消えた形で
+黙って作り直される。 Overleaf 側の file は正しいままなので、 共著者からは見えない。
+
+**検出**: sync script の status 行の `content-diff=K [file,…]` (template が出す) と、 それを WARN にする
+`scripts/check-overleaf-drift.py`。 手で見るなら
+`git diff --stat overleaf/master HEAD -- $(git ls-tree -r --name-only overleaf/master)` が空か。
+改名を含む Overleaf 側 commit を merge した直後は必ず見る。
+
+**直し方**: `git checkout overleaf/master -- <file>` で Overleaf の版に戻して commit し、 その file から
+作った成果物を作り直す。 壊れた成果物を人に送っていたら差し替える。
+
+手元で未反映の編集を持つ file もここに出る (= 「Overleaf にまだ無い」 の表示として正しい)。 手元でだけ
+違う中身を持ち続ける運用の repo は、 template の `CONTENT_DIFF_EXPECTED=1` で宣言する。
+
+### <a id="new-integration-checklist"></a>新規連携 checklist (= 連携を張った session 内で完遂、 計 ~2 分)
+
+1. `bash <claude-config>/scripts/install-overleaf-sync.sh <repo_dir> <Overleaf URL>`
+   (= template 展開 + ID 焼き込み + chmod + token があれば --status smoke まで自動。
+   URL は project を開いたときの browser URL でも Menu → Git の clone URL でも可)
+2. `git add scripts/overleaf-sync.sh` + commit (= ID の SoT を恒久化)
+3. repo の CLAUDE.md に同期 mode + merge conflict 方針を明記
+4. (管理 file を Overleaf に push しない運用なら) installer に `--ahead-expected` を
+   付けるか script の `AHEAD_EXPECTED=1` を立てる
+
+## <a id="scoped-subset-push"></a>scoped subset push (= 一部の編集だけ Overleaf に出し、 残り本文は共著者版と byte 同一に保つ)
+
+論文の **一部 (例: abstract + intro) だけを Overleaf に push** し、 それ以外の本文は共著者の
+Overleaf 版と byte 一致のまま保ちたい場合 (= 自分の本文 markup / 管理 file を Overleaf に
+漏らさない)。 direct remote + 手動 merge 変種 (上記) で有効。
+
+**レシピ**:
+1. 編集分を含む `main` 側 file と `overleaf/master` 側 file を、 **clean な section-marker 行**
+   (= `\section`/`\begin{abstract}` 等、 両版で確実に同一な行) で splice する: marker までは
+   main 側 (= 自分の編集を含む)、 marker 以降は `overleaf/master` 側 (= 共著者版 byte 同一)。
+2. `git worktree add <tmp> overleaf/master`。 ⚠️ **2026-09-02 訂正 — 旧記述「この tree には
+   paper file のみ = Overleaf に管理 file を漏らさない経路」 は楽観だった**: worktree は
+   `overleaf/master` の tree をそのまま持つので、 **過去の naive な直 push で `CLAUDE.md` /
+   `SESSION.md` が混入していれば worktree にも出る** (= 後節の ⚠️ が本 step を名指しで訂正
+   している)。 ∴ **`git ls-tree overleaf/master` で paper file のみかを毎回確認する**
+   (= この経路は leak を防ぐのではなく、 leak を持ち込まないだけ)。
+3. splice した file を worktree に置く。
+4. `git commit --no-verify` で commit (= pre-commit char-normalizer hook が **共著者版の本文を
+   書換えない**ようにする。 hook を通すと byte-pristine でなくなる)。
+5. `git push <overleaf-url> HEAD:master` で Overleaf に push (= user 明示 OK 必須、 共著者に直接影響)。
+6. `main` を `git merge overleaf/master` で reconcile (= abstract/intro は両側同一・本文 markup は
+   main のみ、 なので clean merge)。
+
+**push 前 gate**: behind=0; 本文が `overleaf/master` と byte 同一; scope diff が意図領域のみ;
+live (uncomment) な author markup (`\cl`/`\CL` 等) の leak 無し; compile が通る。
+
+## <a id="revision-proposal-versioned-files"></a>改訂案の in-place 配置 (= 旧版を rename 保存 + 新名で追加) (2026-08)
+
+大きめの改訂案を共著者にレビューしてもらうとき、 mail 添付の往復でなく **Overleaf に直接置く**変種。
+要件 = 共著者が知っている file を silent に書き換えないこと。 [`#scoped-subset-push`](#scoped-subset-push)
+の sibling (= あちらは「一部だけ出す」、 こちらは「全文を別名で並置」)。
+
+**レシピ** (direct remote + 手動 merge 変種で有効):
+1. **behind=0 を確認** (= 先方の未取り込み編集を潰さない)。
+2. `git worktree add <tmp> overleaf/master` で **overleaf/master の上に専用 commit** を作る:
+   `git mv main.tex main_v1.tex` (= byte 不変の rename、 共著者の知っている版がそのまま残る) +
+   改訂版を `main_v2.tex` として追加 + 新規図など必要 file のみ追加。
+   ⚠️ `git push main:master` は repo 全体 (SESSION / CLAUDE / scripts / 内部ノート) を Overleaf に
+   流し込むので使わない。
+3. push (= user 明示 OK 必須、 共著者に直接影響)。
+4. **Overleaf の main document 設定を新名へ切替** (Menu → Settings)。 旧名を指したままだと
+   compile 不能。 web UI 操作 = 人間の 1 click。
+5. local は `--merge` で追随。 **latexdiff は v1/v2 の file-based に切替できる** (= baseline commit の
+   `git show` が不要になり pipeline が単純化する副産物)。
+
+**利点**: 共著者は新旧を並べて読める / 差分は latexdiff 添付で補完 / 承認後の「反映作業」 が既に
+済んでいる (= 承認 = そのまま編集続行)。 **実例**: 2026-08、 該当 private paper repo (= rename + v2 +
+図 1 枚の 3 点 commit を worktree で作成し、 behind=0 とコメント macro 照合の上で push)。
+
+<a id="latexdiff-wrapper-macro-expansion"></a>
+⚠️ **自前の display-math wrapper macro は latexdiff から数式の変更を隠す**: `\newcommand{\al}[1]{\begin{align}#1\end{align}}`
+のような wrapper で書かれた原稿では、 latexdiff (環境名で数式を認識) が `\al{…}` の中身の変更を
+「引数付き command の差し替え」 として処理し、 旧式を `%DIFDELCMD` で comment out、 新式を無印で挿入する
+= **diff PDF が error 0 で組めるのに数式の変更が一切色で出ない** (silent miss、 文章の差分だけ見て
+「数式は変わっていない」 と誤読する)。 対処 = 基準版・現在版の **両側**で diff 前に wrapper を本物の環境へ
+展開する (balanced brace / `%` コメント / `\{` escape を扱う小さな展開器、 定義行は残して無害。
+展開する macro 名も preamble から導出する = `\newcommand{\X}[1]{\begin{ENV}#1\end{ENV}}` 型と `\\` を含む
+0 引数 macro、 hardcode すると次の wrapper で再発する)。
+行区切りを包む macro (`\nn` = `\nonumber\\`) も同時に展開しないと coarse / whole markup で
+`Misplaced alignment tab` になり、 `off` (= 削除式が消える) へ落とす羽目になる。 実例 = 該当 private paper repo
+2026-09-08 (付録の一式の全体符号の反転が Overleaf 2 commit 間の diff で無印、
+同 repo の `scripts/expand-display-math.py` + `regen-clean-latexdiff.sh` で両側展開 → coarse で色付き・error 0)。
+**同根の第 3 機構**: 引数付き自作 macro (`\pn{…}` / `\Paren{…}` 等) は latexdiff の safe-command list に無いので、
+その中だけの変更も無印になる → preamble の macro 名を原稿から導出して `--append-safecmd` に渡す。
+**設計原則 = 「色が出ない」 は error を出さないので、 diff 出力を機械で走査して無印の数式変更を数え、
+0 でなければ再生成を fail させる** (前処理を足すだけでは次の macro で再発する。 gate は「preamble の
+引数付き macro 全部に合成変更を通して色が付くこと」 を assert する selftest と、 実 diff の走査の 2 段)。
+症状別の表は [`latex.md`](latex.md) の「plain latexdiff がそのままコンパイルできない時の定石」。
+
+## full-body push + 管理ファイルの cleanup (= 本文まるごと反映 / 既流出の除去)
+
+subset でなく **現行 paper file をまるごと Overleaf に反映**したい場合 (= 全 finding を共著者に
+渡す等)。direct remote + 手動 merge 変種で:
+
+1. `git worktree add --detach <tmp> overleaf/master`。
+2. 現行 paper file を worktree に上書き copy (`cp paper.tex <tmp>/`)。byte 一致のまま運ぶ。
+3. (cleanup する場合) Overleaf に漏れている管理 file を除去: `git -C <tmp> rm CLAUDE.md SESSION.md`。
+4. `git -C <tmp> commit --no-verify` (= char-normalizer hook を本文に走らせない)。
+5. **token を mask して push**: 出力に `git:<token>@` が現れても潰す ―
+   `git -C <tmp> push <url> HEAD:master 2>&1 | sed -E 's#git:[^@]*@#git:REDACTED@#g'`
+   (= token は file から実行時に読む、 command 文字列に literal を焼かない)。
+6. **検証**: `git show overleaf/master:paper.tex` を `HEAD:paper.tex` と byte 比較;
+   `git ls-tree overleaf/master` が paper file のみか確認; reconcile 後 behind=0。
+
+⚠️ **管理 file は既に Overleaf に漏れている可能性がある**: worktree は `overleaf/master` の tree を
+そのまま持つので、 過去の naive な `main:master` 直 push 等で `CLAUDE.md`/`SESSION.md` が混入して
+いると worktree にも出る (= 共著者が Overleaf の file tree でこれらを開ける)。 `\input` されない
+ので build には無害だが、 内部メモが見えるので cleanup したければ step 3 で除去する。 → 既存
+「scoped subset push」 の「tree には paper file のみ」 は楽観で、 実態は要確認 (本 §の step 6 ls-tree)。
+
+⚠️ **reconcile の merge strategy は削除の有無で変える**: cleanup で管理 file を削除した Overleaf 側
+commit を `main` に**通常 merge すると、 その削除が main にも伝播して** `CLAUDE.md`/`SESSION.md` が
+main から消える。 これを防ぐには `git merge -s ours overleaf/master` を使う (= main の tree を保持
+したまま overleaf/master を ancestor 化して behind=0)。 削除を伴わない通常の push なら従来どおり
+`git merge` (正本である Overleaf 側採用) でよい。
+
+⚠️ Overleaf push は共著者に直接影響 → **user 明示 OK 必須** (autonomy 禁則)。 paper repo 側は
+本 § を参照し、 baseline commit・PROJECT_ID 等の repo 固有値だけを自身の SESSION/scripts に置く。
+
+## <a id="id-recovery-runbook"></a>ID 回収 runbook (= ID を喪失した repo の復旧手順、 三例目の実地経験から)
+
+費用の安い順に。 回収したら直ちに §Sync script 契約 で script に焼いて commit
+(= 再喪失防止):
+
+1. **他マシン / 既存 clone の git 設定**: `grep -r git.overleaf.com <repo>/.git/config`、
+   `.overleaf-mirror/.git/config`、 `external/overleaf/.git/config`、 `.git/FETCH_HEAD`
+2. **shell history**: `grep -a -o -E 'git\.overleaf\.com/[0-9a-f]+' ~/.zsh_history ~/.bash_history`
+3. **メール**: Gmail 等で `from:overleaf.com` を検索 (= project 共有招待メールに URL が
+   入る。 ⚠️ 自分がオーナーの project には招待メールが存在しない)
+4. **Overleaf web の project 一覧** (= 最終手段だが確実): ログイン → 該当 project を
+   開いた URL (`overleaf.com/project/<24 桁 hex>`) か Menu → Git。
+   ⚠️ `www.overleaf.com` と地域 domain (例 `ja.overleaf.com`) は **login session が別** —
+   普段使いの domain と token 発行 domain がどちらかを確認してから探す
+
+## <a id="variant-nested-clone"></a>変種: direct nested clone (Overleaf = 唯一の source、 GitHub linking 無し)
+
+共著者が Overleaf でノートを書き、 GitHub linking を張らない / 張れない場合 (= Overleaf project がそのまま唯一の正本、 GitHub repo を介さない)、 paper repo 内に **gitignore 除外のローカル専用入れ子 clone** を置いて read 方向で取り込む。 上の GitHub linking 経路とは別物 (= こちらは master が Overleaf 側、 push は共著者に直接影響するので user 明示 OK 必須)。
+
+設計:
+- 配置: `<repo>/external/overleaf/` (`.gitignore` に `external/` を入れて本体から隔離)
+- token: `~/.secrets/overleaf-token` (= 上記 §Token 管理と同じ。 clone URL `https://git:$(cat ~/.secrets/overleaf-token)@git.overleaf.com/<project_id>` にのみ埋め込み、 出力は `olp_…` を必ずマスク)
+- **project ID は paper repo 側 (= layer 2) に記録する**。 ⚠️ ID を gitignore 除外の clone 内 (`external/overleaf/.git/config`) だけに置くと、 **別マシン / clone 削除で完全な ID が失われ**、 他マシンや Overleaf web から手で回収する羽目になる (= 2026-06-08 に実際発生。 同期されていたのは ID 先頭 8 桁の truncation だけだった)。 対策 = **冪等 bootstrap script に PROJECT_ID をハードコードして commit** し、 script を ID の single source of truth にする。
+- 冪等 bootstrap script (= 無ければ clone / あれば `git pull --ff-only` / token 無ければ `restore-secrets.sh` 案内) を repo 内に置き、 **新マシン手順を「repo clone → restore-secrets (一度) → sync script」 の 1 直線**にする。
+
+⚠️ layer 注意: project ID は**その paper repo (layer 2) に置く**のが正しい。 layer 1 (本 repo = public) に individual project の ID を書かない (= 公開リポ衛生 + 規約は汎用知識のみ)。 layer 3 (個人層) に置くと layer 2 の script が layer 3 を参照する依存違反になる (= collaborator は個人層を読めない)。 自己完結する layer 2 が audience-correct な最上層。
+
+### <a id="push-sweeps-editor-edits"></a>⚠️ push は editor 側の未 commit 編集を巻き込む (= commit author ≠ 中身の author、 2026-08-26 実踏)
+
+Overleaf の git bridge は、 git 側から push を受けた瞬間に **web editor 上の未 commit 編集を同じ commit に畳み込む** (= editor には staging が無く、 bridge が push を契機に「editor の現在状態」 を snapshot する)。 帰結 2 つ:
+
+1. **commit author は push 者だが、 中身は複数人でありうる** (= [`actor-attribution.md`](actor-attribution.md) の carrier-proxy の Overleaf 版)。 `git log --author` で「誰が何をしたか」 を読むと誤帰属する。 中身の帰属は diff の内容指紋で判断する。
+2. **自分が compile・検証した状態と、 実際に push された状態が異なりうる**。 push 前の compile 結果 (error / 未定義参照) を push 後の gate として報告すると、 巻き込まれた編集分が未検証のまま「clean」 と報告される。
+
+**規律: push したら必ず `git show HEAD -- <main tex>` で実際に入った diff を確認し、 自分の編集以外が混ざっていたら再 compile して gate を測り直す** (= push 前の測定値を流用しない)。 巻き込みゼロの確認は「diff の行数 = 自分の編集の行数」 の一致で機械的にできる。
+
+関連 forensics 注意: 巻き込み・移動の追跡に `git log -S` を使うと **出現回数が不変の移動は不可視** (= -S は count 差分のみ検知)。 移動を追うときは `git log -G` を使う。
+
+## なぜこの設計が optimal か
+
+- **bidirectional auto-sync**: linking active 中、 commit が自動 propagate
+- **数式変更安全弁**: user が "Pull" を明示操作するまで Overleaf 側は変わらない (= GitHub auto-push を Overleaf 側で reviewable)
+- **conflict 回避**: 私 (Claude) が mirror から直接 push しようとすると linking と競合 → 403 で fail-safe (= 経路を間違うと自動的に reject される)
+
+## Claude への規律
+
+設計判断で「既存サービスの built-in 機能は困難 / 不可能」 と assertion する前に、 user の web UI を確認するか user に「サービスに X 機能ないか?」 と聞く。 文献的推測 (= service capability の cell 埋め) で却下すると、 後で built-in 機能が存在することが判明して設計やり直しになる (= ある private paper repo で 1 度発生)。
+
+これは「安価な操作で expensive な操作を bypass する」 trait family の現れ。 設計の reasoning domain でも同じ trait が出る。
+
+## 実例
+
+ある private paper repo (2026-05-19) で発見 + 経路改訂。 詳細経緯 + 全 4 拠点 (GitHub main / Overleaf master / mirror / local working tree) の同期確認: `(該当 private paper repo の DESIGN.md)`。
+
+## 実例と refine 履歴 (新例が出たら本 convention を refine)
+
+- 一例目 (2026-05-19): ある private paper repo で GitHub linking + mirror 経路を確立。
+- 二例目 (2026-06-08): 別の物理共著 note repo で **direct nested clone 変種** (= Overleaf が唯一の source、 GitHub linking 無し) が発生 → 上の §「変種: direct nested clone」 を新設。 ID を gitignore 除外 clone 内だけに置いて失われた RCA を反映。
+- 三例目 (2026-06-12): 別の物理共著 paper repo で **direct remote + 手動 merge 変種**の二重事故が発覚。 (a) 過去の merge を実施した clone が消えて **project ID の記録がゼロ** (= 二例目と同型の ID 喪失が、 規約制定後に別 repo で再発 — 規約は「nested clone 変種」 の文脈でしか書かれておらず、 既存 repo への横断適用 sweep がなかった)。 (b) **3 ヶ月間 Overleaf drift が未検出** = user も Claude も「GitHub pull = Already up to date」 を「最新」 と誤読する構造 (= 検証手段そのものが存在しなかった)。 → §「変種: direct remote + 手動 merge」 + §「Sync script 契約」 を新設し、 script 必須化 + `--status` 機械可読契約 + 横断 drift 監視を標準化。 教訓: **連携形態が 1 つ増えるたびに「ID はどこに記録されるか」「drift は誰が検出するか」 の 2 問を通す**。
+- 四例目 (2026-08-26): nested clone 変種の repo で **push が editor 側の未 commit 編集 (共著者 = repo owner 本人の editor 操作) を同一 commit に巻き込む**のを実踏 → §「push は editor 側の未 commit 編集を巻き込む」 を新設 (= push 者の compile 済み状態と pushed 状態が乖離、 gate 再測 + `git show HEAD` 確認を規律化)。
+
+## <a id="scoped-file-push"></a>名指しした file だけを Overleaf に載せる (direct remote の repo)
+
+Overleaf が正本で、 手元の main が Overleaf より多くの file と履歴を持つ repo では、 main を丸ごと push しない。 載せたい file だけを Overleaf の最新の上に 1 commit として載せる。 道具 = [`scripts/overleaf-push-file.sh`](../scripts/overleaf-push-file.sh) (既定 dry-run で載る差分を見せる。 `--push` で載せ、 取り直して中身の一致を確かめ、 main に merge する)。
+
+- 前提: repo に `scripts/overleaf-sync.sh` (PROJECT_ID の正本) があり、 載せる file は HEAD に commit 済み。
+- Overleaf が先に進んでいれば止まる (先に `--merge` で取り込む)。
+- ⚠️ `--push` は共著者の編集環境を直接変える。 本人の明示の OK を得てから付ける。 dry-run の出力 (追加・削除の行数) を OK をもらう前に見せる。
+- 載せた後に残るのは `git push origin` と、 repo が決めている merge 後の点検。

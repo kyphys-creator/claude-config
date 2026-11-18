@@ -1,0 +1,148 @@
+<!-- doc-meta
+when: ツール呼び出しを含むターンで user に見せる文面・結論・訂正を出すとき / 応答に機械向けの marker・sentinel を埋め込もうとするとき / turn を閉じる「次の一手」 の箱で送信や投稿の承認を問おうとしたとき (#turn-closing-question-box)
+category: harness-core
+summary: user に見える提示面はターン最終テキストメッセージ (+ 明示的な file 提示) だけ — mid-turn テキストは表示されないことがあり (Claude Code desktop で実測、同一 session 内 2 連発)、tool 入力 (Bash heredoc / Edit content) や書き込んだ file はそもそも提示面でない (2026-08-29 再発で確定した変種)。文面 deliverable・結論・訂正は必ずターン最終メッセージに全文置く。「上の文面」「先ほどの訂正」と自ターン内を指す行為自体が事故 signal。逆向きの取り違えとして、最終メッセージの HTML comment は隠れず literal 表示される (2026-09-12 desktop 実測) ため、hook 用 marker 等の機械向け signal は提示面でなく tool 入力に置く。browser tool 側の audio player / screenshot も user-visible の証拠でなく、media は最終応答の direct link / local file まで運ぶ
+-->
+# ツール呼び出しターンのテキスト可視性 — deliverable は最終メッセージに全文
+
+## 現象
+
+ツール呼び出しを含むターンでは、**ツール呼び出しの前・間に出力したテキストが
+user に表示されないことがある**。harness の一般仕様として「between tool calls の
+テキストは表示されない可能性がある」と明記されているが、実測では**ツール呼び出し
+「前」の冒頭テキストも落ちる** (= frontend 依存、少なくとも Claude Code desktop で確認)。
+
+実測 (2026-08-19、同一 session 内 2 連発): コピペ用の文面 draft を「冒頭テキストで
+提示 → 記録・commit のツール呼び出し → 最終メッセージで『上の N 項版が最終形』と
+参照」の形で 2 ターン連続出力した結果、**user には文面が一度も表示されず**、
+「最終文面とやらが私には提示されてない」と 2 回指摘された。1 回目の指摘後に
+「先ほどの訂正で削除済み」と mid-turn テキストを再参照して 2 回目を踏んだ
+(= 訂正の宛先も表示されていなかった)。
+
+## 変種 (2026-08-29 再発): tool 入力はそもそも提示面ではない
+
+上記ルールの存在下で 10 日後に同型が再発した。transcript 検証で判明した機序は
+text block の表示落ちではなく、**より深い取り違え**だった: コピペ用テキストの
+全文が現れたのは byte 検算の Bash heredoc と正本 file への Edit content
+(= **tool 入力の中**) だけで、**どの text block にも一度も出力されないまま**、
+最終メッセージが「上の圧縮版 (491 字…) を貼れば通ります」とそれを参照した。
+tool 入力は UI では折り畳まれた tool chip の中身であり、表示可否以前に
+**提示面ではない**。
+
+一般化すると: **Claude の context window に在る ≠ user に提示された**。
+モデルの主観では「上に出した」テキスト (tool 入力・file 書き込み・mid-turn
+text) が context に鮮明に在るため参照が自然に感じられるが、user に見える面は
+その真部分集合 — **ターン最終テキストメッセージと、明示的に提示した file
+(link / render) だけ**である。terminal への text dump を「見せた」に数えない
+規律 (chat の file 提示規約) も同じ核の別 instance。
+
+## <a id="shown-text-missing-from-transcript"></a>表示された途中の text が会話記録に残らないことがある
+
+ツール呼び出しの前に書いた途中の text が、 user には表示された (user がその文に応じた返事をした) のに、 会話記録 (transcript の jsonl) には 1 字も残っていなかった (実測 1 件。 同じ turn の後の途中の text は残っていた。 その間に user の途中の message が入っていた。 機序は未確認)。 上の 2 節と向きが逆で、 「記録にある ≠ 表示された」 だけでなく「表示された ≠ 記録にある」 も起きる。
+
+1. **会話記録で「その text を書いたか」 を判定する Stop hook は、 この形で偽陽性になる** (例 = session の最初の返事の 1 行目を確かめる検査)。 差し戻しは「足りない行だけの短い message を出す」 形にして実害を 1 行に抑え ([`hook-authoring.md#stop-hook-addendum-not-reemission`](hook-authoring.md#stop-hook-addendum-not-reemission))、 文面は「書かなかった」 と言い切らず「記録に見つからない」 と書く。
+2. **締めの sweep や RCA で会話記録から自分の発言を集めるとき、 途中の text は欠けうる** = 記録の 0 件を「言っていない」 の証明にしない。 user の返事がその text に応じていれば、 書いて表示されたことの証拠になる。
+
+## <a id="html-comment-not-hidden"></a>逆向きの取り違え: 提示面は raw で出る — 「user に見えない印」 を最終メッセージに埋め込めない (2026-09-12)
+
+上の 2 節は「context に在るのに提示されない」 側だが、 同じ境界には逆向きの取り違えがある: **最終メッセージに置いた HTML comment (`<!-- ... -->`) は、 Claude Code の chat renderer では literal に表示される** (2026-09-12 desktop 実測 = user が応答末尾の marker を指して「こういうのが表示されるんのはなんで？」)。 GitHub 等の web markdown renderer で消えることを根拠に、 「user には不可視の印」 として最終メッセージに埋め込む設計は成立しない。 frontend 依存の可能性はあるが、 **消えることを前提にしてはならない**: 消えなかったときに user の画面が毎ターン汚れ、 しかも**それを Claude 側から観測できない** (= 表示落ちと同じ非対称で、 user の指摘まで分からない)。
+
+一般化すると: **提示面に置けるのは人間向けの出力だけ**。 機械向けの signal (hook が grep する marker、 machine-readable tag、 自動処理用の sentinel) を最終メッセージに混ぜると、 そのまま user のノイズになる。
+
+### <a id="machine-marker-in-tool-input"></a>機械向け marker は tool 入力に置く
+
+置き場所は上の §変種 の裏返しで決まる。 **tool 入力は提示面ではないが転写には残る** — ∴ 検出側が turn の転写を grep する形であれば、 **Bash command の comment に marker を書けば機械には届き、 user には見えない**:
+
+```
+<実際のコマンド>   # <marker>
+```
+
+hook を書く側の含意が 2 つある。
+
+1. **marker の検出は turn の転写全体を走査する形にする** (= assistant text + `tool_use` の `.input.command` + `tool_result`)。 assistant text だけを見る検出にすると、 呼ぶ側には「可視面を汚す」 以外に marker を出す手段が無くなる。
+2. **marker が必要な turn を最小化する**。 hook の発火条件が狭ければ marker が要る turn も狭い。 呼ぶ側が毎 turn reflex で marker を出しているなら、 発火条件を満たさない turn では純粋な noise であり、 規律側の bug (実例: 「生成した ∧ 応答本文がその名前に触れた」 の両方が成った turn だけ発火する hook に対し、 無関係な turn まで marker を出していた)。
+
+### <a id="marker-rule-copies-go-stale"></a>書き方を直しても、 古い書き方の写しが 1 つ残れば再発する — 出た turn で止める網 + marker を要らなくする
+
+上の置き場所を規約にした後も、 同じ marker の露出は続いた (実測: 規約化の翌日以降に 4 回、 うち 4 turn 連続の session が 1 つ)。 原因は呼ぶ側の規律ではなく**写し**: 「この turn では marker を応答に含める」 という古い書き方が、 marker の正本の doc の別の節と、 作業 repo の指示書に残っていて、 その作業に入った session は写しの方を読んだ。 正本の 1 節を直しただけでは、 auto-load される写しに勝てない。
+
+1. **marker の書き方を直す commit で、 marker の literal を全 repo で grep して写しを pointer に替える** (正本の同じ file の別の節を含む。 scan root の外に在る repo の指示書は機械の drift 検出が届かないので、 名指しで開いて直す)。
+2. **出た turn で止める網** = Stop hook [`visible-html-comment-enforce.py`](../hooks/visible-html-comment-enforce.py)。 最終発話から fenced block と inline code を除いた残りに HTML comment が在れば 1 回だけ差し戻す。 表示の後に走るので最初の 1 回の露出は防げないが、 同じ session の次の turn からの繰り返しを止める。 校正 (実測) = 発火はすべて同じ marker の露出で、 誤検出 0。
+3. **marker を要らなくする側が本筋**。 呼ぶ側が marker で伝えていた条件を hook 自身が観測できるなら、 hook に判定させる (実例: 「user が別の viewer で同じ PDF を見ているので開かない」 を、 その viewer の process が起動中で隣に同名の source が在る、 という観測に置き換えた)。 marker は hook が観測できない意図だけに残す。
+
+## <a id="tool-side-media-not-user-visible"></a>tool 側の player は user-visible media ではない
+
+browser / computer-use の accessibility tree や screenshot に音声 player が現れても、
+それは **agent が操作できる surface の観測**であって、user の chat / panel に同じ player が提示された証拠ではない。
+agent 側で再生状態になったことも「user が聞けた」「再生ボタンが見える」の証拠にならない。
+
+音声・動画を user に渡すときは、最終メッセージに app が描画できる local media file、または user が直接開ける
+通常の Markdown link を置く。side pane の表示要求・deliverable marker・tool screenshot は補助であり、最終提示の代替にしない。
+raw media page が crash したり panel が見えなかったりしたら、見えたと主張せず link へ縮退する。
+
+対象言語の発音を返す場合は [`pronunciation-verification.md#audio-delivery-surface`](pronunciation-verification.md#audio-delivery-surface)
+がこの一般則を発音 workflow に適用する。
+
+## <a id="turn-closing-question-box"></a>turn を閉じる質問の箱は、 その後の最終メッセージを無くす
+
+harness によっては、 turn の終わりに「次の一手」 の箱 (要約 1〜3 文 + 質問 1 つ + ボタン) を描く tool があり、
+**箱に質問を入れるとその呼び出しで turn が終わる** (= その後に text を書かない作り)。 このとき turn の最終メッセージは
+存在しない = 提示面は箱の要約と質問の 2 欄だけになる。
+
+- **箱の欄に入らないもの (文面 deliverable・下書き全文) の承認を箱で問わない**。 送信・投稿・提出の承認のように
+  「この文面で送るか」 を問う質問は、 文面を最終メッセージに全文置き、 質問もそこに text で書く (箱は要約だけで閉じる)。
+- 実測: 送信前の下書きを dry-run の出力 (= tool 結果) で確かめ、 そのまま「この文面で送りますか」 を箱で問うた →
+  user には質問だけが見え、 文面はどこにも出ていなかった (= 上の「tool 入力・tool 結果は提示面でない」 の箱版)。
+- 箱の質問の文字数制限 (1 文) は、 下書きを箱に入れられないことの印でもある。 判断材料が 1 文に収まらない質問は箱に入れない。
+- <a id="box-text-after-not-delivered"></a>**箱の後に本文を書ける作りでも、 質問つきの箱の本文は読まれない前提で書く** — 箱の tool が「最終メッセージを書け」 と返す harness でも、 質問つきの箱の turn の本文が user に見えないことがある (実測: 判断の一覧を箱の後の本文に全文書き、 箱で「下の〜のまま進めるか」 と問うたら、 user から「見えない」 と返った)。 質問を箱から外した turn の本文は届いた (実測)。
+  - 本文を読まないと答えられない問いと、 本文を指す問い (「下の〜」「上の〜」「推す条件で」) を箱に入れない。 機械の網 = [`scripts/decision-question-jargon.py`](../scripts/decision-question-jargon.py) の箱の承認の検査 (箱の問いの欄が送信・投稿の承認か本文の下書き・案・条件を指すと、 その箱の呼び出しを止める。 保護された file を当てる承認 (「当てますか」「適用しますか」「承認しますか」 の形) は、 箱の recap か ask に当てる file の名と候補の SHA-256 の頭 (8 字以上、 英字 a〜f を含む) が無いときに止める = 無いと差分を読まない承認になる、 実測。 それを書いた箱の承認の問いは止めない (本人の裁定 = ボタンで答えてよい、 下の [#guard-approval-not-by-button](#guard-approval-not-by-button))。 送信・投稿の承認は、 SHA-256 があっても止める。 語で拾うので言い換えた問いは通る。 file を名指さずに直しで進めるかを聞く問いも網に掛からず、 語の重なる情報の問い (計算の方法を file に当てはめるかを聞く問いなど) を誤って止めることもある。 網は file の名と SHA-256 の頭の形だけを見る (どの候補の hash かは見ない)。 承認の出どころは、 守りの道具が、 押した箱までの返事に当てる file の名と候補の全文の SHA-256 の頭が出ているときだけ押したボタンの文を承認に引くことで守る = [#button-text-not-user-words](#button-text-not-user-words))。
+  - 本人に今すぐ操作してもらうもの (時限つきのリンク・ログインの依頼) も、 質問つきの箱の turn の本文に置かない = 箱を問いなしで閉じる (実測: 質問つきの箱の本文に置いた時限つきのリンクが届かず、 本人が「リンクが出ていない」 と言うまで待ち続けた)。
+  - ボタンで承認が返ると、 本文を読んだ承認か読まない承認かを区別できない = 文面の承認を箱のボタンで受けて送信しない。 受けてしまったら、 送った文面を次の turn の本文に全文出し、 読めていたかを本人に確かめる。
+- <a id="button-message-truncation"></a>**ボタンの返事の文も長さで切られ、 切れたまま user の発言として記録される** (実測: 上限を超えた分が文の途中で落ちた)。 ボタンの文が承認の記録になる場合 (規則保護の guard が本人の発言として引く) は、 対象と変更を名指す部分を先頭に置き、 上限の内に収める。 上限は harness の tool の説明に書いてある値を読む。
+- <a id="button-text-not-user-words"></a>**ボタンの文は agent が書いた文で、 押したことは本人の行為や判断の証拠にならない** — 押すと本人の発言の形で会話に入り、 記録からは打った文と見分けがつかない。 ボタンに「読んだ。まだ直す点がある」 のような一人称の報告を持たせると、 本人がしていない通読と本人が述べていない評価が記録に入り、 中身の無いまま案件が本人の番で止まる (実測)。
+  - ボタンの文は行き先だけを書く (「まだ直す」「送る文面を作る」)。 本人がしていない行為 (読んだ・確かめた) と、 本人が述べていない評価を一人称で書かない。
+  - 発言が直前の箱のボタンの文と一字一句同じなら、 押されたものと読む。 記録には「ボタンで〜を選んだ」 と書き、 本人の言葉として引かない (決定の状態の書き方 = [`actor-attribution.md#decision-state-at-record-time`](actor-attribution.md#decision-state-at-record-time))。
+  - 押された後に中身が要る (どこを直すか) なら、 その turn で問う。 問わずに記録して終えると、 次に動く人がいなくなる。
+  - <a id="guard-approval-not-by-button"></a>守りの道具 (guard) に記録させる承認 (守られた file・設定の変更の承認) を箱のボタンで問うときは、 その返事 (本文か箱の recap・ask) の 1 つに、 当てる file の名と候補の全文の SHA-256 の頭 (8 字以上) を書く — 押された答えは、 押した箱までの返事にそれが出ているときだけ、 承認を記録する道具が本人の答えとして記録する (押したボタンの文を記録に残す)。 出ていなければ、 直前のボタンの文と一字一句同じ発言は記録せず、 本人に自分の言葉で打ち直してもらう往復が 1 回増える (実測)。 本人の裁定 = 承認はボタンで答えてよい (実測: ボタンで押した承認の一言を道具が断り、 打ち直す往復が続いた後)。 箱のボタンで問うときは、 file の名と SHA-256 の頭を箱の recap か ask に書く (本文に書いても守りの道具は照らせるが、 質問つきの箱の turn の本文は本人に届かないことがある = [#box-text-after-not-delivered](#box-text-after-not-delivered)。 箱の網は、 箱にそれが無い承認の問いを止め、 有る問いは止めない)。 原稿の保護領域の承認は候補の全文の hash を持たないので、 今のまま本文で問い、 本人が打つ発言で返してもらう。 照らし方の正本 = [`agent-rule-ownership.md#owner-answer-in-another-window`](agent-rule-ownership.md#owner-answer-in-another-window) の 3。
+- 箱の要約も user が読む文なので、 判断を仰ぐ文と同じく作業側の符号・略語で書かない ([`concise-output.md#decision-questions`](concise-output.md#decision-questions)。 実測: user に通じなかった「現在地」 の 1 つは箱の要約だった)。
+
+## 規律
+
+1. **user が受け取るべきもの (文面 deliverable・結論・判断材料・訂正) は、
+   ターンの最終メッセージに全文置く**。最終メッセージの後にツール呼び出しを
+   置かない (= 置いた時点でそのテキストは「最終」でなくなる)。
+2. **「上の文面」「先ほどの訂正」「前述の通り」と自ターン内を指す行為自体が
+   事故 signal**。referent が mid-turn text でも tool 入力でも file でも同罪 —
+   指したくなったら、その内容を最終メッセージに再掲する。
+3. ツール呼び出し前の冒頭テキストは**進捗の短報に限る** (= 消えても実害がない
+   もの)。deliverable をそこに置かない。
+4. 作業 (記録・commit 等) と文面提示が同居するターンでは、**順序 =
+   ツール呼び出し先行 → 最終メッセージで文面全文**。逆順にしない。
+5. **SoT 記録・commit は提示の代替にならない**。「正本 file に書いて link を
+   貼った」はコピペ用 deliverable の提示ではない (user に file を開かせて
+   該当箇所を発掘させる = 機械が手間を消す方向の逆)。記録と提示は両方やる。
+6. **機械向けの signal を最終メッセージに書かない**。HTML comment も
+   raw 表示されうる — hook 用 marker 等は tool 入力側に置く
+   ([#machine-marker-in-tool-input](#machine-marker-in-tool-input))。
+7. **「この印は user には見えない」と doc に書くなら、実際にその frontend で
+   確認してから書く**。未確認の不可視前提は、破れても Claude 側から観測できない。
+8. **tool 側で player が見えたことを user-visible と数えない**。media deliverable は最終応答の
+   direct link / local file まで運び、user が見えないと言ったら tool screenshot で反論しない。
+9. **turn を閉じる質問の箱で、 文面の承認を問わない** ([#turn-closing-question-box](#turn-closing-question-box))。
+   箱は最終メッセージを無くす (または読まれない) ので、 承認を求める文面と判断の一覧は、 箱に質問を入れない turn の最終メッセージに全文置く。
+
+## なぜ滑りやすいか
+
+自然な思考順序が「文面を作る → ついでに記録する」であるため、出力も
+文面 → ツールの順になりがち。また 1 回目の表示失敗は Claude 側から観測できない
+(= エラーも警告も出ず、user の指摘まで分からない) ため、同型を連発しやすい。
+2026-08-29 の再発はさらに、記録系の規律 (SoT 更新・同 turn commit+push) が
+強く内面化されているほど**最終メッセージが bookkeeping 報告で埋まり、user 向け
+提示が「上の」1 行に圧縮される**という転位を示した — 提示 step は価値の 100% が
+user の目に行き agent のループに何も返さないため、多部分作業で構造的に
+落ちやすい (motivated-substitution の verification family と同根)。
+ターン構成の反射として「deliverable は最後・全文」を焼き込むしかないが、
+規律単独では再発した実績があるため、Stop hook で「最終メッセージの
+『上の◯◯版/文面』型参照 ∧ tool call を含む turn」を検出して self-check を
+注入する機械 backstop が有効 (述語は転写 log で校正可能 — 実測では参照句 +
+deliverable 名詞の近接に絞ると誤検出ゼロで過去事故を全件 retroactive 検出した)。

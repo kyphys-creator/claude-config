@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# setup-codex.test.sh — setup-codex.sh の隔離・冪等・非上書き性を検証する
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Report the failing line and command instead of a silent exit 1.
+. "$SCRIPT_DIR/lib/test-err-trap.sh"
+CONFIG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TEMP_ROOT"' EXIT
+
+# The audit's public-layer pull-refresh check reads the real repo's post-merge
+# hook by default (machine state); pin it to a fixture so the test is hermetic.
+PUBLIC_POST_MERGE_FIXTURE="$TEMP_ROOT/public-post-merge"
+printf '%s\n' 'setup-codex.sh --refresh-personal-layer' > "$PUBLIC_POST_MERGE_FIXTURE"
+
+TEST_HOME="$TEMP_ROOT/home"
+TEST_CODEX_DIR="$TEST_HOME/.codex"
+TEST_WORKSPACE="$TEST_HOME/Documents/Codex"
+# <base> の fixture (audit-codex-integration.sh の workspace-root AGENTS.md)。 CI の checkout の親には無いので env で差す
+TEST_BASE="$TEMP_ROOT/base"
+mkdir -p "$TEST_BASE"
+cp "$CONFIG_ROOT/templates/root-AGENTS.md.default" "$TEST_BASE/AGENTS.md"
+export CLAUDE_BASE_DIR="$TEST_BASE"
+mkdir -p "$TEST_CODEX_DIR" "$TEST_HOME"
+TEST_REPOS_ROOT="$TEMP_ROOT/repos"
+TRAILER_REPO="$TEST_REPOS_ROOT/direct"
+ROOT_DISCOVERED_REPO="$TEST_REPOS_ROOT/discovered"
+OUTSIDE_REPO="$TEMP_ROOT/outside-repo"
+mkdir -p "$TRAILER_REPO" "$ROOT_DISCOVERED_REPO" "$OUTSIDE_REPO"
+git -C "$TRAILER_REPO" init -q
+git -C "$ROOT_DISCOVERED_REPO" init -q
+git -C "$OUTSIDE_REPO" init -q
+for repo in "$TRAILER_REPO" "$ROOT_DISCOVERED_REPO"; do
+  printf '%s\n' '# Agent instructions' 'Read CLAUDE.md and SESSION.md before work.' > "$repo/AGENTS.md"
+  printf '# project instructions\n' > "$repo/CLAUDE.md"
+  printf '# current state\n' > "$repo/SESSION.md"
+  git -C "$repo" add AGENTS.md CLAUDE.md SESSION.md
+done
+ln -s "$OUTSIDE_REPO" "$TEST_REPOS_ROOT/outside-link"
+python3 - "$TEST_CODEX_DIR/config.toml" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text(
+    'model = "gpt-5.6-terra"\n'
+    'model_reasoning_effort = "low"\n\n'
+    '[desktop]\n'
+    'followUpQueueMode = "queue"\n',
+    encoding="utf-8",
+)
+PY
+
+run_setup() {
+  HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/setup-codex.sh" "$@"
+}
+
+run_setup_for() {
+  local home="$1"
+  local codex_dir="$2"
+  local workspace="$3"
+  shift 3
+  HOME="$home" \
+  CODEX_USER_DIR="$codex_dir" \
+  CODEX_WORKSPACE_ROOT="$workspace" \
+  "$SCRIPT_DIR/setup-codex.sh" "$@"
+}
+
+# GNU の `stat -c` を先に試し、 出力が mode の形でなければ BSD の `stat -f` に落ちる。 exit code では
+# 分岐しない (GNU の `stat -f '%Lp' F` は cwd に `%Lp` という file があると exit 0 で FS 情報を返す。
+# conventions/hook-authoring.md#substitution-fallback-stdout-mixing)
+file_mode() {
+  local mode
+  mode="$(stat -c '%a' "$1" 2>/dev/null || true)"
+  case "$mode" in
+    [0-7][0-7][0-7] | [0-7][0-7][0-7][0-7]) ;;
+    *) mode="$(stat -f '%Lp' "$1")" ;;
+  esac
+  printf '%s\n' "$mode"
+}
+
+run_setup --set-default-effort high --configure-safe-local \
+  --repo "$TRAILER_REPO" --repo-root "$TEST_REPOS_ROOT"
+
+[ "$(readlink "$TEST_CODEX_DIR/AGENTS.md")" = "$CONFIG_ROOT/codex/HOME-AGENTS.md" ]
+[ "$(readlink "$TEST_WORKSPACE/AGENTS.md")" = "$CONFIG_ROOT/codex/AGENTS.md" ]
+[ "$(readlink "$TEST_CODEX_DIR/skills/claude-config-conventions")" = "$CONFIG_ROOT/codex/skills/claude-config-conventions" ]
+[ "$(readlink "$TEST_CODEX_DIR/skills/claude-config-operations")" = "$CONFIG_ROOT/codex/skills/claude-config-operations" ]
+[ "$(readlink "$TEST_CODEX_DIR/skills/codex-automation-routing")" = "$CONFIG_ROOT/codex/skills/codex-automation-routing" ]
+[ "$(readlink "$TEST_CODEX_DIR/claude-config-hooks")" = "$CONFIG_ROOT/codex/hooks" ]
+[ "$(readlink "$TEST_CODEX_DIR/hooks.json")" = "$CONFIG_ROOT/codex/hooks/hooks.json" ]
+grep -q '^## Repository routing$' "$TEST_CODEX_DIR/AGENTS.md"
+grep -q '^## Boundaries$' "$TEST_CODEX_DIR/AGENTS.md"
+grep -qx 'model_reasoning_effort = "high"' "$TEST_CODEX_DIR/config.toml"
+grep -qx 'approval_policy = "on-request"' "$TEST_CODEX_DIR/config.toml"
+grep -qx 'sandbox_mode = "workspace-write"' "$TEST_CODEX_DIR/config.toml"
+awk '
+  BEGIN { table = 0; effort = approval = sandbox = desktop = bad = 0 }
+  /^\[/ { table = 1 }
+  /^model_reasoning_effort = "high"$/ {
+    if (table) bad = 1
+    effort += 1
+  }
+  /^approval_policy = "on-request"$/ {
+    if (table) bad = 1
+    approval += 1
+  }
+  /^sandbox_mode = "workspace-write"$/ {
+    if (table) bad = 1
+    sandbox += 1
+  }
+  /^followUpQueueMode = "queue"$/ { desktop += 1 }
+  END {
+    if (bad || effort != 1 || approval != 1 || sandbox != 1 || desktop != 1) exit 1
+  }
+' "$TEST_CODEX_DIR/config.toml"
+[ ! -e "$TEST_HOME/.claude" ]
+grep -qF 'prepare-commit-msg-session.sh' "$TRAILER_REPO/.git/hooks/prepare-commit-msg"
+grep -qF 'prepare-commit-msg-session.sh' "$ROOT_DISCOVERED_REPO/.git/hooks/prepare-commit-msg"
+[ ! -e "$OUTSIDE_REPO/.git/hooks/prepare-commit-msg" ]
+
+PERSONAL_LAYER="$TEMP_ROOT/personal-layer"
+mkdir -p "$PERSONAL_LAYER/codex" "$PERSONAL_LAYER/.git/hooks"
+: > "$PERSONAL_LAYER/.claude-personal-layer"
+printf '%s\n' '# private Codex fixture' 'INITIAL_PERSONAL_OVERLAY' > "$PERSONAL_LAYER/codex/AGENTS.md"
+cat > "$PERSONAL_LAYER/.git/hooks/post-merge" <<'EOF'
+#!/usr/bin/env bash
+# managed-by: claude-config setup-dropbox-refs
+true
+EOF
+chmod +x "$PERSONAL_LAYER/.git/hooks/post-merge"
+PERSONAL_LAYER="$(cd "$PERSONAL_LAYER" && pwd -P)"
+
+mkdir -p "$PERSONAL_LAYER/skill/finish"
+printf '%s\n' '---' 'name: finish' 'description: Synthetic finishing fixture' '---' 'Use this canonical fixture.' > "$PERSONAL_LAYER/skill/finish/SKILL.md"
+printf '%s\n' '{"version":1,"skills":{"finish":"skill/finish"}}' > "$PERSONAL_LAYER/codex/skills.json"
+run_setup --personal-layer "$PERSONAL_LAYER"
+[ -L "$TEST_CODEX_DIR/skills/finish" ]
+[ "$(readlink "$TEST_CODEX_DIR/skills/finish")" = "$PERSONAL_LAYER/skill/finish" ]
+
+[ ! -L "$TEST_CODEX_DIR/AGENTS.md" ]
+grep -qx '<!-- claude-config-codex: global-personal-composite -->' "$TEST_CODEX_DIR/AGENTS.md"
+grep -qx "<!-- personal-source: $PERSONAL_LAYER -->" "$TEST_CODEX_DIR/AGENTS.md"
+grep -qx 'INITIAL_PERSONAL_OVERLAY' "$TEST_CODEX_DIR/AGENTS.md"
+grep -q '^# Global Codex bootstrap$' "$TEST_CODEX_DIR/AGENTS.md"
+[ "$(file_mode "$TEST_CODEX_DIR/AGENTS.md")" = "600" ]
+grep -qF '# claude-config post-merge extensions' "$PERSONAL_LAYER/.git/hooks/post-merge"
+PERSONAL_REFRESH="$PERSONAL_LAYER/.git/hooks/post-merge.d/claude-config-codex-personal-layer.sh"
+[ -x "$PERSONAL_REFRESH" ]
+grep -qF -- '--refresh-personal-layer' "$PERSONAL_REFRESH"
+
+printf '%s\n' 'UPDATED_PERSONAL_OVERLAY' >> "$PERSONAL_LAYER/codex/AGENTS.md"
+"$PERSONAL_LAYER/.git/hooks/post-merge" 0 0 0 >/dev/null
+grep -qx 'UPDATED_PERSONAL_OVERLAY' "$TEST_CODEX_DIR/AGENTS.md"
+rm "$TEST_CODEX_DIR/skills/finish"
+"$PERSONAL_LAYER/.git/hooks/post-merge" 0 0 0 >/dev/null
+[ -L "$TEST_CODEX_DIR/skills/finish" ]
+
+OVERSIZED_LAYER="$TEMP_ROOT/oversized-personal-layer"
+OVERSIZED_HOME="$TEMP_ROOT/oversized-home"
+mkdir -p "$OVERSIZED_LAYER/codex" "$OVERSIZED_HOME/.codex"
+: > "$OVERSIZED_LAYER/.claude-personal-layer"
+python3 - "$OVERSIZED_LAYER/codex/AGENTS.md" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text("x" * 4097, encoding="utf-8")
+PY
+if run_setup_for "$OVERSIZED_HOME" "$OVERSIZED_HOME/.codex" \
+  "$OVERSIZED_HOME/Documents/Codex" --personal-layer "$OVERSIZED_LAYER" \
+  >/dev/null 2>&1; then
+  echo "expected setup to reject a personal overlay above 4 KiB" >&2
+  exit 1
+fi
+[ ! -e "$OVERSIZED_HOME/.codex/AGENTS.md" ]
+
+HOME="$TEST_HOME" \
+CODEX_USER_DIR="$TEST_CODEX_DIR" \
+CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+CLAUDE_CONFIG_POST_MERGE="$PUBLIC_POST_MERGE_FIXTURE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$TRAILER_REPO" \
+  --repo "$ROOT_DISCOVERED_REPO" >/dev/null
+
+run_setup --replace
+[ "$(readlink "$TEST_CODEX_DIR/AGENTS.md")" = "$CONFIG_ROOT/codex/HOME-AGENTS.md" ]
+
+CONFLICT_HOME="$TEMP_ROOT/conflict-home"
+CONFLICT_CODEX_DIR="$CONFLICT_HOME/.codex"
+CONFLICT_WORKSPACE="$CONFLICT_HOME/Documents/Codex"
+mkdir -p "$CONFLICT_CODEX_DIR"
+printf 'user hook configuration\n' > "$CONFLICT_CODEX_DIR/hooks.json"
+
+if run_setup_for "$CONFLICT_HOME" "$CONFLICT_CODEX_DIR" "$CONFLICT_WORKSPACE" \
+  --set-default-effort high --configure-safe-local >/dev/null 2>&1; then
+  echo "expected setup to refuse a user-managed hooks.json" >&2
+  exit 1
+fi
+
+grep -qx 'user hook configuration' "$CONFLICT_CODEX_DIR/hooks.json"
+[ ! -e "$CONFLICT_CODEX_DIR/AGENTS.md" ]
+[ ! -e "$CONFLICT_WORKSPACE/AGENTS.md" ]
+[ ! -e "$CONFLICT_CODEX_DIR/skills/claude-config-conventions" ]
+[ ! -e "$CONFLICT_CODEX_DIR/skills/claude-config-operations" ]
+[ ! -e "$CONFLICT_CODEX_DIR/skills/codex-automation-routing" ]
+[ ! -e "$CONFLICT_CODEX_DIR/claude-config-hooks" ]
+[ ! -e "$CONFLICT_CODEX_DIR/config.toml" ]
+
+run_setup_for "$CONFLICT_HOME" "$CONFLICT_CODEX_DIR" "$CONFLICT_WORKSPACE" --replace
+[ "$(readlink "$CONFLICT_CODEX_DIR/hooks.json")" = "$CONFIG_ROOT/codex/hooks/hooks.json" ]
+hook_backup="$(find "$CONFLICT_CODEX_DIR" -maxdepth 1 -type f -name 'hooks.json.bak-*' -print -quit)"
+[ -n "$hook_backup" ]
+grep -qx 'user hook configuration' "$hook_backup"
+
+HOOK_CONFLICT_HOME="$TEMP_ROOT/hook-conflict-home"
+HOOK_CONFLICT_CODEX="$HOOK_CONFLICT_HOME/.codex"
+HOOK_CONFLICT_WORKSPACE="$HOOK_CONFLICT_HOME/Documents/Codex"
+HOOK_CONFLICT_REPO="$TEMP_ROOT/hook-conflict-repo"
+mkdir -p "$HOOK_CONFLICT_CODEX" "$HOOK_CONFLICT_REPO"
+git -C "$HOOK_CONFLICT_REPO" init -q
+printf '%s\n' '#!/bin/sh' 'echo user hook' > "$HOOK_CONFLICT_REPO/.git/hooks/prepare-commit-msg"
+if run_setup_for "$HOOK_CONFLICT_HOME" "$HOOK_CONFLICT_CODEX" "$HOOK_CONFLICT_WORKSPACE" \
+  --repo "$HOOK_CONFLICT_REPO" >/dev/null 2>&1; then
+  echo "expected setup to refuse a user-managed prepare-commit-msg hook" >&2
+  exit 1
+fi
+grep -qx 'echo user hook' "$HOOK_CONFLICT_REPO/.git/hooks/prepare-commit-msg"
+[ ! -e "$HOOK_CONFLICT_CODEX/AGENTS.md" ]
+[ ! -e "$HOOK_CONFLICT_WORKSPACE/AGENTS.md" ]
+run_setup_for "$HOOK_CONFLICT_HOME" "$HOOK_CONFLICT_CODEX" "$HOOK_CONFLICT_WORKSPACE" \
+  --replace --repo "$HOOK_CONFLICT_REPO" >/dev/null
+grep -qF 'prepare-commit-msg-session.sh' "$HOOK_CONFLICT_REPO/.git/hooks/prepare-commit-msg"
+hook_conflict_backup="$(find "$HOOK_CONFLICT_REPO/.git/hooks" -maxdepth 1 -type f \
+  -name 'prepare-commit-msg.bak-*' -print -quit)"
+[ -n "$hook_conflict_backup" ]
+grep -qx 'echo user hook' "$hook_conflict_backup"
+
+ln -s "$CONFIG_ROOT/codex/HOME-AGENTS.md" "$TEST_HOME/AGENTS.md"
+
+run_setup --set-default-effort high --configure-safe-local
+
+[ ! -e "$TEST_HOME/AGENTS.md" ]
+
+HOME="$TEST_HOME" \
+CODEX_USER_DIR="$TEST_CODEX_DIR" \
+CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+CLAUDE_CONFIG_POST_MERGE="$PUBLIC_POST_MERGE_FIXTURE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" >/dev/null
+
+rm "$TEST_CODEX_DIR/AGENTS.md"
+printf 'user instruction\n' > "$TEST_CODEX_DIR/AGENTS.md"
+if run_setup >/dev/null 2>&1; then
+  echo "expected setup to refuse a user-managed global AGENTS.md" >&2
+  exit 1
+fi
+grep -qx 'user instruction' "$TEST_CODEX_DIR/AGENTS.md"
+
+run_setup --replace
+[ "$(readlink "$TEST_CODEX_DIR/AGENTS.md")" = "$CONFIG_ROOT/codex/HOME-AGENTS.md" ]
+backup=""
+for candidate in "$TEST_CODEX_DIR"/AGENTS.md.bak-*; do
+  if grep -qx 'user instruction' "$candidate"; then
+    backup="$candidate"
+    break
+  fi
+done
+[ -n "$backup" ]
+
+echo "setup-codex tests passed"

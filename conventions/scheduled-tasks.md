@@ -1,6 +1,144 @@
+<!-- doc-meta
+when: scheduled task / launchd routine を作成・管理するとき + 定期 job が毎回読む script を直すとき (#live-script-replace) + 定期 job の間隔では間に合わない仕事を常駐の worker に任せるとき (#resident-worker-from-periodic-job) + 無人 run の log に本報告が残っていないとき・hook が無人の run かを知りたいとき (#headless-log-full-report / #routine-id-marker) + 定期 job の wrapper の終了値を決めるとき・手で確かめる入口を作るとき・手で回した結果が本番と食い違ったとき (#wrapper-exit-and-manual-check)
+category: harness-core
+summary: Scheduled Tasks 規約（SKILL.md 二重構造・同期ルール・headless context budget = cwd の CLAUDE.md 肥大で "Prompt is too long" 全滅する罠と診断 ladder）
+-->
 # Scheduled Tasks 規約
 
 Claude Code scheduled tasks を使うリポで適用。CLAUDE.md から参照: `~/Claude/claude-config/conventions/scheduled-tasks.md`
+
+## <a id="execution-locus-selection"></a>0. 実行 locus で機構を選ぶ (= scheduled task が正しい道具か先に問う)
+
+定期/自動ジョブを組む前に、 **(1) run-time に Claude の judgment が要るか** + **(2) 何にアクセスするか** で実行機構を選ぶ。 「定期 = scheduled task」 と reflex で選ぶと、 deterministic job に Claude を毎回起こす過剰や、 cloud routine の local-access 不在に後で衝突する。製品横断の完全な判別軸 (= wake event / judgment / context continuity / locus / authority) は [`docs/convention-design-principles.md#automation-trigger-routing`](../docs/convention-design-principles.md#automation-trigger-routing) が正本。
+
+| ジョブの要件 | 機構 | 理由 |
+|---|---|---|
+| **deterministic** な機械処理 (= run-time に Claude judgment 不要) で local file/repo/CLI (sips, npm, git push) に依存 | **launchd / cron (該当マシンで local 実行)** | local 実行・token cost ゼロ・LLM 非依存・Claude runtime 不要。 純粋な script はこれが最適 |
+| **Claude の judgment / draft** が run-time に要る (+ PushNotification を使いたい) | **Claude Code scheduled task (SKILL.md)** | **local の fresh Claude session で実行され local file/cred に アクセスできる** (= 実例: daily-mail-triage-check が `~/Claude/.../*.py` を local OAuth `~/.gmail-mcp/` で実行)。 「backend」 は **prompt の保存先**であって実行 locus ではない (下記 §アーキテクチャ)。 ⚠️ 1 run = 1 session が「最近の項目」 に積まれる ([#headless-session-persistence](#headless-session-persistence)、 launchd cron + `claude -p` なら回避可) |
+| 職場/組織 NW から API が block される (例: campus から Discord API が Cloudflare 1010) | **GitHub Actions (cloud cron)** | 別 network egress から実行 + secret で credential 供給 |
+
+⚠️ **`schedule` skill の「remote agent / routine」 は上記 scheduled task とは別物**: これは **cloud で起動し local file に一切アクセスできない** (= 過去に「local 完結 script を schedule skill で trigger」 が cloud 実行で根本的に動かず redesign した RCA)。 local 依存ジョブを cloud routine に載せない。 **scheduled task (= local) と混同しない** (= 「scheduled task は local 不可」 は誤り、 上記の通り local access あり)。
+
+**reflex**: 「定期実行 = scheduled task」 ではない。 まず **(1) run-time に Claude judgment が要るか** — 不要 (= 純粋 script) なら launchd/cron (= Claude を毎回起こさない、 決定的、 無料)。 要るなら scheduled task (= local access あり)。 次に **(2) cloud に出す必要があるか** — NW block 回避なら GitHub Actions、 それ以外で local 依存があるなら cloud routine (schedule skill) を避ける。 実行 locus が不確かな機構は、 local access を前提にする前に locus を検証する (= 機構名から「remote だろう」 と推測せず実証する)。
+
+machine-local job を「どのマシンに登録するか / 登録漏れをどう surface するか」 は [multi-machine-state.md](multi-machine-state.md)。 無人 publish の安全 gate は [`data-pipeline-automation.md` autonomous-execution-gate](data-pipeline-automation.md#autonomous-execution-gate)。
+
+### <a id="session-bound-background-job"></a>session の中で起動した長い 1 回きりの処理は、 session と一緒に止まる
+
+Claude Code の Bash を `run_in_background` で起動した処理は session の process の子で、 session が終わる・作り直される (app の再起動・resume) と止められる (SIGTERM。 実測 = 数十分かかる検証が途中で `Terminated: 15` で終わり、 harness は「前の session が終わる前に終わらなかった」 と知らせた)。
+session より長く生きる必要がある 1 回きりの処理 (長い予行・大きな検証・一括の変換) は、 新しい process group で切り離して起動し、 出力は file に書く:
+
+```bash
+nohup python3 -c "import os; os.setsid(); os.execvp('bash', ['bash', 'job.sh'])" > job.log 2>&1 < /dev/null & disown
+```
+
+終わりを待つのは別の見張り (`until ! pgrep -f job.sh >/dev/null; do sleep 10; done; tail job.log`) を `run_in_background` で。 見張りが session と一緒に止まっても処理は残り、 log を読めば続きから判断できる。 定期の処理はこの形でなく上の表の機構に載せる。
+
+### <a id="account-switch-independent"></a>アカウント切り替えに非依存にしたいとき (= Claude Code desktop app と CLI の 2 認証ストア)
+
+Claude Code の認証は **2 つの独立ストア**を持つ: **Claude Code desktop app** と **CLI (`claude`、 `~/.claude.json` の単一 `oauthAccount`)**。両者は別アカウントで**共存**しうる — `claude auth` は login/logout/status のみ (= 同時 1 アカウント) だが、 **Claude Code (desktop) 側のアカウント切り替えは CLI の `~/.claude.json` を上書きしない** (実測: Claude Code (desktop) と CLI が別アカウントで同時に存在した)。これが無人ジョブの機構選択に効く:
+
+- **scheduled task はアカウントに紐づく** → Claude Code (desktop) のアカウントを切り替えると、 別アカウントで作った task が見えなくなり **発火が止まる** (実測: 切替後に定時ジョブが約 37h 未発火)。
+- **launchd cron + `claude -p --permission-mode auto` は CLI 認証 (= 固定・Claude Code (desktop) 切替に非依存) で走る**。`claude -p` は Claude judgment (翻訳・判定・検証ゲート) と MCP も headless で提供する (実測: `--permission-mode auto` で MCP 込みの SKILL が headless 完走し、 SKILL の安全則も順守された)。
+
+→ 上の表は「Claude judgment 要 → scheduled task」 だが、 **Claude judgment が要り、 かつ アカウント切替で止めたくないなら、 第 3 の道 = launchd cron + `claude -p` (= CLI 認証を固定土台にする)**。同じ理由で `claude remote-control` サーバーモード (= CLI 認証で常駐、 [remote-control-server.md](remote-control-server.md)) も Claude Code (desktop) 切替に非依存。 ⚠️ ただし launchd は LANG 空 (C locale) なので `claude -p` の prompt は ASCII のみにする ([shell-multibyte-truncation.md](shell-multibyte-truncation.md))。
+
+### <a id="launchd-cron-engine"></a>launchd cron の登録機構 (= 汎用エンジン)
+
+launchd cron で無人ルーチンを回す plist の生成・登録・状態確認・解除は、 `scripts/install-launchd-cron.sh` が **汎用エンジンの SoT** (= [remote-control-server.md](remote-control-server.md) と同じ「スクリプトが plist / label 設計の SoT、 doc に複製しない」 パターン)。 呼び出し側は label prefix・workdir・ROUTINES を渡すだけで、 **ROUTINES list / 個別ジョブ定義はエンジンに焼かない** (= エンジンは汎用機構のみ、 個別ジョブは呼び出し側の責務)。
+
+```sh
+install-launchd-cron.sh --label-prefix PREFIX [--workdir DIR] \
+  --routine "id|type|target|cron" [--routine ...] [ACTION]
+```
+
+- **ACTION**: (既定 install) / `--status` / `--run <id>` / `--install-one <id>` / `--uninstall-one <id>` / `--uninstall` / `--ensure`。 `--uninstall-one` は label-prefix + id だけで動く (= routine spec 不要、 期間限定ジョブの停止に使える)。 `--ensure` は **未 install の routine を install し、 loaded 済みでも cron が plist とずれていれば StartCalendarInterval だけを書き換えて再 load** する冪等・quiet・fail-open アクション (= 照合済み / target 未取得 / 非 macOS を無音 skip。 照合済みの印があるので定常状態では plist を読まない) で、 **SessionStart hook から呼んで「新 routine を git pull したマシンに自動配備」** する用途 (= ROUTINES に足して pull すれば次 session でそのマシン〔新 active host 等〕に自動 install、 「新ホストへ手動 install」 gap を塞ぐ。 auto-pull hook が `--ensure` 呼び出しより前に並んでいれば **pull → install が同一 session 内で完結**する)。 ⚠️ reflex: 新 routine 追加後に「他マシンで手動 `--install-one` が必要」 と**案内・記録する前に、 この auto-deploy 経路が配線済みか確認する** — 経路が在るのに手動手順を案内するのは「機構が無い」 側への不在断定 (= 2026-08 に配線済み環境で手動手順を案内した実例)。 **既存 routine の cron を変えたときも同じ** (= 次 session で各マシンの calendar が直る)。 ⚠️ ただし自動で届くのは calendar と、 関門の起動行の形 (下の `--gate`。 旧形 `<gate> || exit 0` を新形に置き換えるだけで他は 1 文字も変えない) と、 skill の起動の形 (`exec "<claude>" -p` → stream-json の log 中継 = [#headless-log-full-report](#headless-log-full-report)) と `CLAUDE_ROUTINE_ID` の export だけ: `--gate` の中身 / `CRON_MODEL` / `CRON_EFFORT` / `CRON_CONFIG_DIR` / target の変更は各マシンで `--install-one` が要る (= plist を丸ごと作り直すと install 時に手で渡した pin が消えるので、 engine は command 側のそれ以外に触らない)。 実行中の job は殺さないよう次の `--ensure` に回す。 一般則 = [`multi-machine-state.md#ensure-reconciles-content`](multi-machine-state.md#ensure-reconciles-content)。
+- <a id="launchd-install-classifier"></a>**auto mode では登録の command が classifier に「無断の常駐化」 として止まることがある** (実測)。 同じ登録を session 開始の hook や別の script に載せて走らせるのは迂回。 本人に操作と対象 (label か何の定期 job か) を名指して承認してもらい、 同じ command を 1 回打ち直す ([`claude-code-permissions.md#chat-approval-reaches-classifier`](claude-code-permissions.md#chat-approval-reaches-classifier))。 他の機械へ配る `--ensure` の段も、 同じ承認の範囲に入れてから足す。
+- **type**: `skill` = `claude -p --permission-mode bypassPermissions` で SKILL.md を indirection 実行 (= Claude judgment 要。 log には全部の assistant の文を中継が書く = [#headless-log-full-report](#headless-log-full-report)) / `cmd` = script を直接実行 (= 決定的・claude 不要)。
+- **cron** は 5-field。 各欄に `*` / `N` / `N-M` / `*/S` / `N-M/S` と、 それらの `,` 区切りを書ける (例: `5 8,12,17 * * *` = 8:05・12:05・17:05)。 launchd は範囲・リスト・step を持たないので、 engine が値を列挙して StartCalendarInterval の配列へ展開する (= 時刻ごとに routine を分ける必要は無い)。 日と曜日が両方 `*` 以外なら cron と同じく「どちらかに合えば」 走る。 名前 (`MON`)・`N/S`・`@daily` は読まない = install 系の action は **plist を書く前に**、 どの routine のどの欄が読めないかを 1 行ずつ出して非 0 で止まる。 書ける形の正本 = engine header。
+- CLI 認証 (`~/.claude.json` の単一 account) で走るので Claude Code (desktop) のアカウント切替に非依存 (= 上記)。 launchd は LANG 空なので prompt は ASCII のみ ([shell-multibyte-truncation.md](shell-multibyte-truncation.md))。
+- **`CRON_CONFIG_DIR` env** (任意): routine を**別 account の認証ストア** (`CLAUDE_CONFIG_DIR=<dir>`) で走らせる pin — plist に `export CLAUDE_CONFIG_DIR="<dir>"` が焼かれ、 対話 CLI の account を保ったまま**無人 routine の消費 account だけを分離**できる (例: 週間 usage 制限の reset window を無人時間帯 〔週末等〕 に揃える)。 前提 = pin 先 dir で `claude auth login` 済 + **headless 生成可** (metadata login 済でも headless 401 になりうる → 導入時は `--run <id>` で probe) + routine が使う **MCP 登録 / settings.json は config dir ごとに独立**なので pin 先にも要複製。 詳細 = engine header の env 節。
+- **plist PATH への node 追記** (2026-08-29): launchd の PATH には nvm 等の node が乗らないため、 stdio MCP server (`command: node` / `npx`) を headless routine が spawn できない環境がある (= claude 本体が native binary だと **routine 自体は走るのに MCP だけ silent に欠ける**)。 engine は install 時に `command -v node` を解決してその dir を plist PATH 末尾に焼く — ∴ **installer は node が解決できる shell から実行する** (nvm なら初期化済の shell)。 既存 plist への反映は再 install 要。
+- **`--gate "<snippet>"`** (任意): wrapper に `cd WORKDIR && { <snippet>; <終了値の振り分け>; } && exec <routine>` の形で gate を挿入する。 snippet の終了値 **0 = 実行 / 1 = 待機** (routine は実行されず exit 0 = defer) / **それ以外の非 0 = 失敗** (stderr に 1 行 + 同じ終了値で終わる = launchd の終了コードに出る)。 旧形 `<snippet> || exit 0` は、 gate の interpreter が起動できない場合 (exit 69 / 127) も待機に畳み、 ジョブを黙って永久に休ませた ([`shell-env.md#job-python-by-capability`](shell-env.md#job-python-by-capability))。 複数マシンで「今どのマシンが本番か」 を台帳で切り替える **active-routine-host failover** ([`multi-machine-state.md` account-host-failover](multi-machine-state.md#account-host-failover)) に使う (gate 実体 = `scripts/routine-host-gate.py`)。
+
+### <a id="per-recipient-notification-locus"></a>人間向け通知は recipient ごとの locus で動かす
+
+active-host gate は**共有 state を一度だけ更新する singleton job**のための機構であり、すべての routine に一律適用するものではない。local OS notification の成果物は「共有 file」ではなく**その端末の利用者へ届く表示**なので、通知を受ける各端末に別 label / 別 wrapper で ungated install する。standby 端末を gate で止めると、job 自体は正常終了しても recipient への delivery はゼロになる。
+
+| 成果物 | 配備 | gate |
+|---|---|---|
+| 共有 repo / ledger / 外部 endpoint を更新 | 本番 host 候補すべて | active-host gate で singleton |
+| 各端末の OS 通知・端末状態 heartbeat | recipient / 観測対象の各端末 | **ungated**。別 label prefix で singleton 監視の対象外にする |
+| device-independent push service へ 1 回送信 | producer 1 台 | singleton 可。ただし全 recipient への配信を service 側で検証 |
+
+導入・移行時は wrapper source だけでなく、各対象端末の生成 plist `ProgramArguments` を読み、(a) 期待する label、(b) schedule、(c) gate snippet の有無を確認する。旧 gated 登録は同じ routine id でも別 label の独立 state なので、全端末で bootout + plist 削除まで行う ([#mechanism-migration-kill-all-registrations](#mechanism-migration-kill-all-registrations))。
+
+<a id="agent-direct-launchd-install"></a>**agent が常駐の job を直接入れる操作は、 auto mode の自動判定に止められることがある** (実測 = installer の `--ensure` で KeepAlive の job を `launchctl bootstrap` しようとして止められた)。 迂回しない。 配備を session 開始の自動適用 (hook が installer の `--ensure` を毎回呼ぶ) に載せておけば、 次に session が開いた時に入る = agent の操作が止められても配布は止まらない (実測: 同じ機械で別の session が開いた時に入り、 最初の出力まで出た)。 入ったかは launchd の登録 (`launchctl print gui/<uid>/<label>`) と最初の出力 (log・送った記録) で確かめる。 人に「あとで 1 回入れて」 と渡さない。
+
+**止め方の違い (= launchd cron 版 vs scheduled-task MCP 版)**: 同じ「定期ジョブ」 でも停止操作が機構で異なる。 launchd cron 版は `--uninstall-one <task-id>` (= `launchctl bootout` + plist 削除)、 scheduled-task MCP 版は `scheduled-tasks` MCP の delete。 期間限定ジョブ (= 大会期間だけ等) の自己停止 runbook を書くときは、 **どちらの機構で登録したか**に応じた停止コマンドを記す (= 機構を取り違えると停止できない)。
+
+### <a id="launchd-python-with-deps"></a>cmd routine の `python3` は「依存 module を import できる個体」 で選ぶ (2026-09-08)
+
+launchd の cmd wrapper は `PATH` を自前で組む (= `/opt/homebrew/bin` を先頭に置くのが定石)。 その結果 `python3` が **homebrew の python (site-packages 空)** に解決し、 対話 shell では通っていた `import yaml` が `ModuleNotFoundError: No module named 'yaml'` で落ちる機械がある (Apple Silicon MacBook 実測。 system `/usr/bin/python3` は PyYAML 同梱)。 対話 shell の `python3` と launchd の `python3` は別個体になり得る = 「手元で動いた」 は routine の証明にならない。
+
+wrapper 側の定石 (= 名前でなく能力で選ぶ):
+
+```bash
+PY=""
+for c in /usr/bin/python3 "$(command -v python3 2>/dev/null)" /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+  [ -n "$c" ] && [ -x "$c" ] && "$c" -c 'import yaml' >/dev/null 2>&1 && { PY="$c"; break; }
+done
+[ -n "$PY" ] || { echo "<routine>: no python3 with PyYAML" >&2; exit 1; }
+exec "$PY" "<engine>.py" "$@"
+```
+
+`import yaml` の部分は engine の実依存に合わせる (numpy 等)。 Python の shim が `sys.executable` で engine を exec する構造でも、 shim 自身を起動する python がこの選択を通っていれば engine に引き継がれる。 検証は wrapper 経由で `--dry` / `--selftest` を 1 回 (= launchd の exit≠0 監視 〔[headless-context-budget の監視](#headless-context-budget) と同じ層〕 が後段の backstop)。
+
+### <a id="precondition-after-pull"></a>wrapper が pull してから使う file の有無は、 pull の後で見る
+
+無人の wrapper が別の repo を pull し、 その repo の file (engine・設定) を使う形では、 file の有無の確認を pull より前に置かない。 別の機械で足した file がこの機械にまだ届いていないと、 確認が先に走って「file が無い」 で止まり、 届いていれば動いたはずの run が 1 周期 (週 1 の job なら 1 週間) 遅れる (実測)。 順番 = pull (失敗は log に残して続ける) → 有無の確認 → 使う。 確認の失敗の文言は「pull が通らなかったかもしれない、 log を見る」 にする (「pull する」 と書いても、 自分で pull した後の run では打つ手にならない)。
+
+### <a id="headless-session-persistence"></a>無人 run の session 痕跡 (= 「最近の項目」 noise と `--no-session-persistence`)
+
+定期 routine は **1 run = 1 session** を作る。 これがどの surface に痕跡を残すかは機構で違い、 daily × 複数本を数週間回すと session 一覧 (= desktop app の「最近の項目」) が routine session で埋まる実害になる (2026-07 実測: 3 本/日 × 数週間 ≈ 数十 entry を手で消す羽目)。
+
+| 機構 | session 痕跡 (2026-07 実測) |
+|---|---|
+| **Claude Code desktop app の scheduled task** | 1 run ごとに desktop session が作られ「最近の項目」 に積まれる。 **抑止 option なし** (= task 側に session を隠す設定が存在しない)。 掃除は `archive_session` (1 件ずつ承認) か手動。 ⚠️ 2026-07-04 実測: `remoteControlAtStartup: true` のマシンでは task run session が `<hostname>-<codename>` の RC 風名称で**他端末の recents にも**現れ、 終了せず live のまま数十件積み上がった。 ⚠️ **registry は account × app-install scoped**: 同一マシンでアカウントを切り替えると旧 account registry の enabled task が**黙って復活**し、 launchd へ移行済のジョブと**二重実行**になる (2026-07-04 実測: swap 2 日後に発覚、 同一ジョブの heartbeat 二重打刻で実証)。 復活地雷の解除 = 移行済 task を delete か enabled:false 化 (disabled は swap を跨いで保持される)。 移行手順の一般則 = [#mechanism-migration-kill-all-registrations](#mechanism-migration-kill-all-registrations) |
+| **launchd cron + `claude -p`** (既定) | transcript は local `~/.claude/projects/<dir>/<session-id>.jsonl` に保存される。 **recents に出た確証事例は無し**: 同日 A/B で remoteControlAtStartup: true のマシンの plain `-p` 単発 (CLI 2.1.198) は recents に出なかった。 ⚠️ errata ×2 (2026-07-04、 同日中の 2 段階訂正): 初版「recents に出ない実測」 は standby マシン (= gate defer で cron 未実行) での観測 = **無効** / 第 2 版「30 分 cron run が RC session として recents に出現」 は **誤帰属** = 出ていた session は同一ジョブが二重登録されていた **desktop scheduled task 側の run** と後に確定 (= 左行の話。 prompt 文面が registry 登録版と一致したことで判別)。 headless への remoteControlAtStartup 波及は docs が interactive のみ言及で理論上排除しきれないため、 engine は念のため RC override を付与する (= 下記) |
+| **launchd cron + `claude -p --no-session-persistence` + RC override** (= 下記、 engine 既定) | **session が disk にも session 一覧にも一切残らない** (実測: .jsonl 生成ゼロ + `list_sessions` 不出現)。 `--no-session-persistence` 単独で RC 登録まで抑止するかは未検証のため、 RC override と併用する (= belt-and-braces) |
+
+- **`--no-session-persistence` は `--print` (= `-p`) 専用 flag**。 resume 不可・transcript 無しになるので、 **事後デバッグは plist の `StandardOutPath` log file が唯一の手掛かり** — 無人 routine は元々 log file が主 debug surface なので通常は失うものがない。 対話 session には使わない。
+- **RC 自動有効化の per-invocation override**: settings の `remoteControlAtStartup: true` (= 手元対話 session のリモート続行用) は**そのマシンの CLI 全 session に効く**ため、 cron run には `--settings '{"remoteControlAtStartup":false}'` を渡して RC 登録を無効化する (= 対話 session 側の設定・リモート続行は不変。 これを怠ると上表の「hostname-prefix RC session が recents に出る + live 積み上がり」 が起きる)。
+- `scripts/install-launchd-cron.sh` (= 汎用エンジン) は skill 型 routine に **`--no-session-persistence` と RC override の両方を capability-gated で自動付与** (= install/run 時に `--help` probe、 未対応 CLI では従来挙動に degrade して routine を殺さない)。 ⚠️ **flag は plist 生成時に焼かれる** — `--ensure` が既存の plist に当てるのは calendar と起動行の形 (関門・stream-json の log 中継・`CLAUDE_ROUTINE_ID`、 該当部分だけ) で、 それ以外の flag の変更は各マシンで `--install-one` が要る ([#launchd-cron-engine](#launchd-cron-engine))。
+- 旧 CLI 世代の代替: `CLAUDE_CODE_SKIP_PROMPT_HISTORY=1` (= 全 transcript 書込み抑止、 対話含め全 run に効くので過剰) / `cleanupPeriodDays` (= 起動時の古い session 掃除、 即時性なし)。 `--no-save` / `--incognito` / session-sync 無効化 env は**存在しない** (2026-07 時点 docs + issue 調査)。
+- **PushNotification は headless `claude -p` から呼べるが、 スマホには届かない**: push を送るのは Remote Control がつながった session だけで、 `-p` は Remote Control を持てない。 結果は「Not sent — this terminal is active …」 か「Mobile push not sent (Remote Control inactive).」 で、 無人の時間帯の run も前者だった (実測、 根拠と閉じ方 = [`public-page-watch.md#sealed-headless-push`](public-page-watch.md#sealed-headless-push))。 **「Not sent」 は届いていない** = 無人 routine では失敗として残す (正常扱いにしない)。
+- **機構選択への含意**: 毎日/高頻度の無人 routine を desktop scheduled task で回すと「最近の項目」 noise が構造的に発生する。 launchd cron + `claude -p` + 上記 2 flag なら zero-trace (= [#account-switch-independent](#account-switch-independent) のアカウント非依存に加えた第 2 の移行動機)。
+
+### <a id="headless-log-full-report"></a>無人 run の log に本報告を残す (= text 形式は最後の message しか書かない)
+
+`claude -p` の既定の出力 (`--output-format text`) は、 run の最後の assistant の message だけを書く。 turn の終わりの検査 (Stop hook) が追記を求めると最後の message は追記になり、 本報告は log に残らない (実測: Stop hook が 1 行の追記を求めた run で、 `result` は追記の 1 行だけ、 本報告は stream-json の assistant の event にだけ在った)。 `--no-session-persistence` の run では log が唯一の記録なので、 本報告ごと失われる。
+
+- engine は skill 型 routine を `--output-format stream-json --verbose` (CLI が持っていれば `--include-hook-events` も) で起動し、 中継 [`scripts/claude-stream-log.py`](../scripts/claude-stream-log.py) が event を人の読む log に直す。 書く = 全部の assistant の文・tool の名前と短い目印・hook が返した文と知らせと失敗・結果のエラー文・開始と終わりの行 (時刻・model・session・終了値)。 書かない = tool の結果の中身・thinking・SessionStart の注入 (= log を大きくしない・mail の本文などの写しを増やさない。 生の stream-json をそのまま log に向ける形を取らない理由も同じ)。
+- **log に書くのは run の終わりに 1 回** = log の更新時刻を「run が終わった時刻」 に保つ ([#missed-run-detection](#missed-run-detection) の前提)。 途中の経過は `<log>.partial` に逐次書き、 書き終えたら消す = 残っている `.partial` は、 終わらなかった run・kill された run の手掛かり。
+- **TCC の責任者を変えない**: 中継 (python) が親になると、 claude と子が使ってきた許可 (カレンダー・cloud storage の dir など) の責任者が python に移り、 許可が効かなくなる。 中継は claude を disclaim つきで起動する ([`scripts/lib/tcc_disclaim.py`](../scripts/lib/tcc_disclaim.py) の `spawn_disclaimed`) = claude が自分の責任者になり、 sh が claude を exec していた時と同じ許可で動く (確かめ方 = `responsibility_get_pid_responsible_for_pid` が子自身の pid を返す、 lib の selftest)。
+- 終了値は claude のもの。 stdin は `/dev/null` (= `-p` が stdin を 3 秒待って警告を出す形を避ける)。 SIGTERM は claude に回し、 それまでの分を書いてから終える。
+- <a id="headless-run-time-limit"></a>**上限の時間 = 起動から 3 時間** (中継の `--max-minutes`、 既定 180、 env `CLAUDE_STREAM_LOG_MAX_MINUTES`、 0 = 上限なし): 過ぎても終わらない claude に SIGTERM (30 秒後に SIGKILL) を送り、 それまでの分と「上限 N 分で止めた」 を書く。 測るのは全体の時間 (event の無い時間ではない = 長い tool の呼び出しを途中で切らない)。 なぜ = API との接続を相手に閉じられた claude が CPU 0%・event 0 のまま終わらない形がある (実測、 `.partial` は開始の 1 行だけ)。 走っている間は launchd が同じ job を重ねて起動しないので、 止まった 1 本が以後の予定の run を全部消す ([#missed-run-detection](#missed-run-detection) が「実行中」 として出す)。 ⚠️ 中継を通らない旧い起動行 (`exec "<claude>" -p`) の job には効かない = `--ensure` が中継つきに直した後の run から。
+- 既存の plist は `--ensure` が起動行の該当部分だけを書き換える (`exec "<claude>" -p ` → 中継つき。 plist が指す claude の `--help` に stream-json があるときだけ。 model・effort・config dir の pin は変えない)。
+- <a id="routine-id-marker"></a>**無人の run の印 = `CLAUDE_ROUTINE_ID`**: engine はどの type の routine にも `export CLAUDE_ROUTINE_ID=<task-id>` を焼く (claude・hook・script が継ぐ)。 人の居る session に向けた検査 (「user に伝えたか」「この mail を処理したか」 を求める Stop hook など) は、 この印のある run では止めずに「人に回す」 1 行を出す = 無人の run に、 その routine の手順に無い仕事 (mail の処理・台帳の記録・外部の頁の操作) をさせない (実測: Stop hook の処分の要求に応じて、 無人の run が自分の仕事でない mail を処理し、 台帳を書いて commit しないまま残した)。 印の焼かれる前の起動行で走った run は launchd の job label (`XPC_SERVICE_NAME` = `<label prefix>.<task-id>`) で見分けられるが、 **label は shell で読んで渡す** = macOS の Apple の python3 は stdin が pipe (hook の heredoc を含む) のとき `XPC_SERVICE_NAME` を `0` と読む (実測。 shell と `env` には親の値が見え、 他の env は通る)。 ⚠️ **label の分岐は test で真似できない** — launchd の job でない shell で `export XPC_SERVICE_NAME=<label>` しても、 子の process (bash の script・`bash -c`) は `0` を見る (実測) = test は印 `CLAUDE_ROUTINE_ID` の側で確かめ、 label の分岐は「test していない」 と書く。 `CLAUDE_CODE_ENTRYPOINT` は印にならない (人の居る background session も同じ値)。 会話記録の `entrypoint` の欄 (`sdk-cli`) も同じ = 人が SDK 経由で話す session も同じ値になる (実測: その値の session の最初の発言の多くが人の発言だった)。
+
+### <a id="mechanism-migration-kill-all-registrations"></a>機構を移行するとき — 旧登録の「全 context 点呼」
+
+定期ジョブを機構 A → B へ移行する作業は「B を install して、 目の前の A を 1 つ止めた」 では終わらない。 **登録は context ごとの独立 state** である (= desktop scheduled task は account × マシン × app-install ごとの registry / launchd は マシンごとの plist / cloud routine は account の trigger registry) — そして **dormant な旧登録は context switch で黙って復活する**。 2026-07-04 実測: 移行 6 日後の account swap が旧 registry の enabled 版 6 job を復活させ、 新機構 (launchd) と **2 日間二重実行** (検出は user の目視、 監視は当時なし)。
+
+移行 checklist:
+
+1. **そのジョブが過去に登録されたことのある全 context を列挙する** — 記憶や「今見えている一覧」 でなく、 各 context の registry file / `--status` / trigger list を**実際に読む** (= 今見えている registry は現在の account/マシンの 1 context に過ぎない)。
+2. 各 context で旧登録を **delete か enabled:false 化** (= disabled 状態は context switch を跨いで保持されるので、 地雷解除として delete と同等に有効)。
+3. 移行台帳 (= re-register 防止の MIGRATED set 等) を**同 commit で**更新する (実測: 台帳への登録漏れ 1 件が、 復活発生時の「これは移行済か?」 判断を鈍らせた)。
+4. **二重実行の検出線を数日観察する** — 最強のシグナルは同一ジョブの成果物の二重化 (= heartbeat の二重打刻・同一 commit の連打等)。 可能なら常設監視に昇格 (例: fleet-heartbeat が全 registry の enabled task id を収集 → reader が surface、 [multi-machine-state.md #fleet-heartbeat](multi-machine-state.md#fleet-heartbeat))。
+
+二重実行を見つけた後の「この run はどちらの経路か」 の帰属診断は [debugging-discipline.md #execution-path-attribution](debugging-discipline.md#execution-path-attribution) (= 命名・タイミングでなく内容指紋で確定する)。
 
 ## アーキテクチャ: SKILL.md とバックエンドの二重構造
 
@@ -20,10 +158,28 @@ Claude バックエンド（リモート）    ← 実際に実行される prom
 - **SKILL.md をリポに置く理由**: git で差分追跡・コードレビューができる。複数端末間で `git pull` で内容を共有できる
 - **バックエンドが SKILL.md を読まない理由**: scheduled task の実行 prompt は `create_scheduled_task` / `update_scheduled_task` 呼び出し時にバックエンドに保存され、以後ローカルファイルは参照されない（Claude Code の仕様）
 - **symlink の役割**: ローカルで `~/.claude/scheduled-tasks/` を見たとき、SKILL.md の内容をリポ側で一元管理するための便宜。実行には影響しない
+- **「バックエンド（リモート）」 の正確な意味**: これは **prompt の保存先**を指す (= prompt 本文が backend に保存される)。 **agent の実行自体は該当マシンの local fresh session** で、 **local file / OAuth token / CLI に access できる** (= 実例: daily-mail-triage-check の SKILL.md は `~/Claude/.../*.py` を local OAuth `~/.gmail-mcp/` で実行する前提で書かれ、 §15 メール防御の一部として依存されている)。 ⚠️ 「backend remote 保存」 を「remote 実行 = local file 不可」 と誤読しないこと (= §0 の機構選択で「scheduled task は local 不可」 と誤判定する原因になる)。 cloud で実行され local file に触れないのは別物の **`schedule` skill の routine** の方 (§0 参照)
 
 ### 制約
 
 SKILL.md を single source of truth にできない。リポの SKILL.md とバックエンドの prompt が乖離するリスクが常にある。
+
+## <a id="registrable-session-types"></a>登録できる session 種別 (= bridge / デスクトップアプリ backend session では create_scheduled_task が wire されない)
+
+`create_scheduled_task` / `update_scheduled_task` は **harness 組み込み tool** (= MCP server ではない。 `~/.claude.json` の `mcpServers` に現れない、 CronCreate と同類)。 これらが session で呼べるかは **起動経路で決まる**:
+
+- ✅ **登録できる**: Terminal から `claude` を直接起動した通常 Claude Code CLI session (= `--allowedTools` 無制限運用)。 既存の登録済 task (`weekly-web-freshness` 等) はこの経路で作られている。
+- ❌ **登録できない**: desktop / Claude Code desktop app が裏で起動する **bridge session** (= 判定 = `env | grep CLAUDE_CODE_ENVIRONMENT_KIND` が `bridge` + `CLAUDE_CODE_ENTRYPOINT=sdk-cli`)。 `--allowedTools` で tool が大幅に subset され、 `create_scheduled_task` が **session に wire されない** (= `ToolSearch "select:create_scheduled_task"` が "No matching deferred tools found")。 これは [`mcp.md` desktop-allowedtools-restriction](mcp.md#desktop-allowedtools-restriction) と同根 (= 同じ subset 機構が組み込み scheduled-task tool も削る)。
+
+- ❌ **登録・変更できない (2026-07-04 実測)**: **Remote Control server 経由で spawn したリモート session** (= スマホ / claude.ai/code から RC 環境に生やした session)。 `ToolSearch` 0 hit + loaded function 定義にも無し。 → **scheduled task の遠隔管理は不能** — 遠隔でどうしても止めたい非常時は、 対象マシンの Claude.app を停止した上で canonical `scheduled-tasks.json` の `enabled` を直編集する undocumented route が実績あり (= app 起動中の直編集は in-memory state に上書き戻されるリスク、 停止中のみ安全。 backup を取る)。
+
+**対処**: bridge session で scheduled task を登録したくなったら、 同じマシンの **Terminal で `claude` を直起動**した session に移って `create_scheduled_task` を呼ぶ (= mcp.md 対処 (b))。 bridge session 自身からは制限なし session を生やせない (= harness 仕様)、 user の手動操作が要る。
+
+### ⚠️ bridge session で `CronCreate durable` に逃げない (= 永続化されない trap)
+
+「定期実行が要る、 でも `create_scheduled_task` が無い」 となったとき harness の `CronCreate` に逃げると、 **`durable: true` を渡しても無視され session-only になる** (= 2026-06-23 実証: `CronList` が `[session-only]` 表示、 `~/.claude/scheduled_tasks.json` が未作成、 session を閉じると消える)。 `RemoteTrigger` (= claude.ai routine) は cloud 実行で local file に触れない (§0)。 → **bridge session には永続 local scheduled task を作る手段が無い**。 唯一の道は上記 Terminal 直起動 session での `create_scheduled_task`。
+
+> 判定 reflex: 定期 local job を登録する前に起動経路を疑う。 `env | grep CLAUDE_CODE_ENVIRONMENT_KIND` が `bridge` なら登録系 tool が削られている前提で、 Terminal 直起動 session に移る。 (= harness 版 2.1.165 で観察。 `--allowedTools` の subset 内容は版で変わりうる — UI 同様に実機で確認する。 ⚠️ scheduled task 自体は backend 実行されれば local file に access できる 〔§アーキテクチャ〕。 ここで言う制約は **登録 (= create/update tool) を呼べる session** の話であって、 実行 locus の話ではない)
 
 ## ルール
 
@@ -33,7 +189,9 @@ Scheduled task のエージェントは CLAUDE.md / CONVENTIONS.md を確実に�
 
 CONVENTIONS.md のルール（人間セッション・手動実行をカバー）と SKILL.md のステップ0（scheduled task 自動実行をカバー）は役割が異なり、両方必要。
 
-### SKILL.md 編集時（必須）
+### SKILL.md 編集時（必須。ただし「焼き込み」prompt の場合）
+
+> 以下は prompt に SKILL.md **全文を焼き込む**標準方式が対象。 prompt を **indirection** (= 「`<path>/SKILL.md` を Read して実行せよ」 だけを backend に保存) にしているなら、 backend は path しか持たず実行時に最新の SKILL.md を読むため **この同期は不要** (= § prompt 設計 参照)。
 
 1. リポの SKILL.md を編集する
 2. **直後に `update_scheduled_task` で prompt フィールドを同期する**
@@ -51,14 +209,276 @@ CONVENTIONS.md のルール（人間セッション・手動実行をカバー�
 
 - バックエンドはマシンごとに独立。マシン A で `update_scheduled_task` しても、マシン B のバックエンドは更新されない
 - 新しいマシンで pull 後、そのマシンで使う scheduled task は `update_scheduled_task` で prompt を同期すること
-- SESSION.md にマシン固有の要対応事項を書いておくと pull 後に気づける
+- そのマシンでの要対応を SESSION.md の現在地の 1 行 (「<マシン名> で pull 後に update_scheduled_task」) に置いておくと pull 後に気づける (済んだら行を消す)
 
 ## パス表記について
 
 本ドキュメントおよび各リポの CLAUDE.md では `~/Claude/` をハードコードしている。これは現運用者（odakin）の全マシンで統一されたパスであり、`<base>` のような抽象化は行わない。共同編集者が `~/github/` 等の別パスを使っていても、本規約はリポオーナーの Claude Code scheduled task 運用にのみ適用されるため問題ない。共同編集者が scheduled task を運用する場合は、その時点でパス抽象化を検討する。
+
+## UI と手動実行・tool 承認 (= local scheduled task の運用)
+
+⚠️ UI 構造は Claude Code app の版で変わる (= 手順描写は陳腐化前提で疑う、 下記は 2026-06 時点 / 公式 docs `desktop-scheduled-tasks.md` ベース)。 構造非依存の要点を優先。
+
+- **管理場所**: local scheduled task は remote routine (= `claude-ai-routines.md`) と **同じ "Routines" tab で統合表示** される (= 作成時に Local / Remote を選ぶ)。 task が発火すると "Scheduled" セクションが出現しそのセッションが並ぶ。 ⚠️ `create_scheduled_task` のレスポンス文言「manage it from the Scheduled section」は誤解を招く (= 発火前は Scheduled section が無い、 実体は Routines tab)。 tool レスポンスの UI 案内も実機と乖離しうる (= 鵜呑みにせず実機 or docs で確認)。
+- **手動実行 (Run now)**: Routines tab → task の detail page → "Run now"。 スケジュールを待たず即 fresh session を起動。 MCP / CLI からの run action は無い (= UI のみ。 list/create/update の MCP tool に run は無い)。
+- **tool 承認の事前付与**: cron 自動実行は SKILL.md が使う tool (Bash / WebSearch / Edit 等) の承認が要り、 未承認だと自動実行が **そこで停止する**。 回避策: 作成後に **"Run now" で 1 回手動実行 → 各 tool に「常に許可」** を選ぶ → task に保存され以降の自動実行に auto-apply (detail page の "Always allowed" panel で確認・revoke 可)。 代替: `~/.claude/settings.json` の `permissions.allow` に追加 (= allow rule は scheduled task session にも適用される。 ただし全 session 共通なので広すぎる許可を避け、 Run now 経由で必要 tool だけ承認する方が安全)。
+
+## prompt 設計: 焼き込み vs indirection
+
+backend は prompt 本文を保存し SKILL.md を実行時に読まない (= 上記アーキテクチャ)。 この乖離リスクへの 2 つの対処:
+
+1. **焼き込み (= 標準)**: prompt = SKILL.md 全文。 SKILL.md 編集時に `update_scheduled_task` で同期必須 (= 上記「SKILL.md 編集時」 ルール)。
+2. **indirection**: prompt = 「`<絶対path>/SKILL.md` を Read tool で読み上から self-contained に実行せよ」 + 最小限の前提だけ。 SKILL.md (= git canonical) が手順の SoT で、 **手順変更が backend 再登録なしで次回実行に反映される** (= drift しない、 = §「制約」 の SKILL.md↔backend 乖離を構造的に解消)。
+   - ⚠️ **trade-off**: prompt に説明文 (= 頻度・背景) や安全則を焼くなら、 その焼いた値は **設定値変更時に prompt 本体も sweep** する (= 焼いた分だけ drift 対象に戻る)。 2026-06-04 RCA: ある定期 publish task の頻度を変えた際、 cron と description は `update_scheduled_task` したが **prompt 冒頭に焼いた「週次」表記を取り逃した** (= cron / description / SKILL.md / 周辺 doc は直したのに backend prompt 本体だけ漏れた、 整合性軸 sweep の死角)。 設定値を 1 つ変えたら **その値が現れる全 surface (= コード / doc / backend prompt) を grep して sweep** する (`CONVENTIONS.md §3` 整合性軸)。
+   - indirection でも安全則を prompt に焼く判断はある (= fresh session が SKILL.md read に失敗しても安全則が効く保険)。 その場合「焼いた分だけ drift 対象」 と自覚する。
+
+## <a id="headless-context-budget"></a>headless `claude -p` の context budget (= "Prompt is too long" 全滅の防止)
+
+**無人 routine (`claude -p`) は起動時に cwd の memory file (CLAUDE.md 連鎖) を丸ごとロードする。**
+memory file が肥大している repo を workdir にすると、 SessionStart hook の注入と MCP tool schema が
+積み上がって **200k context を起動直後に超え、 全 routine が `Prompt is too long` (exit 1) で
+黙って全滅する** — cron は毎日失敗し続けても誰にも見えない (log と `launchctl list` の
+exit status にしか痕跡が残らない)。
+
+実例 (2026-07-29 owner 環境の実測): workdir の CLAUDE.md ~276 KB + hook 注入 ~35 KB で、
+最小 prompt は辛うじて通るが skill 実行は数回の tool 呼び出しで溢れ、 **日次 routine 5 本が
+4-5 日間連続で 1 度も走っていなかった**。 memory file は日々数 KB ずつ成長するため、
+**閾値は漸進的に・気付かぬうちに越える** (重い routine から順に落ちる)。
+
+### 診断 ladder (= 15 分で確定する)
+
+1. **最小 prompt** (`claude -p "Reply OK"` を同 workdir で) — 通れば基底は収まっている
+2. **同 skill を cwd=/tmp で** — 通れば memory file ロードが犯人と確定
+3. **同 workdir + 1M context model** — 通れば model 切替で解消可能
+
+### 対処の選択 (= trade-off を明示して選ぶ)
+
+- **1M context model に pin する** (`CRON_MODEL` に full ID) — **規約を保ったまま** context を
+  広げる。 memory file が運ぶ規約 (メール文体 / calendar の書き先 / leak 規則) を無人実行が
+  失わない。 mail draft や calendar 書き込みをする routine ではこちらが正解。
+- **workdir を memory file の無い場所へ逃がす** — 安価だが **規約が全て失われる**。
+  読み取り専用で規約非依存の routine に限る。
+- ⚠️ どちらも対症で、 **真の root = memory file の肥大**。 定期的な縮退 (hot/cold 分離、
+  完了 entry の archive graduate) が本筋。 memory file のサイズは実質「毎 session /
+  毎 routine が払う税」 であり、 有限資源として扱う。 **縮退の手順正本 =
+  [`memory-file-slimming.md`](memory-file-slimming.md)** (= MOVE + pointer 化・DELETE 禁止、
+  義務を落とさない gates つき)。
+
+### 監視 (= 「黙って全滅」 を二度と起こさないために)
+
+`launchctl list` の LastExitStatus ≠ 0 を surface する watcher を持つこと。 exit status は
+残っているのに**それを見る機械が無い**のが本失敗の delivery layer だった (= agent の生死を見る
+heartbeat とは別 layer: job は「生きて」 いて毎日失敗していた)。
+
+⚠️ **終了コードだけでは足りない**: plist を読み込み直すと 0 に戻り ([`#reload-resets-exit-status`](#reload-resets-exit-status))、
+しかも原因を言わない ([`#headless-auth-expiry`](#headless-auth-expiry))。 直近の run の log 末尾も読む。
+⚠️ **wrapper が中の失敗を 0 に潰すと、 終了値を見る検出器に届かない** = [`#wrapper-exit-and-manual-check`](#wrapper-exit-and-manual-check)。
+⚠️ **前回の run のことしか言わない**: 起動しなかった run と終わらない run は、 終了コードにも log 末尾にも出ない =
+予定の時刻と log の更新時刻を比べる ([`#missed-run-detection`](#missed-run-detection))。
+実装 = [`scripts/check-cron-health.py`](../scripts/check-cron-health.py) (そのマシン) と fleet heartbeat の job health
+(他のマシン、 [`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat))、 判定は両方とも
+[`scripts/lib/launchd_job_log.py`](../scripts/lib/launchd_job_log.py) の 1 か所。
+
+## <a id="wrapper-exit-and-manual-check"></a>wrapper は中の失敗を終了値で返す — 手で確かめる入口は定期実行と同じ設定で
+
+定期 job の wrapper (中の道具に設定を渡して呼ぶ shell) で、 失敗が黙る形は 2 つある。
+
+- **wrapper が中の失敗を 0 に潰す** (`道具; exit 0` / `道具 || echo …` / 例外を握って `sys.exit(0)`)。 上の監視の検出器 (終了値を見る) から消え、 surface にも出さなければ誰も気づかない。
+  - 「launchd を失敗の繰り返し (error loop) にしないため 0 で終える」 は、 時刻起動 (`StartCalendarInterval` / `StartInterval`) で `KeepAlive` の無い job には当てはまらない = 0 でない終了値は `launchctl list` に記録されるだけで、 launchd は起動し直さない。 起動し直すのは `KeepAlive` を持つ job。 0 で終える理由を書く前に plist を見る。
+  - 一部の処理が失敗しても残りを続ける作りでは、 失敗を覚えておいて最後に 0 でない値で終える (続けることと黙ることは別)。
+  - 知らせを fail-open な書き手 (書けなくても 0 を返す helper・読み込めなければ何もしない関数に替わる helper) に任せる wrapper は、 書いた後に書いた先の file が在るかを確かめ、 無ければ書くはずだった内容を log に出して 0 でない値で終える。 書く前に前の回の file を消す (残っていると「書けた」 と見誤る)。
+  - 走れない形 (engine・台帳・interpreter が無い) も、 何が無いかの 1 行と 0 でない値で終える。 「repo が無い機械では黙って 0」 にする理由も、 上の行の「時刻起動で `KeepAlive` が無ければ起動し直されない」 で消える。
+  - 中の道具が他の道具からも module として読み込まれるとき、 読み込みの失敗を 0 で抜ける作りは、 直接起動 (`__name__ == "__main__"`) のときだけ 0 でない値にする = 読み込む呼び手は変わらず、 定期実行と hook の「動いて 0 件」 と「動かなかった」 が分かれる。
+  - 同じ壊れ方を毎回人に知らせ直さないのは、 知らせの側で「壊れた部分の組」 を覚え、 組が変わったときだけ鳴らす形で行う。 終了値は毎回そのまま返す (検出器は直近の run を見るので、 直れば次の run で消える)。
+- **手で確かめる入口が定期実行と違う設定を読む**: 認証の置き場などを wrapper が環境変数で渡す作りでは、 中の道具を引数だけで手で回すと既定の置き場を読み、 そこが無い機械では「認証が無い」 と出る。 定期実行は読めているのに、 手で確かめた人は「壊れている」 と報告する (実測: 確かめた結果が本番と食い違い、 誤った報告が人に届いた)。
+  - wrapper に `--check` を持たせる = 定期実行と同じ環境変数で、 書かない・知らせない・同期しない形で中の道具を回し、 中の道具の終了値を返す。 本番ホストかを問わず回る形にしておくと、 機械ごとの配線の確かめにも使える。
+  - 中の道具の失敗の文に、 設定を環境変数から決めたか既定から決めたかを書く (「環境変数 X が無いので既定の置き場を見た」)。 読んだ人が設定違いだと気づける。
+  - 知らせの文が勧める直し方 (入れ直しの command) が、 定期実行の読む置き場に入る経路かを確かめる。 既定の置き場に入る command を勧めると、 直したつもりで定期実行は直らない (実測)。
+
+確かめ方:
+
+- **wrapper の試験** = 中の道具を偽の script に差し替える環境変数を 1 つ持たせ、 結果と終了値を台本どおりに返させる (全部成功 / 1 つ失敗 / 同じ壊れ方の繰り返し / 組が変わる / 直った / 中の道具が落ちた / `--check`)。 差し替えのときは関門・同期・常駐の登録を飛ばすので、 知らせの送り先と状態・surface の置き場が試験用に向いていなければ、 中の道具を呼ばずに止まる作りにする (本物の通知先に書かない)。
+  - 入力 (台帳など) だけの差し替えは受け付けない: 中の道具が本物のままだと、 本物の道具が試験の入力で本物の通知を出す = 入力の差し替えは道具の差し替えと組でだけ通す。
+  - 試験の側でも、 試す wrapper に差し替え口があるかを先に確かめ、 無ければ回さずに FAIL で止まる: 差し替え口の無い版 (戻した版・古い版) に試験を当てると、 差し替えの環境変数が無視されて本物の道具が走る。
+  - 試す wrapper の path も環境変数で差し替えられる形にしておく = 入れ替える前の写しにも当てられる。 試験が旧い黙り方を落とすことは、 写しを旧い終わり方 (`道具; exit 0` など) に 1 か所ずつ戻した変異に試験を当てて確かめ、 変異を作る script を記録の隣に残す (実測: 変異のすべてを試験が落とすことを、 記録の根拠として残した)。
+- **検出器が拾うところまで** = 別の label の一時の launchd job (時刻起動なし) に同じ wrapper を載せて 1 回 `kickstart` し、 `launchctl list` の終了値と検出器の出力を見て、 `trap` で `bootout` と plist の削除をする。 本物の job を壊さずに、 launchd を通した終了値を確かめられる (実測)。 検出器に label の全体を prefix として渡すと、 名前の欄は空になる (表示は prefix を外した残り)。 一時の job も常駐の登録に見えて止められることがある = [#agent-direct-launchd-install](#agent-direct-launchd-install)。
+- **過去の本番の run** = job の終了値を残している heartbeat の履歴 ([`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat)) を、 知らせを出した時刻の直後で引く。
+
+## <a id="reload-resets-exit-status"></a>plist を読み込み直すと、 失敗は終了コード 0 の顔になる
+
+launchd は job を読み込み直すと、 次に走るまで `launchctl list` の終了コードを 0 で表示する (実測)。
+routine の定義を書き直す仕組み (定義の照合で plist を更新する installer 等) があると、 **失敗した run の後に
+plist が書き直された job は exit 0 に戻り、 終了コードだけを見る検出器から消える**。 同じ原因で全部が
+失敗していても、 書き直しの時刻の前後で「失敗 と 成功」 に割れて見える (実測)。
+
+- **対策**: 終了コードに加えて、 直近の run の log 末尾を読む。 終了コード 0 でも、 末尾が既知の失敗の文言で
+  log が新しい (既定 3 日以内) なら失敗として出す。 log が古いときは末尾が直近の run とは限らないので拾わない。
+- 判定の正本 = [`scripts/lib/launchd_job_log.py`](../scripts/lib/launchd_job_log.py) (`hidden_failure`)。
+- **限界**: 既知の文言を出さずに終わる失敗は、 読み込み直しの後は見えない = 各 routine 固有の heartbeat
+  (成果物の更新時刻など) が相補する。
+
+## <a id="missed-run-detection"></a>走らなかった run と終わらない run は、 終了コードにも log 末尾にも出ない
+
+`launchctl list` の終了コードは**前回の run** のもので、 log 末尾も前回の run が書いたもの。 予定の時刻に job が
+起動しなかったとき (関門が別の機械を本番と読んだ、 launchd が起こさなかった等) と、 起動した headless `claude -p` が
+終わらずに止まっているとき (画面の許可ダイアログ待ちなど。 `claude -p` は終わる時にしか結果を書かない) は、
+どちらも前回の成功の顔のまま変わらない (実測: 本番ホストを移した後、 複数の routine が日をまたいで log を書かず、
+終了コードも log 末尾も正常のままだった)。
+
+- **検出**: 予定 (plist の `StartCalendarInterval` / `StartInterval`) の最後の時刻から一定時間 (既定 3 時間 = 長い
+  routine の実行時間を見込む) たっても、 log の更新時刻がその予定より古ければ「その run が残っていない」。
+  判定 = [`scripts/lib/launchd_job_log.py`](../scripts/lib/launchd_job_log.py) の `missed_fire`。 fleet heartbeat の
+  job health が予定・log の時刻・`claude -p` か・関門つきかを運び、 reader (`check-fleet-status.py --routine-ledger`) が
+  本番ホストの分を出す (1 本 = 🟠、 2 本以上 = 🔴。 [`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat) 原則 7)。
+- **射程**: 毎回 log を書く job = `claude -p` を起動する job だけ。 することが無い日に何も出力しない cmd 型の job は、
+  log が古くても故障とは限らないので見ない (成果物の鮮度の heartbeat が相補する)。
+- 関門つきの job は本番ホストでだけ見る。 ⚠️ 本番でない機械では関門が待機の 1 行を log に書く = **log の新しさは
+  run の証拠にならない** (旧本番の log が毎日更新されていて「まだ旧本番が走らせている」 と読み違えやすい)。 本番ホストでも
+  log の最後の行が関門の待機なら run ではない (関門が別の機械を本番と読んだ)。 本番になった時刻 (台帳の `since`) より
+  前の予定は見ない。 関門なしの job は常時起動の機械でだけ見る (寝る機械は予定の時刻に走らない)。
+- 判定は beat の時刻の状態で行う (= beat の commit が間引かれていても、 その時点の log と予定を比べる)。 遅れは
+  最大で beat の commit の間隔 + 3 時間。
+- **見つけたら**: そのマシンで `launchctl list` の PID 列と `ps` で `claude -p` が居座っていないかを見る (beat の
+  `running` = beat の時点で PID があった)。 居座って
+  いれば画面のダイアログ (keychain の許可など) か `sample <pid>` を見てから止める。 居なければ起動していない側 =
+  関門の判定と `launchctl print gui/<uid>/<label>` の runs / last exit code を見る。
+
+## <a id="headless-auth-expiry"></a>無人 routine の config dir の認証切れ (= 全 routine が起動直後に同じ文言で終わる)
+
+headless `claude -p` の routine は、 使う config dir (`CLAUDE_CONFIG_DIR`) の claude.ai の認証が切れると、
+全部が起動直後に `Failed to authenticate: OAuth session expired and could not be refreshed`
+(か `Not logged in · Please run /login`) で終わる (実測)。 無人用の config dir は人が対話で使わないので、
+切れても誰も login の画面を見ない = 検出器が言わない限り気づかない。 切れる時期は予告されない (実測)。
+
+- **検出**: log 末尾の文言 (判定 = `scripts/lib/launchd_job_log.py` の `AUTH_MARKERS`)。 そのマシンでは
+  `check-cron-health.py` が job ごとに原因と config dir を出し、 config dir ごとに 1 行 login の command を出す。
+  他のマシンでは fleet の reader (`check-fleet-status.py`) が config dir ごとに 🔴 1 行。
+- 再ログインした後も、 次の run までは失敗が残って見える。 `check-cron-health.py` はその config dir が今
+  ログイン済みかを `claude auth status` で読み (読むだけ)、 「次の run で消える」 に切り替える。
+- <a id="auth-expiry-reach-owner"></a>**人に届く面に載せる**: 上の検出は session の開始の hook の出力と fleet の 🔴 に出るが、 hook の出力は人の画面に出ず、
+  agent が伝えない限り人は知らない (実測: どの機械の session でも検出が出ていたのに、 だれも人に伝えなかった)。
+  直す作業はその機械でしかできないので、 その機械の session の開始で人に伝える一覧 (agent が最初の返事で伝える段) に、
+  切れている間だけ出る常設の項目を置く。 条件 = その機械の名前 ∧ `scripts/check-desktop-logout-auth.py` の出力に 🔴 の行がある
+  (Claude を呼ばずに問い合わせの記録と keychain の更新時刻を読む = 速い。 ログインし直すと keychain が更新されて条件が外れる)。
+- **直し方**: そのマシンで `CLAUDE_CONFIG_DIR=<dir> claude auth login`。 ブラウザのアカウントに掴まれる罠 =
+  [`remote-control-server.md#oauth-grabs-browser-account`](remote-control-server.md#oauth-grabs-browser-account)、
+  agent の session から頼まれたときの手順 =
+  [`remote-control-server.md#login-from-agent-session`](remote-control-server.md#login-from-agent-session)。
+- ⚠️ 同じ config dir を借りる経路 (headless の通知送信など) も同時に止まる = その config dir に依存する経路を
+  全部点呼し、 直した後にそれぞれの健康診断 (probe) を回す。
+- **desktop app のログアウトの後に切れた例** (因果は未確定): desktop app で account X をログアウトした後、
+  同じ機械で X の無人 job / RC が使う config dir が切れた。 実測したのは、 ログアウトの後の run は通り、 翌朝の run が
+  最初に失敗したことまで。 次のトークン更新 (直前の更新から約 8 時間後) の時点で切れたというのは推論 (desktop app 側の
+  トークンの更新の間隔から読んだもので、 CLI 側のトークンの寿命は測っていない)。
+  ログアウトの直後の問い合わせは通るので、 翌朝の job の失敗まで見えない。 検知 =
+  [`scripts/check-desktop-logout-auth.py`](../scripts/check-desktop-logout-auth.py) (desktop app の log のログアウトと
+  keychain 項目の更新時刻を突き合わせ、 `--install-watch` で確かめる問い合わせを自動で予約する)。
+  対照実験 (desktop で両 account のログアウトと新しいログインを往復) では、 両方の config dir が約 8 時間後の更新に
+  成功した。 別の機械の 1 か月の記録でも、 desktop の切り替え (ログアウトして 1 分以内に別の account でログイン) 8 回の
+  後に切れた config dir は無かった。 もう 1 台の記録では、 切り替えの後に切れたのは 1 回だけで、 ログアウトも新しいログインも
+  無い窓で切れた例もあった = 同じ機械でのログアウトや新しいログインは、 切れる十分条件でも必要条件でもない (実測)。 検知器は切り替えのたびに問い合わせで確かめ、
+  失敗したときだけ 🔴 を出す。 🔴 の行は最初の失敗の時刻と続けて失敗した回数を出し、 本番ホストの関門で止まる job を本数から分ける。
+  ログアウトの後は、 更新時刻が進んだだけでは見張りから外さず、 問い合わせが通ってから外す ([`#auth-expiry-window`](#auth-expiry-window))。
+  見張りは keychain が 24 時間以上更新されていない config dir も毎日確かめる (ログアウトと無関係の切れも 1 日以内に分かる)。
+  各 Mac には session 開始から `--ensure-watch` を呼んで配り、 結果は fleet heartbeat が他のマシンへ運ぶ
+  ([`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat) の原則 8)。
+- <a id="copied-credentials-after-migration"></a>**認証を別の機械に写した後に切れた例** (移行アシスタント・設定フォルダと keychain の複製):
+  写した先の config dir が、 写した直後から `OAuth session expired and could not be refreshed` で切れた (実測: 移行先の
+  無人 job は最初の run から失敗し、 同じ時刻に移行元の同じ config dir の job は通っていた)。 移行元が動き続けて先に
+  トークンを更新したため、 同じ更新トークンの写しが無効になったと見られる (推定)。 移行の後は移行先の各 config dir で
+  `claude auth login` をし直し、 写した認証に頼らない。 移行元を止めるまでは、 同じ config dir を両方の機械で使わない。
+  上の desktop app のログアウトの例と見分けるには、 ログアウトより前に無人 job が失敗していたかを見る。
+- <a id="auth-expiry-window"></a>**原因を探す窓は「最後の更新の成功 〜 最初の失敗」**: 切れた時刻は失敗の時刻ではなく、 その窓のどこか。
+  問い合わせの ledger を**最初の失敗まで**戻ってから窓を取る (実測: 直近のログアウトの後に切れたように見えた例が、 ledger を
+  戻ると、 そのログアウトより前から毎日失敗していた。 通知や状態の 1 行が最後の失敗しか言わないと、 この取り違えが起きる)。
+  窓の中に手元の出来事が 1 つも無いこともある (実測)。 他の機械や、 共用の account の他の人の端末でのログインは、 手元の log に出ない。
+  - ⚠️ **認証ストア (keychain) の更新時刻が進む = 更新の成功、 ではない**。 更新に失敗した run でも進み (実測)、 認証が消えた後の
+    失敗の run では進まない。 窓の端は、 成功した問い合わせで取る。 無使用の長さでも固定の寿命でも説明できない (実測: 同じ config dir が
+    約 1 週間の無使用の後は更新でき、 別の時に 1 日の無使用で切れた。 別の機械では約 80 日生きた)。
+  - 切れた後の確かめ方: `env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<dir> claude auth status` の `authMethod`。 `ANTHROPIC_API_KEY` が
+    混ざると `loggedIn: true` と答え、 `.claude.json` の `oauthAccount` は切れた後も残る (email だけを読む検査は騙される)。
+  - `claude --bg` の daemon は起動時にトークンを更新し、 次の更新を `<config dir>/daemon.log` に時刻つきで残す
+    (`auth: scheduling proactive refresh in Ns`)。 daemon が idle で終わると、 次に使われるまで誰も更新しない。
+
+## recurring task の jitter
+
+recurring (`cronExpression`) task は dispatch 時に数分の deterministic jitter が乗る (= server load 分散、 例: `0 3 * * *` → 実発火 03:08)。 one-time (`fireAt`) は jitter なし。 分単位の正確な発火を要する用途では考慮する。
 
 ## 経緯
 
 - 2026-03 symlink 方式を導入。SKILL.md 編集が自動反映されると想定していた
 - 2026-04-01 `inspire-monthly` で同期漏れが発覚。バックエンドが旧 prompt で実行され、存在しないモジュール `arxiv_digest.profile` を呼んで失敗
 - 原因調査の結果、バックエンドは SKILL.md を実行時に読まないことが判明。手動同期ルールを導入
+- 2026-06-04 ある定期 publish task の登録・頻度変更を通じて UI 操作 / indirection trade-off / jitter の 3 節を追記。 着手時に本 doc を読まず `schedule` skill を寄り道した RCA (= §0 の「scheduled task と schedule skill を混同しない」 は既出だった = 着手時に本 doc を先に読むべきだった)
+
+## <a id="delay-return-is-not-a-period"></a>「次まで N 秒待て」 を返す loop は周期にならない — 周期が要るなら壁時計を目標にする
+
+自前の繰り返しを **「1 回やる → 次まで N 秒待つ」** の形で書くと、 得られるのは周期ではなく**間隔**になる。 実際の周期は
+
+```
+周期 = N + (1 回の所要時間) + (system が待ちを伸ばした分)
+```
+
+で、 **N より必ず長い**。 この形は言語を問わず現れる: 待ち秒数を返す idle handler、 `sleep N` を挟む shell の loop、 前回の完了時刻から測る `setTimeout` の再帰、 固定 backoff の retry。
+
+### <a id="delay-return-symptoms"></a>症状と誤診
+
+- **「だいたい合っているが中途半端」**: 60 を指定したのに 66 秒、 のような一定の超過。 割合が一定 (実測で +10% 程度) だと「処理が重いのだろう」 と見積もりたくなる。
+- ⚠️ **処理の重さに帰属させる前に、 所要時間を実際に記録する**。 実測では、 超過分を「対象の探索と書き込みが重い」 と説明できそうに見えたが、 handler の所要を毎周期記録すると**定常状態は 0 秒**で、 超過は全て handler の外側 (= system 側の待ちの引き延ばし) だった。 背景の UI なしアプリはタイマーを合体・遅延されるので、 この差は環境によって変わり、 原因を同定しきること自体に価値が薄い。
+- ⚠️ **起動直後の 1 周目だけ極端に遅い**ことがある。 そこに**人間が答えるダイアログ** (権限確認など) が挟まっていると、 計測しているのは処理時間ではなく**人間の反応時間**。 1 周目を平均に混ぜない。
+
+### <a id="delay-return-fix"></a>対処: 原因を同定せずに周期を守る
+
+**待ち秒数でなく、 次に発火すべき壁時計の時刻を持つ**。
+
+```
+nextFire ← nextFire + 間隔
+返す値   ← max(下限, nextFire − 現在時刻)
+```
+
+遅れた分だけ次の待ちが自動的に短くなるので、 **遅れの原因が何であれ**平均周期が指定値に収束する (= 原因の同定に依存しない対策)。 実測: 待ち秒数方式 66,66,66 秒 → 壁時計方式 59,61,59 秒。
+
+3 点だけ付ける:
+
+1. **下限を置く** — 計算結果が 0 以下でも即時発火の連打にしない。
+2. **大きく遅れたら取り戻さない** — スリープ復帰などで `nextFire` が大きく過去になったら、 溜まった回数を一気に消化せず現在時刻へ再 anchor する。
+3. **所要が異常なときだけ記録する** — 毎周期 log を書くと肥大するだけ。 閾値 (例: 数秒) を超えた時だけ書けば、 平時は無音のまま「対象が遅くなった」 合図になる。
+
+⚠️ **そもそも自前 loop が要るか**を先に問う (= §0)。 OS の定期起動 (launchd の `StartInterval` / `StartCalendarInterval`) に載せられるなら、 周期の維持は OS の仕事になる。 自前 loop が正当化されるのは、 **process を使い回す必要がある時** (= 起動ごとに権限確認が出る / 常駐 state を持つ) など。
+
+## <a id="live-script-replace"></a>定期 job が毎回読む script は、 書き換えずに差し替える
+
+定期 job (launchd・cron・applet の idle) が起動のたびに読む script を直すときは、 その file をその場で書き換えない。
+
+- 書いている最中に job が起動すると、 途中までの file を読む。 python は構文エラーで落ち、 失敗の知らせが外へ飛ぶ。
+  bash は実行中の script を少しずつ読むので、 走っている回が途中から新しい中身を読みうる。
+- 直した版は別の場所で作って試す (test の入口に「試す版の path」 を env で渡せるようにしておく)。 **本番と同じ interpreter で** selftest を通す
+  (定期 job が選ぶ python は対話の shell の python と違うことがある)。
+- 入れるときは**同じ dir** の一時名 (dot 付き) に写してから `mv -f` で置き換える。 rename は原子的で、 走っている回は古い版を読み続け、
+  次の回から新しい版を読む。 別の file system からの `mv` は copy になる = 一度同じ dir に置いてから rename する。
+- 後方互換な変更から順に入れる (呼ばれる側を先、 呼ぶ側を後)。 途中の 1 回も壊れない。
+- 下の常駐の worker は、 rename の瞬間に新しい版で起き直す = 入れる前の selftest が本番での試験になる。
+- session 開始・turn ごとの hook も同じ形で走る (その機械で次に始まる session が作業 tree の版を読む) = [`hook-authoring.md#live-hook-edit-runs-elsewhere`](hook-authoring.md#live-hook-edit-runs-elsewhere)。
+
+## <a id="resident-worker-from-periodic-job"></a>定期 job から常駐の worker を起こす (間隔より短い仕事)
+
+定期 job の間隔 (1 分など) では間に合わない仕事 (数秒で消えるものを拾う等) は、 定期 job の間隔を縮めずに、
+定期 job が背景に常駐の worker を 1 本置く形にする。 間隔を変えるには起動元 (applet・plist) を作り直すことになり、
+作り直すと付与した権限が外れることがある ([`launchd-cloudstorage-tcc.md`](launchd-cloudstorage-tcc.md) の A')。
+
+- **1 本だけ**: worker は state dir の lock file を non-blocking の排他 lock (`flock`) で取り、 取れなければすぐ抜ける。
+  定期 job が毎回起こしても、 2 本目は自分で消える。
+- **heartbeat**: worker は数秒おきに heartbeat file の mtime を更新する。 定期 job は heartbeat が古い (例: 30 秒) ときだけ起こす。
+  surface は heartbeat の古さで「worker が止まっている」 を出す (定期 job は動いているのに worker だけ死んでいる状態を黙らせない)。
+- **source の更新で自分を exec し直す**: 自分と読み込む module の mtime を覚え、 変わったら lock を放して
+  `os.execv(sys.executable, [sys.executable, *sys.argv])`。 pid も権限の文脈もそのままで新しい版になり、 間が空かない。
+  比べるのは「等しいか」 なので、 `cp -p` で mtime を写して入れ替えても起き直す (実測)。
+- **親が居なくなったら抜ける**: 定期 job の最終実行時刻 (last-run) が閾値 (例: 10 分) より古ければ抜ける。
+  定期 job を外した後に worker だけが残り続けない。 一時停止の印 (paused) も毎回見る。
+- **仕事を分ける**: worker と定期 job が同じ data を触るなら同じ lock の下で触る。 外に効く仕事 (commit・push・知らせ) は片方 (定期 job) だけに残す。
+- **背景に起こす書き方**: `nohup <cmd> </dev/null >/dev/null 2>&1 &`。 AppleScript の `do shell script` は、
+  子が stdout / stderr を握っている間は返らない = 3 本の fd を全部外す。 applet の子として起こした worker は、
+  起こした shell が終わった後も applet のフルディスクアクセスのまま読めた (実測)。
+- **重さ**: 見張る仕事なら、 中身を読む前に file の (mtime, size) を stat で比べ、 変わった時だけ読む。
+  0.5 秒ごとの stat で 1 コアの約 0.1% だった (実測)。 見た回数・読んだ回数を 1 時間に 1 行 log に書くと、 重さを後から確かめられる。
+- **試験**: worker の寿命を env で切れるようにし (例: 20 秒)、 最後に paused の印で止まることと process が残らないことまで見る。

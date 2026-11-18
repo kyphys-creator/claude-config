@@ -1,0 +1,98 @@
+<!-- doc-meta
+when: 共同作業の成果物・記録・発言を特定の人物に帰属して報告・記録・文面化する前 (= commit author / 最終編集者 / メール送信者 / 議事メモの書き手 等の「運搬者」欄を見た瞬間) + 対外文書で第三者を名指しして誤り・訂正・批判・優先権を主張する文を書く瞬間 (= claim-target 軸) + 記録に「決定」「方針」「担当」 と書く瞬間 (= 決定の状態の軸、 #decision-state-at-record-time) + owner の名義で出す文面に予定・約束を書く瞬間 (#plan-not-owner-promise) + owner に出す問いの推す答えを書く前と、 外へ送る直前 (= 前の決定・額・約束を引いて並べる、 #prior-record-before-recommending) + 前の決定・規則に従う・前例どおりで閉じる瞬間と、 決定が文案・検査とぶつかった瞬間 (= その理由が今も成り立つか、 #premise-before-rank)
+category: harness-core
+summary: carrier proxy (= commit author / push 者 / 送信者 / 記録の書き手) を内容の判断主体・発言主体と等値しない — 帰属 5 規律 (proxy 種類の明示 / collaborative default = group product / inline marker = 宛先 tag / 発言者 ≠ 記録者 / load-bearing 帰属は複数 proxy verify) + claim-target 軸 (= 主張は誰についてのものか — 自己生成した名指しの無検証断定・内部略称の衝突展開) + 決定の状態の軸 (= 決定 / 提案 / 他 session の自己申告を記録の瞬間に確かめる、 両方向に壊れる。 台帳の予定を owner の一人称の約束として文面に書かない) + 機械化不能の honest 限界
+-->
+# Actor / statement attribution — 行為・発言の帰属規律
+
+共同作業の記録 (git log / 共同編集 doc / メール thread / 議事メモ / チャット) を読んで「誰がやった・誰が言った」を報告・記録する時の規律。核心 = carrier proxy を内容の判断主体・発言主体と等値しない。
+
+## <a id="carrier-not-author"></a>問題の形: carrier proxy ≠ author
+
+記録系は「運搬者 (carrier)」を 1 名だけ持つ欄 (= commit author、 送信者、 最終編集者、 メモの書き手) を必ず備えるが、 **その欄が識別するのは「誰がその記録を system に運び込んだか」であって、 「誰が内容を起草・判断・発言したか」ではない**。 carrier を author と読むのは運が悪い推測ではなく **表現形式の構造的限界を事実と取り違える category error**:
+
+- collaborative editing では「commit author = 1 名」という表現構造自体が group reality を潰す lossy encoding。 会議で全員が議論しながら書いた 146 行も、 git 上は誰か 1 人の名前で運ばれる。
+- 同じ repo で **author 欄は「どの経路が push したか」で変わる**: 本人の live 編集を coding agent が auto-push すれば owner 名になり、 web 側 sync bridge が押せば別名になる。 author 欄の多様性は判断主体の多様性とは別の軸。
+- メール送信者 ≠ 意思決定者 (= 秘書送信 / 代理送信 / 合議の結果を 1 人が送る)。 議事メモの書き手 ≠ 発言者。
+
+これは「単一情報源からの結論飛躍」の帰属 domain 形態: proxy が 1 個しか見えない時、 それを確定情報に昇格させる reflex が働く。 さらに narrative を先に組んでから証拠を当てはめると、 proxy の多様性 (= 複数 author が混在している事実) 自体を確認せずに単独 author 物語が走る。
+
+## <a id="attribution-rules"></a>帰属 5 規律
+
+1. **proxy の種類を明示して報告する。** 「X の編集」でなく「commit author = X (= push 者、 起草者とは限らない)」。 carrier 欄を報告文に写す瞬間に proxy 種を括弧で注記する — 断定形に落とすのはこの瞬間なので、 書式で塞ぐ。 <a id="uncommitted-change-unattributed"></a>**作業ツリーの未 commit の変更は carrier 欄すら持たない** = 誰の変更かを確かめるまで「未 commit の変更」 とだけ書き、 並列の session の途中の変更とも本人の変更とも書かない。 同じ作業ツリーに並列の session が居ると、 その session の変更と読みやすいが、 本人が editor で保存した変更のことがある (実測)。 確かめるなら、 その file への編集を会話記録で引く ([`../scripts/search-agent-transcripts.py`](../scripts/search-agent-transcripts.py) `--tool-runs --regex '<file 名>'`) か、 本人に聞く。
+2. <a id="group-product-default"></a>**collaborative context の default = group product。** live meeting での共同編集・共著 Overleaf・共同研究 repo では、 **単独 authorship を主張する積極的証拠がない限り** group product として framing する。 「1 人の名前で運ばれてきた」は積極的証拠ではない (= 上の lossy encoding)。
+3. <a id="inline-marker-addressee"></a>**inline marker (`\red{[XX: ...]}` / `%% TODO(XX)` 等) = 宛先 tag 付き group to-do** であって「XX 個人への指令」「XX の担当宣言」ではない。 tag は「誰に見てほしいか」の routing であり authorship / ownership の主張ではない。
+4. <a id="statement-attribution"></a>**発言の帰属: 記録の書き手・転送者・要約者を発言者と混同しない。** thread・議事・チャットの「誰が言ったか」が曖昧なら「〜の記録によると (発言者未確認)」と hedge する。 複数人会議 (Zoom 等) の指摘・発見を named collaborator 1 人に reflex で寄せない — 不明なら「全員で」or 確認。 ⚠️ <a id="stage-label-reads-as-speaker"></a>**「<人名> レビュー「…」」 のように段階名に人名を入れた句は、 「その人が担当した段階で出た評価」 とも「その人が言った」 とも読める** — 後の session は後者に読み替えて対外文面に使う (実測)。 引用を記録するとき、 発言者を確かめていなければ人名をどこにも置かず「〜という評価になった」 と書く。 ⚠️ <a id="relayed-quote-verify"></a>**依頼書・要約・引き継ぎの文が写した本人の発言を、 発言のまま (verbatim) として記録する前に、 一次記録 (会話記録・メール) で照合する** — 写しは文の頭の一言や前置きの文を落とし、 1 つの message を 2 つの発言に分けることがある (実測)。 会話記録の照合 = [`../scripts/search-agent-transcripts.py`](../scripts/search-agent-transcripts.py) `--role user` (作業の途中に打たれた発言も拾う。 自前で type が user の record だけを読むと、 その発言を落とす = 実測)。
+5. <a id="load-bearing-verify"></a>**帰属が load-bearing な場面では単一 proxy から断定を書かない。** メール文面・論文 credit・attribution ledger 記入・対外報告など、 誤帰属が外に出る/固着する場面では、 **複数の独立 proxy で verify するか user に確認**する。 安価な 1 手 (= `git log --format='%an'` で author 欄の分布を見る / thread の別 message と突合) で高価な誤帰属を防ぐ。
+
+## <a id="claim-target-attribution"></a>第二の帰属軸: claim-target (その主張は誰についてのものか)
+
+carrier 軸 (= 誰がやった・言った) と直交するもう 1 つの軸: **claim-target = 主張の対象が誰か**。 「X らの計算の誤りを特定・訂正した」 型の文では、 行為の帰属 (訂正したのは我々) が正しくても **対象の帰属 (誰の・どの論文の誤りか)** が独立に誤りうる。 対外文書 (研究費調書・論文・rebuttal・推薦書・謝辞・メールでの他者言及) で第三者を名指しして誤り・訂正・批判・優先権を語る文は、 この軸の最高 stakes 面。
+
+failure form (実測、 genericized):
+
+- **自己生成した帰属は「検証済みの既知」 と同じ顔で出てくる。** retrieval 由来の fact と生成由来の補完は流暢さで区別できない — 特に説得文書では「具体名がある方が強い」 圧が名前の生成を促し、 生成された名前は書いた本人 (= 同 session の自分) にとって検証対象と認識されない。
+- **内部略称の衝突展開**: グループ内略称・愛称 (2-4 文字) が同分野の著名研究者の姓の prefix と衝突すると、 対外文書化の瞬間に著名名へ「復元」 される。 実例: 共著者の略称が他研究者の姓と衝突し、 **自著論文の誤植訂正が「その研究者の論文の誤りを訂正」 に化けて提出文書に焼かれた** ([name-rendering.md](name-rendering.md) の姉妹 — あちらは表記の不可逆復元、 こちらは指示対象の不可逆復元)。
+- **一次 distortion はしばしば名前より上流**: 「自著の誤植を訂正 (erratum)」 → 「先行研究の誤りを訂正」 の框のすり替えが先にあり、 名前はその框を埋める補完として後から入る。 名前だけ削っても框が残る (= 同事故では匿名版の同型文が別 2 箇所に併存していた)。
+
+規律 (帰属 5 規律への追加 4 本):
+
+6. <a id="named-claim-verify"></a>**名指し × {誤り・訂正・批判・優先権・反駁} 語彙の文を書いた瞬間 = 一次記録との突合 gate。** 検証は安価 (repo grep 1 発 / 文献 DB 1 引き): 名指しの姓が対象論文の著者 list に実在するか・自分側の記録にその人の誤りを発見した record が実在するかを見る。 実測の誤 gloss (「X ら = arXiv:NNNN」) は当該 arXiv の著者 list と 1 手で矛盾していた。 **他人の言明の要約・引用 (「X は … と言っている」「X は … と言うだけ」) も、 誤り・訂正の語が無くても同じ突合に入る** = 発火の語に当たらない言い換えが、 原文の主節を落としたまま鉤括弧つきで対外の便に出た (実測)。 原文と並べて照らし、 鉤括弧で括るのは原文の部分文字列だけ (形と機械の検査 = [`rebuttal-letter.md#pre-send-verification-sheet`](rebuttal-letter.md#pre-send-verification-sheet) の 2)。
+7. **内部略称は対外文書に出る前に正式名へ解決してから書く** (グループの中立識別子規約があればそれに従う)。 略称のまま生成に渡すと衝突展開の入力になる。
+8. **検証できない名指しは削る** — 多くの場合、 真実 (自著の誤りを機械検証で検出・訂正した等) の方が主張として強い (instance rule = [kakenhi-proposal.md #mock-review-and-claims](kakenhi-proposal.md#mock-review-and-claims))。
+9. **derived 文書間の帰属不一致を見つけたら、 解決方向は「互いに合わせる」 でなく「SoT に対して検証」。** 具体度が高い方を真とみなす specificity bias に注意 — 実測の増幅 mode では、 整合性 sweep が匿名で正しい記録を名指しの誤りに「特定」 して**裏付け文書を製造**した (= 整合性軸は内部無矛盾しか見えず、 coherent な誤りを捕まえられない)。
+
+## <a id="decision-state-at-record-time"></a>第三の軸: 決定の状態 (それは決まったことか、 誰が決めたか)
+
+carrier 軸・claim-target 軸と別に、 **記録に「決定」「方針」「担当」 と書く瞬間**に壊れる軸がある。 書こうとしている内容が次のどれかを、 その瞬間に確かめる:
+
+- (a) **owner の決定** — owner の発言そのものを引ける (原文の動詞のまま書ける)
+- (b) **提案・試稿・叩き台** — agent や協力者が出したもので、 採否は未定
+- (c) **他 session の自己申告** — 別の agent session が名乗った窓口・担当・触らない範囲
+
+両方向に壊れる (実測):
+
+10. **決定でないものを決定として写さない。** 試稿に書いてある順序や、 他 session が名乗った窓口が、 次の記録では「決まったこと」 になる。 控える側の制約 (「編集しない」) ほど確かめずに受け入れられ、 言い換えで強まり、 「〜なので見送った」 という記録のたびに別の file へ写る。 board 上の形と読む側・書く側の規則 = [multi-session-coordination.md#board-role-claim-is-not-assignment](multi-session-coordination.md#board-role-claim-is-not-assignment)。
+11. **決定を提案のまま置かない。** agent の提案に owner が同意した返事は決定であり、 同じ turn で決定の置き場に書く。 書き落とすと、 後で owner に指摘されるまで正本に無い。 決定か提案のままかが読み切れないときは、 記録する turn で owner に聞く (推測でどちらかに寄せない)。 <a id="decided-by-action"></a>**owner が行為で決めたことも決定である**: owner の了解で既に当てた変更を、 後で承認の手続き (相手への確認・承認の一覧) に出し直すときは、 owner の側の答え (可否と文面) を記入済みにして出し、 改めて owner に尋ねない (実測: 了解を得て編集した後、 同じ変更の可否と直し方を owner に 2 回続けて聞き、 「編集したのだから答えは決まっている」 と返された)。
+12. **確かめる先は owner の発言そのもの。** 書いた agent 自身の報告や tool の説明文は、 自分の判断を「指示に基づき」 と書くことがある (実測)。 会話記録の user 役の発言を引く ([debugging-discipline.md#transcript-search-archived-and-quoted](debugging-discipline.md#transcript-search-archived-and-quoted))。 <a id="check-copied-quotes"></a>記録に写した発言は、 写した後に機械で照らす: `scripts/search-agent-transcripts.py --session <id> --role user --regex . --limit 0` の出力を原文にして `scripts/check-attributed-quotes.py --draft <写した行> --source <原文> --attrib <帰属の語>` を回す (帰属の語の近くの引用を原文と照らす。 同じ行にある agent の問いや原稿の文も帰属の語の近くにあれば ✗ に出るので 1 件ずつ読む)。 道具は空白をそろえて照らすので、 複数行の発言を 1 行に写すとき改行を空白 1 つにしたかは目で確かめる (実測: 改行を詰めて写し、 空白が落ちた引用が検収で見つかった)。 <a id="check-answered-question"></a>owner が答えた問いの文 (選択肢の問い・turn の終わりの箱・問いの台帳の道具に立てた問い) も原文で照らす: 問いは返事の地の文に無く道具の入力にあることが多く、 `--role any` では出ない = `scripts/search-agent-transcripts.py --session <id> --tool-runs --regex '<問いの語>'` で引く (実測)。
+13. **置き場は 1 か所、 原文の動詞で。** owner の決定は決定を集める 1 か所 (設計 doc の決定欄・project の指示 file) に書き、 他の記録はそこを指す。 提案は「提案」「比較材料」 と明記する。 置き場が無いまま各所に全文で写すと、 出所が消えて後の読み手には (a) と (b)(c) の区別がつかなくなり、 訂正も写しの数だけ要る。 <a id="copy-reason-with-decision"></a>**提案を決定として写すときは、 その決定の理由と、 決定が当てはめた上位の決まり (一般の並べ方・家風・前の裁定) も同じ項に 1 句で写す。** 提案の文書が決まりとその当てはめ (ある項目の置き場・順) を並べて書いていたら、 当てはめだけを写さない。 提案に理由が無い当てはめは、 理由を 1 句で足すか、 理由が無いと書く。 写す時点では決まりと当てはめが食い違わないので、 落としても困らないように見える。 だが同じ作業の後の変更が当てはめの理由を消すと、 後の読み手は写しだけを見て、 理由の消えた当てはめを決定として守る (実測。 一般形 = [`convention-design-principles.md#premise-dropped-at-copy`](../docs/convention-design-principles.md#premise-dropped-at-copy))。 書式を足すのは今後の項から: 過去の項に理由を一括で書き足すと、 後から推測した理由が owner の理由の顔で入る。 過去の項は、 ぶつかったときに 17・20 の形で前提を探す。
+
+14. <a id="premise-provenance"></a>**原稿の headline を支える前提の文は、 出所と著者の確認状況を一次記録で引いてから論じる。** 前提の 1 文 (「現実の系では X ≪ 1」 型) が疑われたら、 物理を論じる前に、 誰がいつ書き、 著者がいつ何を確認したかを確定する。 前提が AI の起草のまま著者の確認を経ずに headline の根拠になっていた、 という型は (b) を (a) として扱った記録の一種である。
+    - **初出**: `git log -S '<前提の文の特徴的な部分>' --format='%h %ad %an | %s | %(trailers)' -- <原稿>` は出現回数が変わった commit を並べる (最古 = 初出、 最新 = 撤去)。 整形で文が変わっていれば短い特徴語で引き直す。 `-S` は回数の差しか見ないので移動は見えない ([`overleaf-integration.md#push-sweeps-editor-edits`](overleaf-integration.md#push-sweeps-editor-edits) の注)。
+    - **書き手**: git author は commit した account であって書き手ではない。 `Co-Authored-By` と session trailer ([`multi-session-coordination.md#session-provenance-trailer`](multi-session-coordination.md#session-provenance-trailer)) で agent を読む。 trailer の付き始めより前の commit は「trailer 無し = 人の commit」 と読まず、 件名の癖・掲示板・会話記録で判定して根拠を書く。 付き始めの commit を証拠の境界として記録する。
+    - **どの clone で作られたか**: 手元の reflog に `commit:` として現れるか、 fast-forward の範囲で届いたかを見る。 fast-forward の行は着地点しか出ないので、 `git merge-base --is-ancestor <commit> <着地点>` を直前と直後の着地点に当てて範囲を決める。 範囲で届いたなら別の clone (別のマシン・別の checkout) で作られた。 reflog は clone ごとで期限もあるので、 見えないことは不在の証拠にならない。
+    - **確認状況**: review 台帳で、 前提を含む節を誰がいつ確認したかを引き、 「式の整合を確認した」 と「前提が現実の系に当たるか確認した」 を分けて書く。 前提が一度も著者の確認を通っていなければそう明記する。 headline の変更そのものの扱いは [`manuscript-claim-ownership.md`](manuscript-claim-ownership.md)、 前提を lab の量で検算する手順は [`paper-audit.md#regime-premise-in-lab-quantities`](paper-audit.md#regime-premise-in-lab-quantities)。
+15. <a id="plan-not-owner-promise"></a>**台帳の予定を、 owner の一人称の約束として文面に書かない。** agent が owner の名義 (owner の一人称・owner の account や bot) で出す文面を組むとき、 TODO の期日や計画書の段取り (「確かめてから送ります」「何日に出します」) は台帳の予定であって、 owner が相手に約束したことではない。 一人称で書くと、 台帳の予定が owner の約束として相手に届く (実測: 送る前の下書きで owner が気づいた)。 owner の約束として書けるのは、 owner の発言から引けるものだけ。 発言から引けない予定は書かないか、 agent の名義 (書き手の 1 行 = [`discord-bot.md#org-post-byline`](discord-bot.md#org-post-byline)) で書き、 owner を三人称にする。
+16. <a id="title-shows-decision-state"></a>**本人が見て動く面 (予定表の題・一覧の見出し) には、 時間を取る部分の確定の状態をそのまま書く。** 題には確定した部分だけを書き、 未確定の部分は説明欄に書く。 題の末尾に「(案)」「(仮)」 のような未確定の印を付けない: 印は題の全体に掛かって読まれ、 確定した部分まで未確定に見える (実測)。 同じ印を「委員会の審議中」 のような別の意味にも使っていると、 読む人は印からどちらの意味かを決められない。 予定そのものが未確定 (日を空けておく段階) のときだけ、 題の頭に未確定と書く (例「未確定:」)。 「異論が無ければこの案で決まる」 型の割当は、 名前が入った時点で確定として書き、 異論を出す期限を説明欄と台帳に書く (11 の、 予定表の題での形)。 状態が変わったら、 題・説明・台帳を同じ turn で揃える。 時刻の入れ方と、 予定表の直しを台帳の「次の一手」 に回さない規則 = [`calendar-conflict-detection.md#timed-entry-for-duties`](calendar-conflict-detection.md#timed-entry-for-duties)。
+
+## <a id="prior-record-before-recommending"></a>第四の軸: 前の記録 (推す答えの前提は、 前の決定・額・約束と食い違わないか)
+
+owner に出す問いの推す答え (どれを選ぶか・外へ送るか・払う・頼む・断る) は、 新しく届いた便だけで組むと、 同じ件の前の決定・前の見積・相手との約束を黙って覆す。 前の記録は別の項目・正本の地の文・前の受信に分かれて置かれることが多く、 新しい便を読むだけの窓には届かない。 owner がその推す答えに「推しで」 と答えても、 前提を確かめたことにはならない (下書きの承認が事実の検証にならないのと同じ)。 承認を受けた後の段 (依頼書・下書き・検収・送信) は、 承認を「前提は確かめ済み」 と読んで先へ進む (実測: 推す答えの上で外への便が出て、 前の決定と食い違い、 相手に言い直しの便を重ねた)。
+
+<a id="premise-before-rank"></a>**逆の向きにも同じ形で壊れる: 前の決定に従う答えも、 その決定の理由が今の状態で成り立つかを見ないと、 理由の消えた決定に字面で従う。** 決定・規則と、 文案・検査・後の変更がぶつかったら、 格 (誰の決定か) で解く前に、 その決定の理由が今も成り立つかを見る。 理由が分からなければ、 分からないまま守らず、 理由を探すか依頼元に問う。 これは owner の決定を守る向きを弱めない: 理由が今も成り立つ決定はそのまま守り、 理由が成り立たないと見えた決定を変えるかは owner が決める。 実測: 下請け・検収役・依頼元のどの窓も、 ぶつかりを「どちらが owner の決定か」 で解き、 台帳に写された当てはめ (ある項目の置き場) を守った。 その置き場の理由は同じ作業の後の文案で消えており、 owner の「その趣旨はもう成り立っていないのでは」 の問いの後、 1 回の確かめで分かった。 17 と 20 はこの向きも持つ。
+
+17. **推す答えを書く前に、 その件の主題の語で記録を 1 回引き、 前の決定 (誰の発言か・日付)・前の見積の額・相手との約束を出どころつきで問いに 1 行で並べる。** 推す答えが前の決定を変えるなら、 問いに「<日付> の決定を変える」 と書く。 並べる前の決定には、 その決定の理由を 1 句添え、 今の状態でまだ成り立つかを書く (理由が記録に無ければ、 提案の文書・前の記録で探し、 無ければ無いと書く)。 成り立たない・確かめられない決定は推す答えの根拠にせず、 問いに「<日付> の決定の前提 (…) が今は成り立たない」 か「確かめられない」 と書く ([#premise-before-rank](#premise-before-rank))。 無ければ「無し (見た範囲 = …)」 と、 見た範囲を書く (範囲の無い「無し」 は不在の主張として読まれる)。 引く語が違えば漏れるので、 引いた語も書く。 機械 = ai-collaboration `board/board_asks.py ask` の `--prior-term` / `--prior` (理由が選択と外への送信の問いに求める。 掲示板が名指す検索をその語で回し、 当たりに額・決定の語があるのに「無し」 なら問う側に知らせる。 前の記録に前提の語が無ければ問う側に警告するが、 問いは止めない = [CONTRACT#owner-asks](../../ai-collaboration/board/CONTRACT.md#owner-asks))。
+18. **問いは「何の話か → 変えると何が変わるか → 決めること」 の順に書く。** 何の話か = どこから来た話か (誰・いつ・何の件) の 1 文で、 file の名・path・英語の識別子・commit の頭・問いの印を入れない (owner は作業側の語では文脈を引けない。 実測: 文脈の無い問いへの答えの多くが「それは何か」 だった)。 同じ道具の `--about` / `--effect` が求める。
+19. **送る段では、 宛先で引く。** 語で引く検索は語が違えば漏れるので、 送る直前に、 宛先と同じ相手・同じ案件の開いた項目とその決定を、 宛先の address と domain から機械で並べる。 返信先の項目のほかに並んだ開いた項目のうち、 決定の記録 (決定欄) を持つ項目を全部名指して承知するまで送らない形にする (同じ thread の新しい便を名指させる [`gmail-sending.md#reply-newer-in-thread`](gmail-sending.md#reply-newer-in-thread) の延長)。 決定の記録の無い項目も並べて見せる。 名指させる項目を決定の記録で選ぶのは、 よく便を出す相手 (同僚・事務) では決定の無い項目まで毎回並び、 その全部を名指させると承知が形だけになるため (実測)。 決定どうしの向き (頼む / 断る) の食い違いは機械に判定させない (文の読み = 誤判定が承知の形骸化を招く)。 並べて名指させるところまで。
+20. **下請けに渡す依頼書には、 owner の決定を言い換えでなく、 発言そのもの・その発言が答えた推す答えの全文・17 の前の記録の行で渡す。** 言い換えは owner の答えより広くなり (11 の逆向き)、 前の記録も落ちたまま下請けに届く。 下請けは、 依頼書の決定が前の記録と食い違うと見えたら、 書く前に依頼元に問い返す (相手の出方の予想として成果物の中に書いて先へ進まない)。 依頼書の決定と、 文案・検査・後の変更がぶつかったときも同じで、 取り下げも押し通しもしない。 問い返す形は「どちらを取るか」 でなく「この決定の前提 (理由) は今も成り立つか、 証拠はこう」。 依頼元は格 (owner の決定だから) で答えず、 前提で答える (前提を確かめられなければ owner に問う。 [#premise-before-rank](#premise-before-rank))。 台帳の決定を方針として引く依頼書には、 ぶつかったときのこの扱いを 1 行書く。
+
+兄弟 = 締めの [`closing-sweep.md#leftovers-check`](closing-sweep.md#leftovers-check) (残りに入れる前に会話で決まっていないかを確かめる) と、 本 file の 11 (記録する時の決定の状態)。 17 は推す答えを作る時、 11 は決定を記録する時の形。 前の決定に従う向き (理由の消えた決定) の一般形 = [`convention-design-principles.md#premise-dropped-at-copy`](../docs/convention-design-principles.md#premise-dropped-at-copy) (規則は前提より長生きする、 の決定の台帳の版)。
+
+## <a id="attribution-evidence"></a>再発 evidence (genericized)
+
+- 共著物理論文の Overleaf git mirror を pull し、 単一 commit author の 146 行更新を「その人の update」と単独 narrative で報告 → 実際は会議で共著者全員が live 編集した group product (user 訂正 1)。 再 framing 後も、 同日朝に owner 名義の commit 20+ 本 (= owner の live 編集を coding agent が auto-push した分) が並んでいる事実を git log で確認しないまま narrative を維持 (user 訂正 2)。 **1 incident 内で規律 2 (group default) と規律 5 (proxy 分布の安価な確認) を連続で落とした**。
+- 複数人 Zoom review の指摘を named collaborator 1 人に一括帰属 → user 訂正 → **同 session 内で再発** (= reflex bias であり単発 slip でない)。 以後その project は記録に「帰属: 両名」marker を明示する運用。
+- 別 project では同型誤帰属 (共有 doc に書き下した人を式の originator と呼ぶ / 共著論文を 1 人の paper と呼ぶ) が繰り返され、 **project-local の attribution ledger** (= 対象 → 真の originator の表) が防御として作られた。 project-local ledger は当該 repo 内では効くが横断的には効かない (= 別 repo・別 domain で再発した) — 本 doc はその横断 SoT。
+
+## <a id="attribution-mechanization-limit"></a>機械化の限界 (honest)
+
+- 帰属判断は自然言語 semantic であり、 hook / gate / lint での機械 enforcement は不能 (= [convention-design-principles.md §8.8 (= #proxy-blind-spot)](../docs/convention-design-principles.md#proxy-blind-spot) の帰属 domain)。 narrative 規律 + human-steering (= user が誤帰属を捕まえる) が floor であることを honest に認める。
+- 効く構造対策は 2 つ: (a) **帰属が繰り返し混同される対象は SoT 側に ledger を持つ** (= record の self-disambiguation、 次の readout を 1-shot 化)。 (b) **proxy 種の併記を書式にする** (規律 1) — 「気をつける」でなく、 carrier 欄を写す時の定型に proxy 種注記を焼き込む。
+
+## <a id="attribution-adjacent-kernels"></a>隣接 kernel (別 domain、 混同しない)
+
+- **実行経路・原因の帰属 (機械 domain)** = [debugging-discipline.md #execution-path-attribution](debugging-discipline.md#execution-path-attribution) (= 内容指紋で経路を確定 / control case で discriminate)。 対象が人でなく機構。
+- **アウトリーチ宛先の身元 verify** = [research-email.md](research-email.md) §アウトリーチ前の身元確認 (= 宛先が論文著者本人かの corroboration)。 「これから接触する相手は誰か」であって「この記録は誰の行為か」ではない。
+- **文献の著者名 verify** (= citation authorship の誤同定・hallucination) は帰属 family だが kernel は「未検証 identity の断定」 — 検証原則は規律 5 と同じ (複数 proxy / 一次資料 verify)。
+- **役割の自己申告の board 上の形** = [multi-session-coordination.md #board-role-claim-is-not-assignment](multi-session-coordination.md#board-role-claim-is-not-assignment) (読む側・書く側の規則と表示時の注意)。 一般形は本 doc の [#decision-state-at-record-time](#decision-state-at-record-time)。
+- **人名の表記** = [name-rendering.md](name-rendering.md) (= ローマ字化・記号平坦化された name field から native 表記を推測で復元しない)。**同じ lossy-encoding family** で、本 doc が「その記録は誰の行為か」、あちらが「その人の名前はどう書くか」。

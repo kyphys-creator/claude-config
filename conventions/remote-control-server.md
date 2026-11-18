@@ -1,0 +1,263 @@
+<!-- doc-meta
+when: Remote Control サーバーモードを常駐・troubleshoot するとき
+category: harness-core
+summary: Claude Code Remote Control サーバーモードの launchd 常駐 (= スマホ / claude.ai/code から自マシンに新規セッションを生やす待ち受け。 要件 = claude.ai OAuth 〔managed key 不可〕 + 初回同意 y、 ⚠️ PTY 経由は stdin EOF cycling、 モバイル UI のリポ選択は same-dir で cwd 不変、 cloud session との見分け = 緑ドット computer icon、 #ts-rc-file-panel = RC 閲覧では chat 内 file link の右パネル render 不可 〔file は worker host 側にのみ在る、 正本 = claude-code-permissions.md#rc-chat-panel-no-render〕。 install SoT は scripts/install-remote-control-server.sh)
+-->
+# Remote Control サーバーモードの launchd 常駐 (= スマホからいつでも Claude Code)
+
+`claude remote-control` (サーバーモード) は、スマホの Claude アプリや claude.ai/code から
+**自分のマシン上に新規 Claude Code セッションを生やせる待ち受けサーバー**。実行は常に
+ローカルマシン側なので、filesystem・MCP・hooks・settings がそのまま使える (= Anthropic
+インフラで動く cloud session とは別物)。これを launchd で常駐させると「常時起動マシンが
+ある人は、いつでもどこでもスマホから自分の環境で Claude Code」になる。
+
+install / plist / KeepAlive 設計の SoT は `scripts/install-remote-control-server.sh`
+(= 本 doc は要件・落とし穴・運用知見のみ。公式 doc: https://code.claude.com/docs/en/remote-control)。
+
+## 使い方
+
+```sh
+# 常時起動しているマシンで 1 回 (idempotent)。--dir がリモート生成セッションの root
+sh scripts/install-remote-control-server.sh --dir "$HOME/my-projects"
+
+sh scripts/install-remote-control-server.sh --status      # 稼働確認 + log tail
+sh scripts/install-remote-control-server.sh --uninstall   # 解除
+```
+
+接続側: スマホ Claude アプリ → Code タブ (またはブラウザで claude.ai/code) →
+**緑ドット + computer icon** の environment を選んで新規セッション作成。launchd 常駐では
+QR (space キー) は使えないが、接続先は ① claude.ai/code のセッション一覧 ② log 内の
+`https://claude.ai/code?environment=env_…` URL の 2 経路で入れる (= QR 不要)。
+
+## <a id="requirements-and-selfheal"></a>要件 (= 欠けていても install は通り、解消後 60 秒以内に自動で生き返る)
+
+| 要件 | 欠けた時の症状 | 解消 |
+|---|---|---|
+| macOS + Claude Code v2.1.139+ (RC server 起動 minimum。 v2.1.51+ 系は `remote-control` サブコマンド自体は存在するが server 起動時に runtime error で cycling する、 詳細 [Troubleshooting](#ts-version-mismatch)) | 起動時 `too old for Remote Control` error | `claude update` |
+| **workspace trust** (= config JSON `projects[<dir>].hasTrustDialogAccepted`) | 未承認だと非対話の launchd サーバーが dialog を出せず `Workspace not trusted` で exit-1 永久 cycling ([#ts-workspace-trust](#ts-workspace-trust)) | **install script が install 時に自動 seed** (2026-07-02〜)。 手動 fallback = 一度 `cd <dir> && claude` で承認 |
+| **claude.ai OAuth login** (subscription 必須) | log に `Error: You must be logged in to use Remote Control.` が出て即 exit を繰り返す | ターミナルで `claude auth login`。⚠️ API key・旧「managed key」型・`claude setup-token`/`CLAUDE_CODE_OAUTH_TOKEN` の inference-only token は全て不可 (= 公式 docs)。`ANTHROPIC_API_KEY` が env にあれば unset。`claude auth status` が loggedIn でも `subscriptionType: null` ならこれ (2026-06-12 実測)。 **唯一 seed 不能な interactive 段** (= keychain + browser OAuth、 マシン × アカウント 1 回きり) |
+| **初回同意** (= config JSON top-level `remoteDialogSeen`) | log に「Enable Remote Control? (y/n)」、無人では進めない | **install script が install 時に自動 seed** (2026-07-02〜)。 手動 fallback = `claude remote-control` を一度起動して y |
+
+この managed-key 非対応は upstream の既知制約 (= anthropics/claude-code #50977〔API key / setup-token OAuth サポート要望〕・#50642〔Bedrock 認証〕の feature request、いずれも未対応)。ユーザ側のミスではないので `subscriptionType: null` を見たら迷わず `claude auth login`。
+
+### <a id="update-needs-restart"></a>⚠️ `claude update` は**走っている server を更新しない** (= 版依存 model が使えない時の第一容疑)
+
+新しい model が「この版では非対応」 と弾かれた時 (= 例 `Claude Code 2.1.195 does not support this model; version 2.1.251 or newer is required. Run 'claude update', ...`)、 **`claude update` を実行しただけでは直らない**。 update が差し替えるのは**ディスク上の binary** で、 launchd 常駐の RC server は**起動時の版のまま動き続ける** (= `ps` で `.../versions/<old>` が見える)。 スマホ側は「更新したのに同じエラー」 に見える。
+
+```sh
+# 実際に走っている版を確認 (= --version はディスク上の版で、server の版ではない)
+ps aux | grep '[c]laude remote-control'          # server プロセス
+ps aux | grep '[v]ersions/'                      # 実行中 binary の版が path に出る
+
+# server を新版で再起動 (KeepAlive があるので kickstart で足りる)
+launchctl kickstart -k gui/$(id -u)/<RC server の label>
+```
+
+⚠️ **再起動すると接続中のセッションは切れる**。 スマホの一覧に残る旧セッション行は開かない (= 「死んだセッションの残骸」、 下記「運用知見」 参照) — 新規セッションを作って入り直す。 ∴ **Claude が会話中の接続を自分の判断で落とさない** (= その会話の経路そのものを切る操作になる)。
+
+<a id="unattended-refresh"></a>**再起動を人の手順にしない**: 古い CLI で動き続ける server は、 毎時の heartbeat が `--rc-refresh-stale` で起こし直す。 条件 = 動いている CLI が手元の最新より古い ∧ その設定フォルダの会話記録が 6 時間止まっている ∧ 子孫が忙しくない ∧ 前回から 6 時間空いた (判定 = [`scripts/lib/rc_server_state.py`](../scripts/lib/rc_server_state.py) の `decide_refresh`)。 接続数は条件に入れない = 起動時に作られる session が残り続ける server は接続 0 にならない (実測)。 この Mac で止める = `~/.claude/rc-refresh.off`。 reader は古いままの server を理由つきで出し、 機械が答えられない許可ダイアログは、 答えの記録が届くまで 🔴 で出し続ける ([`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat))。
+
+同じ罠は **CLI session 自身**にもある: 実行中の session は古い binary のままなので、 update 後に新 model を使うには**新しい session を開く**必要がある (2026-09-05 実測、 2.1.195 → 2.1.261)。
+
+## CLI フラグ早見 (= `claude remote-control --help`、2026-06-12 実測)
+
+| フラグ | 効果 |
+|---|---|
+| `--spawn same-dir\|worktree\|session` | 既定 same-dir = 全セッション cwd 共有 / worktree = セッション毎に git worktree (起動 dir が git repo 必須) / session = 単一セッション (それが終わると server も exit)。実行中 `w` キーで same-dir↔worktree トグル |
+| `--capacity N` | same-dir / worktree の最大同時セッション数 (既定 32) |
+| `--permission-mode MODE` | spawn するセッションの permission mode (acceptEdits / auto / bypassPermissions / default / dontAsk / plan) |
+| `--name NAME` | セッション表示名のみ (cwd には無関係) |
+| `--remote-control-session-name-prefix PREFIX` | 自動生成名の接頭辞 (既定 hostname、env `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX`) |
+| `--[no-]create-session-in-dir` | 起動時に cwd でセッションを 1 個先行作成 (既定 on)。worktree モードではこの 1 個だけ cwd に残り以後の on-demand が worktree 化 |
+| `--debug-file PATH` / `-v,--verbose` | デバッグログ |
+
+## 設計の要点 (= 変更・移植する人向け)
+
+- **復元力**: `KeepAlive` + `ThrottleInterval 60` で 再起動 / crash / 未認証 / ネットワーク断
+  (10 分超で claude 側が自滅する仕様) の全てから自動復帰。放置運用前提。
+- ⚠️ **PTY を与えてはいけない**: launchd 配下で script(1) 等の PTY 経由にすると、stdin
+  (/dev/null) の EOF が端末 close として claude に届き graceful exit → 60 秒周期の
+  接続/切断 cycling になる (2026-06-12 実測 RCA)。non-TTY 直接 exec なら stdin EOF を
+  無視して安定する (= TUI の QR 表示等は失うが、サーバー機能に不要)。
+- shutdown 時の「Environment preserved」は正常 (= environment は再起動を跨いで維持され、
+  同じ environment ID で再接続する)。
+
+## 運用知見 (実測)
+
+- **モバイル UI の「リポ選択」は cwd を変えない**: 既定の `--spawn same-dir` では新規
+  セッションの cwd は常にサーバーの `--dir`。UI で何を選んでも変わらない (2026-06-12
+  transcript 配置で実測)。リポ単位で隔離したければ `--spawn worktree` (= `--dir` 自体が
+  git repo である必要、セッション毎に worktree)。
+- **cloud session との取り違え注意**: アプリの新規作成 UI には「ローカル (Remote Control)」
+  と「cloud session (Anthropic インフラ、GitHub repo 必須)」が同居する。緑ドット +
+  computer icon がローカル。
+- **死んだセッションの残骸**: サーバー再起動を跨ぐと旧セッション行が一覧に残り、開くと
+  無限スピナーになる。残骸は削除し、新規作成で入り直す。
+- 並列セッションは同じ cwd を共有する (same-dir) ので、同一ファイルの同時編集は衝突し得る。
+- **ultraplan を起動すると Remote Control が切断される** (= 両者が claude.ai/code を占有、公式 docs)。
+- <a id="log-growth"></a>**server の log は増え続ける**: server は端末向けの再接続の表示 (制御文字つきの
+  spinner の枠) を launchd の `StandardOutPath` にそのまま書き続け、 install script は log を回さない
+  (実測: 1 本で数百 MB)。 `--status` は末尾の 5 行しか読まないので気づきにくい = 大きさは
+  `du -h ~/Library/Logs/com.claude-config.remote-control-server*.log` で見る。 install script は server と対で
+  `com.claude-config.rc-log-cap[.<suffix>]` の launchd job を置き、 1 時間ごとに 20 MB を超えた log を末尾 1 MB に書き戻す (job の label は
+  server の label で始めない = server を label の前方一致や `*remote-control-server*` で拾う見張りが、 常駐しない
+  定期 job を「loaded だが process 無し」 の server に数える。 前の名前 `<server の label>.logcap` は `--ensure-logcap` が外す。 launchd は
+  `StandardOutPath` を追記 (`O_APPEND`) で開くので、 書き戻した後の server の書き込みは新しい末尾に続く。 実測 =
+  `lsof +fg` の flag が `AP`)。 log cap の無い既存の server には `--ensure-logcap --label-suffix <名前>` が冪等に
+  置く (変えたときだけ 1 行) = 毎 session の自動適用から呼べば各機械に届く。 `--status` が log の大きさと
+  log cap の有無を出す。 server を外した後の古い log は残る (消すかは持ち主が決める)。
+  ⚠️ log を grep して異常語を数えると、 再起動より前の行まで数える = 異常語の行番号を最後の
+  `Reconnected` の行番号と比べて、 今も起きているかを決める。
+- ⚠️ **`--sandbox`/`--no-sandbox` の食い違い**: 公式 docs は server mode の flag に filesystem/network 隔離の `--sandbox` を挙げるが、v2.1.165 の `claude remote-control --help` には**無い** (= 自版で要確認、版依存)。常時公開サーバーで隔離を効かせたい場合は自分の `--help` で実在を確認してから付ける (= docs だけ見て plist に焼くと unknown-flag で永久 cycling し得る)。
+
+## <a id="troubleshooting"></a>Troubleshooting
+
+install が通ったのに server がまともに起動しない・接続できないときの実測 pattern。 いずれも `install-remote-control-server.sh` の preflight が `[warn]` として拾う設計 (= 静かに素通りさせない)。
+
+### <a id="ts-version-mismatch"></a>"Remote Control is not enabled for your account" — 実は CLI 古すぎ (v2.1.139 未満)
+
+**症状**: `claude remote-control` 直後に `Error: Remote Control is not enabled for your account. Contact your administrator.` が返る。 org policy の blocker と読めるが実は誤誘導 — RC server 起動は v2.1.139 以上を要求し (= server 側が返す runtime error `too old for Remote Control` の閾値)、 v2.1.53 系の古い CLI がこの misleading な wording を返す。 launchd log tail に `Your version of Claude Code (X.Y.Z) is too old for Remote Control.` があれば確定。
+
+**検出**:
+- `claude --version` が 2.1.139 未満 → install script の version gate が `[warn]` を出す
+- `which -a claude` が複数を返す → 古い方が先に呼ばれている疑い (次項)
+
+**Fix (どれか)**:
+- `claude update` (現在 first-in-PATH の CLI が更新される)
+- 新しい install (例: `~/.npm-global/bin/claude`) を PATH 前置き ([`shell-env.md`](shell-env.md) の PATH 二層防御と併読、 次項)
+- 古い install を削除 (例: 過去に `sudo npm install -g` で置いた `/usr/local/bin/claude` が root 所有で残置、 通常の `claude update` では触れない)
+
+⚠️ この error の literal を org policy blocker と誤読して support に issue を切る前に必ず `claude --version` と `which -a claude` を確認。 実測で **~1.5h 診断に溶かした** 事例あり。
+
+### <a id="local-auth-triage"></a>auth の切り分けは **その機械で** しかできない — 診断を session 開始に載せる
+
+他機から見える heartbeat 等の集約は、 server の log を文字列で分類するので **「未 login」 と「API key の混入」 を同じ値 (`auth_error`) に畳む** (= [convention-design-principles.md §22](../docs/convention-design-principles.md#silent-probe-false-healthy) の「1 つの値に 2 つの意味」)。 切り分ける `claude auth status` はその config-dir を持つ機械でしか叩けないので、 放っておくと「次にその機械を触った人が思い出して叩く」 に依存する (= 人の記憶が carrier)。 実測では片方の config-dir が数日 `auth_error` のまま残り、 同じ機械のもう片方は `connected` だった (= **機械ではなく config-dir ごとに切れる**)。
+
+道具 = [`scripts/check-remote-control-auth.py`](../scripts/check-remote-control-auth.py)。 **安い検出 → 高い判別**の順で、 log の末尾に auth 異常の語が在る server にだけ probe を実行する (= 健全なときの費用をほぼ 0 にして常設できる)。 分類は `ok` / `api_key` / `logged_out` / `unknown` の 4 つで、 ⚠️ **probe を実行できなかった `unknown` を `ok` に畳まない**。 分類が変わった時だけ台帳に 1 行残すので (値は書かない)、 「別の機械で login したら切れた気がする」 型の仮説を時刻の並びで検証できる。
+
+### <a id="ts-api-key-conflict"></a>"Remote Control requires claude.ai subscription auth" — `ANTHROPIC_API_KEY` が混入
+
+**症状**: v2.1.139+ の新しい CLI で `Error: Remote Control requires claude.ai subscription auth. ANTHROPIC_API_KEY is set, so this session is using API-key auth — unset it (or run in a shell without it) to use Remote Control.` が返る。 これは**正直な error** で wording どおり。
+
+**launchd 側は既に安全** (= plist が defensive に `unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN` してから `exec claude remote-control` する = `install-remote-control-server.sh` の SoT)。 問題は **install / verify を叩く user shell** に env が残っているとき — probe / `claude auth login` / 手動 `claude remote-control` が全部この error に落ちる。
+
+**Fix**:
+- 一時: `unset ANTHROPIC_API_KEY` してから作業
+- 恒久: shell 起動 file (`.zshenv` / `.zprofile` / `.zshrc` / `~/.config/`) を grep して export 元を除去。 出所不明な場合は `launchctl getenv ANTHROPIC_API_KEY` や Terminal.app / iTerm2 の per-profile plist も確認 (= GUI で env を渡している可能性)。 詳細な env var 二層防御は [`shell-env.md`](shell-env.md)
+
+⚠️ RC は claude.ai OAuth (subscription) 必須で API key auth を拒否する upstream 制約 (= `#50977` feature request、 [§要件](#requirements-and-selfheal) 参照)。 「動いていたのに動かなくなった」 系は API key を後から export した回帰が疑わしい。
+
+⚠️ **status-check 版の同 trap (2026-07-02 実測)**: `ANTHROPIC_API_KEY` が env にあると **`claude auth status` が `authMethod: api_key` で `loggedIn: true` (email 無し) を返す** — 「login 済か」 を auth status で判定する automation (install wrapper / SessionStart hook 等) が **偽 auth 判定** (= 「別アカウント ()」 の空 email error や、 未 auth dir を auth 済と誤認) に落ちる。 automation 側の Fix = auth 確認は必ず `env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN` で叩き、 判定は `"loggedIn": true` でなく **`"authMethod": "claude.ai"`** を要求する (= launchd plist の defensive unset と同じ発想を status-check にも)。
+
+### <a id="ts-path-helper-inversion"></a>macOS `path_helper` が PATH を反転させて古い CLI が呼ばれる
+
+**症状**: `.zshenv` で user-scoped bin (例: `~/.npm-global/bin`) を PATH 先頭に prepend しても、 login shell (= Terminal 起動時 / launchd job 実行時) では `/usr/local/bin` 等 system path が上に来ていて古い CLI が呼ばれる。 [前項の version mismatch](#ts-version-mismatch) の root cause として典型。
+
+**機構**: macOS の `/etc/zprofile` が `eval "$(/usr/libexec/path_helper -s)"` を実行し、 `/etc/paths` (先頭 `/usr/local/bin`) を PATH の**前**に押し込む。 `.zshenv` が login 前に走っても、 `.zprofile` 段階で反転する。
+
+**検出**:
+```
+zsh -l -c 'echo $PATH' | tr ':' '\n' | head -5
+```
+先頭に `/usr/local/bin` が居て、 user-scoped bin (`~/.npm-global/bin` / `~/.local/bin` 等) がその下なら反転している。
+
+**Fix**: `~/.zprofile` (login shell が `/etc/zprofile` の直後に読む) で user path を **再 prepend** する。 この axis (= `/etc/zprofile` の後始末) と、 [`shell-env.md`](shell-env.md) の PATH 二層防御 (= スナップショットパッチによる不足補填) は**直交する別 axis** で、 両方必要。 前者は「順序」 の問題、 後者は「消失」 の問題。
+
+### <a id="ts-workspace-trust"></a>"Workspace not trusted" — virgin config dir の headless 死 (exit-1 永久 cycling)
+
+**症状**: launchd label は loaded なのに process が居ない (`launchctl list` で pid `-` / `last exit code = 1`)。 server log が `Error: Workspace not trusted. Please run claude in <dir> first to review and accept the workspace trust dialog.` で埋まる。 KeepAlive が 60 秒ごとに retry して**永久 cycling** — 表面上は「server が silent に消えた」 ようにしか見えない (2026-07-02 実測: desktop app の bridged session 切断調査から発覚)。
+
+**機構**: workspace trust と RC 初回同意は、 いずれも config dir ごとの config JSON (`<config-dir>/.claude.json`、 既定は `~/.claude.json`) に保存される **interactive dialog 由来の flag**。 pinned per-account 構成で config dir を新設すると、 **OAuth (keychain) を済ませても trust / consent は virgin のまま** — headless の launchd server は dialog を出せず exit 1。 「OAuth 1 回で永続」 の裏に interactive 段がもう 2 つ隠れていた、 が本質。
+
+**Fix (どれか)**:
+- install script を再実行 (= 2026-07-02 以降、 install 時に `projects[<dir>].hasTrustDialogAccepted` + `remoteDialogSeen` を自動 seed = **headless-ready 化**。 server は 60s 以内に self-heal)
+- 手動 seed: config JSON に上記 2 flag を書く
+- interactive fallback: `cd <dir> && CLAUDE_CONFIG_DIR=<cfg> claude` で trust 承認 → `claude remote-control` に y
+- **RC server 以外でも同じ文で止まる**: 新しい作業 dir (盲検の sandbox など) で background session (`claude --bg`) を起動したときも `Workspace not trusted` で起動しない。 seed 先は `projects[<その作業 dir>]` で、 file は上の機構のとおり = 既定の config dir なら home 直下の `~/.claude.json` (`~/.claude/` の中の同名 file に書いても効かない、 実測)、 `CLAUDE_CONFIG_DIR` を使うならその dir の `.claude.json`。 作業 dir を消したら key も消す。 信頼は親 dir から継がれる = その config dir で親 (home など) の key が信頼済みなら、 子の作業 dir には書かなくても起動する (実測) ので、 seed の前に親の key を見る (要らない key を足さない)
+
+**検出**: fleet-heartbeat が log marker `Workspace not trusted` → `trust_error` として記録し、 reader (`check-fleet-status.py`) が 🔴 surface する。
+
+**セキュリティ note**: 自動 seed は「この dir を root に server を install する」 という user の明示行為を trust consent と見なす (= trust dialog が確認したい内容と install の意図が一致するため、 consent の機械化であって bypass ではない)。 seed 対象は指定 `--dir` 1 個のみ。
+
+### <a id="ts-desktop-bridge-4090"></a>desktop app の「リモートコントロールが切断されました」 — bridged worker の code 4090 eviction
+
+**症状**: Claude desktop app の conversation が「ターミナルの Claude Code セッションが応答しなくなりました / The bridged Claude Code process stopped responding mid-turn」 を表示する。 RC server の障害と紛らわしいが**別物** — desktop の対話 session はマシン上の bridged CLI process が worker として動いており、 それが turn 中に落ちた症状。
+
+**機構**: 別の connection が同じ session を claim すると、 先住 worker が `Transport closed: this connection is no longer the active worker for the session (code 4090)` で eject される (= app log `~/Library/Logs/Claude/main.log` に記録)。 同マシンの RC server / auth が不安定な時に再接続 race で連発しやすい。
+
+**対処**: (1) `main.log` を `code 4090` で grep して時刻を特定 (2) config の projects dir にある `bridge-pointer.json` の pid が死んでいれば stale (= 削除可) (3) 同時期に RC server が cycling していれば先にそれ (前項 trust / auth / version) を治す (4) conversation はメッセージ再送 or 新規作成で復帰 — ⚠️ ただし **worker は eject されず turn を完走している場合がある** (2026-07-02 実測: 「応答しなくなりました」 表示中もホスト側 worker は作業を継続し repo への push まで完遂、 壊れていたのは viewer→worker の再接続だけ 〔sleep/網断後に viewer 側 reconnect が 404 を繰り返す変種、 別マシンから見ると repo には pull で成果が届き続ける〕)。 **再送で同じ作業を二重実行させないよう、 先にホスト側 repo の `git log` / transcript で成果を確認**してから再送する。 ホスト機がどれか曖昧なら、 復帰後にその session に `hostname` を 1 回打たせるのが最速の ground truth。 root は upstream の worker 管理で client 側から予防は不能 — できるのは検出と復旧のみ。
+
+### <a id="ts-session-no-reply"></a>スマホから始めた session に返事が付かない — どの機械に届いたかを先に決める
+
+**症状**: 一覧に session が載り、 利用者の発言だけが見えて返事が付かない。 エラーは出ない。 原因は「受け取っていない」 と「受け取って止まっている」 で別なので、 直す前にどちらかを決める (実測: 動いている server の前で推測を重ねるより、 下の順で読む方が速い)。
+
+1. **機械ごとの中身を読む** — heartbeat の `servers[].detail` (`capacity`・`session_events`・`unanswered`・`stale`) と `tcc_pending` (項目の意味 = [`scripts/fleet-heartbeat.py`](../scripts/fleet-heartbeat.py) の冒頭)。 手元の server なら log の `Capacity: n/32`。 発言の時刻の後に待機数が増えず `Session …` の行も無ければ、 その機械は受け取っていない。 ⚠️ session の無い待ち受けの表示は `Ready ·`、 session があると `Connected ·` = 「`Connected` が出ない = 切れている」 ではない。 終わった session は `[時刻] Session completed (経過) cse_…` の 1 行になる。
+2. **文面で会話記録を引く** — 次の節の 1 と同じ。 有無はその機械の中だけで言える (他の機械の分は 1 の `unanswered` で読む)。
+3. **session の id と接続先を確かめる** — スマホで始めた session は `session_…` の id で、 desktop app の session の道具 (一覧・`get_session`) には出ない (実測 = not found)。 id は `~/Library/Logs/Claude/main.log` の `setFocusedSession: sessionId=session_…` で分かる。 server の log の `cse_…` は同じ session の別の接頭辞 (後ろが同じ)。 機械ごとの接続先は `detail.environment`、 desktop app が保存した接続先と発言の時刻は Local Storage を [`scripts/leveldb-grep.py`](../scripts/leveldb-grep.py) で読む (`environmentId`、 session id の隣の `{uuid, at}`)。 ⚠️ `~/Library/Application Support/Claude` を丸ごと grep しない = 大きな image があり数分かかる (実測)。 内蔵ブラウザの claude.ai が未ログインなら session の頁は `/logout?involuntary=1` に飛ぶ = 読めない。
+4. **形で分ける** — 受け取っていない = server の不調 ([#unattended-refresh](#unattended-refresh))。 子 process はあるのに会話記録が進まない = 許可ダイアログ待ち (`tcc_pending`) か起動の hook。 session は残っていて `unanswered` が出る = 返事の途中で止まった。
+
+### <a id="ts-messages-typed-while-offline"></a>「Remote Control が切断されました / ホストはオフライン」 の間に打った指示は、 ホストの session に届いていない
+
+**症状**: claude.ai やスマホの viewer が「Remote Control が切断されました」「<host> 上の Claude Code はオフラインです」 を出している間に打った指示は、 viewer の画面には並んで見えるが、 ホスト機の会話記録 (config dir ごとの `projects/**/*.jsonl`) には 1 件も入っていない (実測)。 同じ時期、 ホストの RC server は launchd に loaded だが process が居なかった (fleet heartbeat の「loaded だが process 無し」)。 つまり viewer に見えている指示は、 実行されていない。
+
+**別の session で引き継ぐとき**:
+
+1. 指示に含まれる語で、 その機械の全 config dir の会話記録を引く (`command grep -l '<語>' ~/.claude*/projects/*/*.jsonl`、 または `scripts/search-agent-transcripts.py`)。 引き継ぐ session に指示を貼ると、 その session の記録にも同じ語が入る = 自分の記録は外して読む。
+2. 見つからなければ、 その指示は 1 つも実行されていない = 最初からやる。 見つかったら、 その session が送信・commit をどこまで済ませたかを確かめてから、 続きだけをやる (同じメールを 2 回送らない)。
+3. ホスト側を直す = RC server の process が居ない原因を、 前の節 ([#ts-workspace-trust](#ts-workspace-trust)・auth・version) の順に見る。
+
+⚠️ 復帰したときに、 viewer に溜まった指示が元の session に後から届くかは未確認。 届くなら、 引き継いだ後に元の会話を再接続すると同じ指示が二重に実行されうる = 引き継いだら元の会話は再接続せずに閉じる。
+
+### <a id="ts-rc-file-panel"></a>RC 閲覧中は chat 内 file link の右パネル rendering が効かない
+
+**症状**: RC で別端末から session を見ているとき、 chat 応答内の markdown link `[label](path)` を click すると「このファイルを読み取れませんでした — 削除または移動された可能性があるか、作業ディレクトリの外に存在する可能性」。 file は worker host に実在し、 permission scope も通っているのに出る (= error 文言が scope 問題と同一で誤誘導)。 file が worker host のディスクにのみ在り、 閲覧端末側に無いのが原因。 診断手順・対処 (唯一 RC で完結するのは「内容を chat 本文に出させる」) の正本 = [claude-code-permissions.md #rc-chat-panel-no-render](claude-code-permissions.md#rc-chat-panel-no-render)。
+
+### 併発 pattern
+
+上記は独立に起こるが、 特に **dual-install (v2.1.53 残置) + `path_helper` 反転** はセットで潜みやすい (= 古い install が `sudo npm install -g` で `/usr/local/bin` に落とされ、 `path_helper` がそこを先頭に置く → 新しい `~/.npm-global/bin/claude` が影に隠れる)。 install script の `[warn]` version mismatch を見たら両方 check。 また **virgin config dir では trust / consent / auth の 3 つが同時に欠けている** — install script の自動 seed が前 2 者を消すので、 残るのは OAuth 1 回のみ ([#ts-workspace-trust](#ts-workspace-trust))。
+
+## セキュリティ
+
+- 通信は**外向き HTTPS のみ** (Anthropic API 経由の polling)。inbound port は開かないので
+  NAT / FW 配下でも動き、露出面の追加はほぼ無い。
+- リモート生成セッションは通常のローカルセッションと同じ settings.json / hooks /
+  permission mode に従う (= permission の絞りは settings 側で行う。
+  `claude remote-control --permission-mode <mode>` で spawn 時の mode 指定も可)。
+- スマホを持つ人 = あなたのマシンで Claude Code を動かせる人。端末ロックは前提。
+
+## 相補機能
+
+- `remoteControlAtStartup: true` (`~/.claude/settings.json`、machine-local): 手元で開いた
+  **対話セッション全部**を自動でリモート続行可能にする。サーバーモード (= 何も開いて
+  いなくても外から新規に生やす) とは役割が別で、併用が自然。
+
+## <a id="multi-account-servers"></a>複数アカウント — 1 マシンに 2 サーバー
+
+別アカウントの新規 session をスマホから選べるようにするには、 1 マシンで remote-control サーバーを**アカウントごとに 1 本**立てる。 認証ストアの分離は `CLAUDE_CONFIG_DIR` で行う (⚠️ アカウント × マシン × 端末の**運用全体像** = [multi-account-machine-surface.md](multi-account-machine-surface.md)、 本節はその I1 の機構):
+
+⚠️ **推奨構成 = pinned per-account (全 server を suffix label + アカウント固定の config dir で立て、 既定 `~/.claude/` には載せない)**。 既定 dir の account は desktop / CLI の都合でいつでも切替わる**変数**なので、 そこに server を載せると account 切替のたびにそのマシンの mobile coverage が壊れる (実測: 既定 dir の account 切替で片方のセルが silent 消失)。 pinned dir 方式なら interactive OAuth は「マシン × アカウントごとに 1 回だけ」 で永続 — 以後は既定 dir の account をいくら切替えても coverage 不変 (再 auth が要るのは token 失効時のみ)。 base label (flag 無し install) は単一アカウント運用でのみ使う。
+
+- `install-remote-control-server.sh --config-dir DIR --label-suffix SUF` で 2 本目以降を別 config dir + 別 launchd label で常駐 (= 既定サーバーと衝突しない)。 既定 (flag 無し) が 1 本目。 outbound polling なので 2 本同時起動でポート/ロック衝突なし。 ⚠️ `--status` / `--uninstall` も同じ `--label-suffix` で叩く — 素の `--status` は既定 label だけを見るので、 pinned per-account 構成では server が動いていても「not installed」 と出る (その下に、 ほかの label で入っている server を 1 行で並べる)。
+- ⚠️ **`CLAUDE_CONFIG_DIR` は `~/.claude/` を丸ごと別 dir に分離する** (認証・`settings.json`・hooks・MCP・projects すべて)。 何もしないと 2 本目の名義 session は leak-guard 等の hooks を失う。 → 2 本目の config dir に `settings.json` を symlink で持ち込む (hook の command は `~/.claude/hooks/...` の絶対パスなので実体は共有先に解決される)。 MCP server は `.claude.json` 側で分離され別名義には付かない (= 安全性でなく機能差、 要れば別途その config dir で `claude mcp add`)。
+- <a id="oauth-grabs-browser-account"></a>⚠️⚠️ **OAuth はブラウザの現在 claude.ai アカウントを掴む** (= config dir を分けても、 `claude auth login` の認可が別アカウントでサインイン済だとそっちで認可されてしまう。 **account 選択画面は出ない** — cookie の account で無言で通り、 `--email` flag も入力欄の事前入力のみで cookie session があると効かない、 2026-08-28 実測)。 2 本目を**別アカウントで認証するときは、 認可をその別アカウントのブラウザ文脈で行う**: (a) claude.ai のアカウントメニューで切替 / サインアウトして選び直す、 または (b) **プライベート窓で claude.ai に目的アカウントでログインしておき、 `claude auth login` が自動で開くタブは承認せず閉じて、 terminal に出る URL をプライベート窓に貼って承認** (= どの窓から承認しても通る。 常用ブラウザのログインを動かさずに済む)。 ⚠️ terminal は URL を出して `Paste code here if prompted >` で待つが、 承認の後の終わり方は 2 通りある (どちらも実測。 redirect 先が platform の callback の形でも): (1) ブラウザに code が出る = 出た code を**その terminal** に貼って完了 (2) code は出ず、 terminal が自分で `Login successful.` になって終わる = 貼るものは無い。 承認したら先に terminal を見る (code を貼る前提で人に案内すると「code の画面にならない」 で止まる、 実測)。 自動で開くはずの許可の画面がブラウザに見当たらないときは、 terminal に出た URL を開く (macOS = `open -a <ブラウザ> '<URL>'`)。 画面の下に出る「<email> でログイン中」 で account を確かめてから承認する。 認可後はブラウザを戻してよい (= 資格は config dir に保存される)。 必ず `CLAUDE_CONFIG_DIR=DIR claude auth status` で email を確認してから本番化する — 掴み違いは **ラベルどおりの顔で別名義が動く silent な破れ**になる ([multi-account-machine-surface.md](multi-account-machine-surface.md) §典型的な破れかた「pinned config dir の alias と実 auth の乖離」、 2026-08-28 実測)。 取り違えたまま動いている config dir は、 fleet の reader ([`scripts/check-fleet-status.py`](../scripts/check-fleet-status.py) の `--expect-account`) が 🔴 で出す。
+- スマホ側は **アプリのアカウント = 見える environment 群のスイッチ** (= odakin でサインインすると odakin 名義サーバーの environment が、 別名義でサインインすると別名義の environment が候補に出る)。
+- **命名で account を可視化 — の実測限界 (2026-07-04)**: installer は `--label-suffix` がある場合、 `--name` + `--remote-control-session-name-prefix` に `<host-short>-<alias>` (例: `myhost-alice`) を自動設定する (= capability-gated、 install script が SoT)。 ⚠️ ただし **environment の picker 表示名は hostname 固定で、 これらの flag では変わらない** (実測: flag 焼き込み済 server で env を fresh 登録させても label は `<Hostname>:Claude:<4hex>` 形式のまま。 4hex は env の識別 suffix で同名 env 併存時に UI が付ける)。 flags が効くのは **spawn session の初期名のみ** (それも AI 自動タイトルに上書きされ得る)。 → **picker での account 判別は「見えている env 群 = 常に現スマホ account のもの」 という知識で行う** ([multi-account-machine-surface.md](multi-account-machine-surface.md) I9)。
+- **environment の identity は client 側 `projects/<dir>/bridge-pointer.json` が保持** (2026-07-04 実測): server 再起動は同 env に再接続する (= "Environment preserved")。 **fresh 登録を強制**するには server bootout → bridge-pointer.json を退避 → bootstrap (= 新 env id が発行される)。 ⚠️ 旧 env は picker に **dead 残骸として残り、 スマホ UI には env 削除操作が無い** (2026-07-04 実測。 web claude.ai/code 側で消せるかは未検証、 時間経過で自然消滅するかも未確認)。 → env の fresh 登録は残骸 1 行と引き換え — 表示名も変わらない (上記) ので、 **やる動機はほぼ無い** (= 本 recipe は env が壊れた時の復旧用と心得る)。
+
+### <a id="account-auth-keychain"></a>auth の保存構造 — 「切替」 は config-dir の選択であって copy ではない
+
+複数アカウント運用の設計を縛る基礎 fact (macOS、 2026-07-01 実測):
+
+- **auth トークンは `.claude.json` でなく macOS keychain に保存される**。 keychain service 名は `Claude Code-credentials[-<hash>]` の形で、 `<hash>` は **config-dir の path から導出**される (= keychain namespace が config-dir 固有)。
+- ゆえに **`.claude.json` を config-dir 間で copy しても auth は移動しない**: `oauthAccount` 欄 (email 等の metadata) だけが付いてきて `claude auth status` は `loggedIn: false` を返す = **metadata が嘘をつく状態**になる (copy はむしろ有害。 metadata だけ copy された dir は「email 表示 = login 済」 と誤読される)。
+- config-dir に auth を確立する唯一の経路 = `CLAUDE_CONFIG_DIR=<dir> claude auth login` (browser OAuth、 新しい keychain entry を hash 付きで作成。 ⚠️ 上の browser 罠がここでも効く)。
+- <a id="login-from-agent-session"></a>**agent の session から「ログインして」 と頼まれたとき** (実測): 裏の shell (agent の Bash tool・background) で `claude auth login` を走らせない — 承認後の code を貼る口が無く、 自動で開いたタブを本人が承認すると今のブラウザのアカウントに掴まれる。 本人が見て打てる terminal で起動する (desktop app なら Terminal パネルに command を打ち込む tool で、 タブに目的の分かる名前を付ける)。 command = `unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN; CLAUDE_CONFIG_DIR=<dir> claude auth login --claudeai --email <addr> && CLAUDE_CONFIG_DIR=<dir> claude auth status` (末尾の status で本人の画面に結果が残る)。 本人に頼むのは (1) ブラウザを目的のアカウントに切り替える (2) 承認 (3) 出た code を**そのタブ**の `Paste code here` に貼る、 の 3 つ。 ⚠️ **code は chat に貼らせない** (一度きりでも鍵 = agent を経由させない。 本人に聞かれたら貼り先を答える)。 ⚠️ 本人は OS のターミナル アプリの窓と取り違えやすい = タブ名と最終行 (`Paste code here if prompted >`) で指す。 済んだら agent 側で `claude auth status` の `loggedIn` / `authMethod` (= `claude.ai`) / `email` を読み、 email が目的と違えば同じ手順をやり直す。 複数の config dir を続けてログインするときは 1 つずつ (= 前の承認のアカウントのまま次を承認しない)。
+- **∴ アカウント切替の正しい primitive は「どの config-dir を使うか」 の選択 = `CLAUDE_CONFIG_DIR` env var の切替**。 file 操作で account を「移す」 発想は成立しない。
+
+運用面は 3 面が独立に切替可能:
+
+| 面 | 切替 mechanism |
+|---|---|
+| CLI (ターミナル) | `CLAUDE_CONFIG_DIR` の export / unset (shell function 化すると快適) |
+| desktop app | 起動プロセスの env なので shell からは届かない。 `launchctl setenv` + app 再起動 / `CLAUDE_CONFIG_DIR=<dir> open -na "Claude"` の単発起動 / 実用上は 1 つの primary 固定が楽 |
+| mobile (remote-control) | 切替不要 — 本節の 2 サーバー構成なら**両アカウントの environment が常時見える** (アプリ側のアカウント切替だけで選ぶ) |

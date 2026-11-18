@@ -1,0 +1,413 @@
+{
+  "_comment": "chat_file_refs.py (Stop hook chat-file-ref-enforce.sh の判定の部品) の修正を 1 つずつ外した mutant 25 本で、 hook の test の該当 case が落ち、 隣の case は通り続けることを確かめる spec (check-foil-teeth.py が読み、 run-all-checks が毎回回す)。 test は hooks/ に在るので {spec_dir} で指し、 部品の写しの dir を env で渡す。",
+  "target": "lib/chat_file_refs.py",
+  "run": "env CHAT_FILE_REF_TEST_LIBDIR=. bash {spec_dir}/../hooks/chat-file-ref-enforce.test.sh",
+  "fail_marker": "❌ ",
+  "pass_marker": "✅ ",
+  "mutants": [
+    {
+      "name": "link の label の中の inline code を除かない",
+      "pairs": [
+        [
+          "        if any(lm.start() <= m.start() < lm.end() for lm in links):\n            continue\n",
+          ""
+        ]
+      ],
+      "expect_fail": [
+        "A8:",
+        "B11:"
+      ],
+      "expect_pass": [
+        "A2:"
+      ]
+    },
+    {
+      "name": "scheme の判定が「名前 + 行番号」 を scheme と取り違える (class に . が在り、 行番号の後置を見ない)",
+      "pairs": [
+        [
+          "SCHEME_RE = re.compile(r\"^[a-z][a-z0-9+-]+:(?!\\d+(?:[-:]\\d+)?$)\", re.I)",
+          "SCHEME_RE = re.compile(r\"^[A-Za-z][A-Za-z0-9+.-]*:\")"
+        ]
+      ],
+      "expect_fail": [
+        "A7:"
+      ],
+      "expect_pass": [
+        "B14:"
+      ]
+    },
+    {
+      "name": "fence の前置きを 3 桁までしか許さない (list・引用の中の fence を見落とす)",
+      "pairs": [
+        [
+          "r\"^[ \\t>]*(`",
+          "r\"^[ \\t]{0,3}(`"
+        ],
+        [
+          "(?:^[ \\t>]*\\1",
+          "(?:^[ \\t]{0,3}\\1"
+        ]
+      ],
+      "expect_fail": [
+        "B12:",
+        "B13:"
+      ],
+      "expect_pass": [
+        "B4:"
+      ]
+    },
+    {
+      "name": "行頭の inline な 3 連 backtick を fence の開始と取り違える",
+      "pairs": [
+        [
+          "(`{3,}(?=[^`\\n]*\\n)|~{3,})",
+          "(`{3,}|~{3,})"
+        ]
+      ],
+      "expect_fail": [
+        "A9:"
+      ],
+      "expect_pass": [
+        "B4:"
+      ]
+    },
+    {
+      "name": "inline code の形が app より広い (@ を含む path も link 扱い)",
+      "pairs": [
+        [
+          "_L = r\"\\w\\u0300",
+          "_L = r\"\\w@\\u0300"
+        ]
+      ],
+      "expect_fail": [
+        "B16:"
+      ],
+      "expect_pass": [
+        "A2:"
+      ]
+    },
+    {
+      "name": "git の末尾一致が 1 件でも拾う (app が開く参照を開けないと言う)",
+      "pairs": [
+        [
+          "if len(git_suffix_matches(listing, p)) == 1 and not angle:",
+          "if len(git_suffix_matches(listing, p)) == -1 and not angle:"
+        ]
+      ],
+      "expect_fail": [
+        "D1:",
+        "D3:"
+      ],
+      "expect_pass": [
+        "D2:"
+      ]
+    },
+    {
+      "name": "末尾一致で untracked を見ない",
+      "pairs": [
+        [
+          "    for names in listing:\n",
+          "    for names in listing[:1]:\n"
+        ]
+      ],
+      "expect_fail": [
+        "D3:"
+      ],
+      "expect_pass": [
+        "D1:"
+      ]
+    },
+    {
+      "name": "意図と違う file が開く形を拾わない",
+      "pairs": [
+        [
+          "                findings.append({\"kind\": kind, \"raw\": raw, \"path\": p, \"reason\": \"shadowed\", \"candidates\": [other]})\n",
+          "                pass\n"
+        ]
+      ],
+      "expect_fail": [
+        "A10:"
+      ],
+      "expect_pass": [
+        "B15:"
+      ]
+    },
+    {
+      "name": "同名 file が同じ実体 (symlink) でも拾う",
+      "pairs": [
+        [
+          "\n                    and os.path.realpath(other) != os.path.realpath(target)):",
+          "):"
+        ]
+      ],
+      "expect_fail": [
+        "B15:"
+      ],
+      "expect_pass": [
+        "A10:"
+      ]
+    },
+    {
+      "name": "山括弧で囲んだ href を見ない",
+      "pairs": [
+        [
+          "        angle = kind == \"link\" and ANGLE_HREF_RE.search(raw) is not None\n",
+          "        angle = False\n"
+        ]
+      ],
+      "expect_fail": [
+        "E1:",
+        "E2:",
+        "E8:"
+      ],
+      "expect_pass": [
+        "E3:",
+        "A1:"
+      ]
+    },
+    {
+      "name": "山括弧で囲んだ href を見ない (濁点の形と組んだ実例の形、 macOS だけで回る case)",
+      "pairs": [
+        [
+          "        angle = kind == \"link\" and ANGLE_HREF_RE.search(raw) is not None\n",
+          "        angle = False\n"
+        ]
+      ],
+      "expect_fail": [
+        "E9:"
+      ],
+      "expect_pass": [
+        "E7:"
+      ],
+      "only_on": [
+        "Darwin"
+      ]
+    },
+    {
+      "name": "濁点の形 (NFC / NFD) を disk 上の名前と比べない",
+      "pairs": [
+        [
+          "    disk = disk_spelling(target)\n",
+          "    disk = None\n"
+        ]
+      ],
+      "expect_fail": [
+        "E5:",
+        "E6:",
+        "E9:"
+      ],
+      "expect_pass": [
+        "E7:",
+        "B2:"
+      ],
+      "only_on": [
+        "Darwin"
+      ]
+    },
+    {
+      "name": "音声・動画の枝を外す (鳴らない参照を拾わない)",
+      "pairs": [
+        [
+          "    if not MEDIA_EXT_RE.search(path) or not os.path.isfile(path):\n        return None\n",
+          "    return None\n"
+        ]
+      ],
+      "expect_fail": [
+        "F1:",
+        "F2:",
+        "F4:",
+        "F6:"
+      ],
+      "expect_pass": [
+        "F3:",
+        "F8:"
+      ]
+    },
+    {
+      "name": "聞く・見るの語を見ない (置き場所の記録も音声として拾う)",
+      "pairs": [
+        [
+          "    return i >= 0 and LISTEN_RE.search(text[max(0, i - 200):i + len(raw) + 80]) is not None\n",
+          "    return True\n"
+        ]
+      ],
+      "expect_fail": [
+        "F9:",
+        "F10:"
+      ],
+      "expect_pass": [
+        "F1:",
+        "F2:"
+      ]
+    },
+    {
+      "name": "右パネルの上限 (25 MB) を見ない",
+      "pairs": [
+        [
+          "        return \"media_large\" if os.path.getsize(real) > PANEL_MEDIA_MAX_BYTES else None\n",
+          "        return None\n"
+        ]
+      ],
+      "expect_fail": [
+        "F4:"
+      ],
+      "expect_pass": [
+        "F1:"
+      ]
+    },
+    {
+      "name": "中かどうかを書いた path で見る (symlink を解かない)",
+      "pairs": [
+        [
+          "    if not (_inside(real, os.path.realpath(root)) or SCRATCHPAD_RE.match(real) or SCRATCHPAD_RE.match(path)):\n",
+          "    if not (_inside(os.path.normpath(path), os.path.normpath(root)) or SCRATCHPAD_RE.match(path)):\n"
+        ]
+      ],
+      "expect_fail": [
+        "F6:"
+      ],
+      "expect_pass": [
+        "F3:",
+        "F1:"
+      ]
+    },
+    {
+      "name": "同じ turn に流したかを見ない",
+      "pairs": [
+        [
+          "    played = \"\\n\".join(cmds)\n",
+          "    played = \"\"\n"
+        ]
+      ],
+      "expect_fail": [
+        "F5:"
+      ],
+      "expect_pass": [
+        "F1:"
+      ]
+    },
+    {
+      "name": "open -R (Finder で見せるだけ) を流したと数える",
+      "pairs": [
+        [
+          "open(?!\\s+-R\\b))\\b\")",
+          "open)\\b\")"
+        ]
+      ],
+      "expect_fail": [
+        "F7:"
+      ],
+      "expect_pass": [
+        "F5:"
+      ]
+    },
+    {
+      "name": "絶対 path の実体の判定を外す (symlink の repo・同期フォルダの file を素通りする)",
+      "pairs": [
+        [
+          "                elif os.path.isfile(absolute) and not opens_in_panel(absolute, real_roots):\n",
+          "                elif False:\n"
+        ]
+      ],
+      "expect_fail": [
+        "G1:",
+        "G3:",
+        "G12:"
+      ],
+      "expect_pass": [
+        "B2:"
+      ]
+    },
+    {
+      "name": "基準フォルダからの相対 path の実体の判定を外す",
+      "pairs": [
+        [
+          "            if os.path.isfile(target) and not opens_in_panel(target, real_roots):\n                # 基準 folder",
+          "            if False:\n                # 基準 folder"
+        ]
+      ],
+      "expect_fail": [
+        "G2:"
+      ],
+      "expect_pass": [
+        "B1:"
+      ]
+    },
+    {
+      "name": "根の実体を取らず字面で比べる (symlink の repo の中で始めた session を外と言う)",
+      "pairs": [
+        [
+          "    return [os.path.realpath(d) for d in dirs if d]\n",
+          "    return [os.path.normpath(d) for d in dirs if d]\n"
+        ]
+      ],
+      "expect_fail": [
+        "G6:"
+      ],
+      "expect_pass": [
+        "G9:"
+      ]
+    },
+    {
+      "name": "settings の追加フォルダを右パネルの根から引かない",
+      "pairs": [
+        [
+          "        if n in s or os.path.realpath(n) in s_real or n in out:\n",
+          "        if n in out:\n"
+        ]
+      ],
+      "expect_fail": [
+        "G3:",
+        "G4:"
+      ],
+      "expect_pass": [
+        "G7:"
+      ]
+    },
+    {
+      "name": "候補が全部実体の外でも書き直しを勧める",
+      "pairs": [
+        [
+          "        elif not openable:  # 候補が全部",
+          "        elif False:  # 候補が全部"
+        ]
+      ],
+      "expect_fail": [
+        "G4:"
+      ],
+      "expect_pass": [
+        "A11:"
+      ]
+    },
+    {
+      "name": "desktop の worktree の元の repo を根に数えない",
+      "pairs": [
+        [
+          "    if m:\n        dirs.append(m.group(1))\n",
+          ""
+        ]
+      ],
+      "expect_fail": [
+        "G11:"
+      ],
+      "expect_pass": [
+        "G12:"
+      ]
+    },
+    {
+      "name": "足すフォルダに、 外を指す symlink の実体でなく file の在るフォルダを出す",
+      "pairs": [
+        [
+          "                if not any(_inside(real, r) for r in real_roots):\n                    return real\n",
+          "                if not any(_inside(real, r) for r in real_roots):\n                    break\n"
+        ]
+      ],
+      "expect_fail": [
+        "G13:"
+      ],
+      "expect_pass": [
+        "G1:"
+      ]
+    }
+  ]
+}

@@ -1,3 +1,8 @@
+<!-- doc-meta
+when: 共同 PDF を Dropbox に置いてリポから symlink 参照するとき + 論文が引く文献の写しの所在を repo に持たせるとき (#per-reference-copy-table) + 共有フォルダの写しが記録した sha256 と合わないとき (#annotated-copy-hash)
+category: infra
+summary: 共同 PDF を Dropbox に置いてリポから symlink で参照する規約 (§10 で OneDrive / Google Drive 等の他クラウド + 索引自動生成 launchd gotchas へ応用。 §11 同期中 file は「元の状態」の証拠にならない = 時系列主張は immutable スナップショットで #live-sync-no-timeline-evidence、 §12 相手側にも AI がいる並行作業 = zone 分担 + commit された note が交換 channel + 自 commit 除外 monitor + 独立再計算の交差検証 #counterpart-ai-parallel-work、 §13 共有 script の OS 絶対パス hardcode = POSIX では `C:\...` が literal 名 file として cwd に生まれ同期エラー化 + 同期エラー表示の「パスに見える file 名」を他マシン起源と誤読する前にローカル 1 find + de-hardcode は出力側 write call の grep 完了まで #cross-platform-path-hardcode)
+-->
 # Dropbox 共有 PDF への参照規約
 
 複数の git リポから「Dropbox 上の特定フォルダにある参照 PDF」を、リポ内の安定した相対 path で参照したいときの標準パターン。
@@ -5,10 +10,12 @@
 > 関連スクリプト:
 > - `scripts/dropbox-root.sh` — Dropbox install root を OS 横断で resolve
 > - `scripts/setup-dropbox-refs.sh` — 後述の YAML を読んで symlink を作る
+>
+> Dropbox 以外のクラウド (OneDrive / Google Drive) への応用は §10。
 
 ---
 
-## 0. まず決める: Pattern A (Dropbox-direct) か Pattern B (このファイル)
+## <a id="pattern-a-vs-b"></a>0. まず決める: Pattern A (Dropbox-direct) か Pattern B (このファイル)
 
 Dropbox にある PDF を git リポから触りたいとき、採りうる戦略は 2 つ。このファイルが詳述するのは Pattern B。Pattern A のほうが適合するケースも少なくないので、着手前に必ず選択する。
 
@@ -41,7 +48,7 @@ $DBROOT/<subpath>/<repo>/          ← 実 working tree、.git/ もここ
 | solo 運用で Dropbox が自分の素材置き場 | **A** | 同上 |
 | arXiv cite だけで完結し Dropbox の参照 PDF を触らない | どちらでもない | 普通の `<base>/<repo>` clone で十分 |
 
-**trade-off の本質**: Pattern B は `.git/` を Dropbox の外に出すことで同期 race を根本排除する代わりに、source と asset の場所が分離して `dropbox-refs` symlink という layer が増える。Pattern A は layer が少なく mental model が単純だが、Dropbox 同期が `.git/` を触る前提 — 複数 machine が同じ `.git/` を同時に書くと壊れるので、同時編集の有無が分水嶺。
+**trade-off の本質**: Pattern B は `.git/` を Dropbox の外に出すことで同期 race を根本排除する代わりに、source と asset の場所が分離して `dropbox-refs` symlink という layer が増える (= 詳細は §9 「Pattern B のメンタルモデル」)。Pattern A は layer が少なく mental model が単純だが、Dropbox 同期が `.git/` を触る前提 — 複数 machine が同じ `.git/` を同時に書くと壊れるので、同時編集の有無が分水嶺。
 
 設計時の思考過程と経緯は `DESIGN.md` 「dropbox-refs convention」セクション参照。
 
@@ -106,7 +113,7 @@ rm <base>/<repo>/dropbox-refs
 
 ---
 
-## 1. What
+## <a id="what"></a>1. What
 
 各リポの直下に gitignored な `dropbox-refs/` symlink を置き、そのターゲットを Dropbox 内の subpath にする。スクリプト・notebook・TeX・ノートからは `./dropbox-refs/foo.pdf` という相対 path で参照する。
 
@@ -123,7 +130,7 @@ rm <base>/<repo>/dropbox-refs
 
 ---
 
-## 2. Why
+## <a id="why"></a>2. Why
 
 - Dropbox のインストール先 (`~/Dropbox`, `~/Library/CloudStorage/Dropbox`, `~/Library/CloudStorage/Dropbox-Personal`, …) は OS / Dropbox バージョン / multi-account 構成によって違う。共有リポに絶対パスを書けない
 - 共同編集者ごとに Dropbox 内のフォルダ階層も違う可能性があるため、symlink の target も per-user で決める
@@ -133,9 +140,9 @@ rm <base>/<repo>/dropbox-refs
 
 ---
 
-## 3. How
+## <a id="how"></a>3. How
 
-### 3.1 Personal layer の registry (`dropbox-collabs.yaml`)
+### <a id="registry"></a>3.1 Personal layer の registry (`dropbox-collabs.yaml`)
 
 各 user は自分の personal layer (例: `~/Claude/<personal-layer>/`) に `dropbox-collabs.yaml` を置く。Schema:
 
@@ -161,7 +168,7 @@ collaborations:
 
 `<repo-name>` は canonical 名。setup スクリプトは `<base-dir>/<repo-name>/dropbox-refs` に symlink を作るので、ローカル checkout のディレクトリ名と一致させる必要がある。
 
-### 3.2 Setup script
+### <a id="setup-script"></a>3.2 Setup script
 
 **前提**: Python 3 + PyYAML (`python3 -c "import yaml"` で確認可能)。macOS は Homebrew 経由の Python 3 で `pip3 install pyyaml`、Linux は `pip install pyyaml` または distro パッケージ (`python3-yaml`) で導入。
 
@@ -179,13 +186,13 @@ collaborations:
 - **non-fatal warnings**: repo dir 不在 / Dropbox target 不在は WARN で skip、exit 0
 - **non-clobber**: 既存の通常ファイルやディレクトリが destination にあれば error で停止 (ユーザーデータを上書きしない)
 
-### 3.3 自動実行
+### <a id="auto-run"></a>3.3 自動実行
 
 `claude-config/setup.sh` は personal layer を検出した後、その中に `dropbox-collabs.yaml` があれば自動で setup-dropbox-refs.sh を呼ぶ。さらに personal layer の `.git/hooks/post-merge` に同スクリプトを呼ぶ hook を install するため、`git pull` で YAML を更新したら symlink が自動で再生成される。
 
 新マシンへの bootstrap も既存リポでの YAML 更新も、明示的な手動 setup なしで symlink が最新に保たれる。
 
-### 3.4 各リポへの設定
+### <a id="per-repo-config"></a>3.4 各リポへの設定
 
 リポ root に以下を追加:
 
@@ -208,9 +215,11 @@ CLAUDE.md セクションのテンプレート:
 
 `<subpath>` は **collaborator 同士で合意した Dropbox 内の場所**を書く (例: `Shared/Project/refs`)。これにより、自分用の registry を持っていない collaborator も Dropbox を Finder で navigate して同じ場所にたどり着ける。
 
+さらに collaborator (および将来の自分) が「2 つの sync チャネルの境界」 を誤解しないよう、 §9 のメンタルモデル節を SETUP.md (or CLAUDE.md) に inline するか参照することを推奨する。
+
 ---
 
-## 4. Dropbox install root の解決
+## <a id="dropbox-root-resolution"></a>4. Dropbox install root の解決
 
 `scripts/dropbox-root.sh` は以下の優先順で resolve する:
 
@@ -225,14 +234,14 @@ CLAUDE.md セクションのテンプレート:
 
 ---
 
-## 5. When to use
+## <a id="when-to-use"></a>5. When to use
 
 - 共同研究のリポで、共著者と Dropbox 上の参照 PDF folder を共有しているとき
 - 自分が複数 machine で同じ参照 PDF folder を使いたいとき
 - 参照 PDF が大量で git に commit すると bloat する場合
 - 参照 PDF が non-arXiv (preprint, 非公開 draft, journal proof, スライド等) で、何らかの共有手段が必要な場合
 
-## 6. When NOT to use
+## <a id="when-not-to-use"></a>6. When NOT to use
 
 - 参照論文がすべて arXiv 公開: refs.bib に `eprint` を入れるだけで足りる。共著者は自分で arXiv から取得すれば良い
 - リポ全体を Dropbox に置きたい: 「リポ root 自身を Dropbox folder への symlink にする」whole-repo Dropbox パターンのほうがフィット
@@ -241,7 +250,7 @@ CLAUDE.md セクションのテンプレート:
 
 ---
 
-## 7. Collaborator が同じ機構を使う場合
+## <a id="collaborator-same-mechanism"></a>7. Collaborator が同じ機構を使う場合
 
 同じパターンが任意の user に適用できる。各 user が:
 
@@ -256,13 +265,135 @@ CLAUDE.md セクションのテンプレート:
 - canonical 名は **共有リポのディレクトリ名** に合わせる (例: `<base>/foo/` というリポなら canonical 名も `foo`)
 - subpath は user ごとに異なる可能性がある。共有リポの CLAUDE.md には「Dropbox 上で `<subpath>` を探してね」というヒントを書いておくと、registry を持たない collaborator もたどり着ける
 - 共有 Dropbox folder の invite (Dropbox UI 上の操作) は機構の対象外。各 user が手動で accept する必要がある
+- <a id="not-a-sharing-mechanism"></a>**この機構は「共有」 ではなく「path の綴りの統一」** — setup していない collaborator の手元では `./dropbox-refs/` は**壊れた symlink** になる (= 想定動作)。 中身が相手に届くかを決めるのは上の invite だけなので、 「registry に登録すれば相手も見える」 と読める書き方を共有リポの doc に置かない。 相手に渡す手順は「Dropbox の共有を accept → 各自 setup すれば同じ path で開ける」 の 2 段で書く
 
 ---
 
-## 8. 制約と既知の問題
+## <a id="constraints-known-issues"></a>8. 制約と既知の問題
 
 - **Selective sync**: Dropbox の選択同期で folder を除外していると、target は存在するが中身が "online-only" になる。symlink は問題なく作られるが、ファイル read 時に Dropbox が download を試みる
 - **同期競合**: PDF を read-only 運用すれば衝突は起きにくい。複数 user が同じ folder で notebook を同時編集する場合は別途注意 (Dropbox の conflict copy が増える)
 - **Path に space や非 ASCII**: scripts は quote 厳守で対応済み。TeX 等で参照する際にも `dropbox-refs/...` (ASCII) を経由するので問題は出にくい
 - **Dropbox 解約 / 移行**: 別 cloud に移った場合は `dropbox-root.sh` 相当の resolver を別途書き、setup-dropbox-refs.sh を変更するか、汎用化版に置き換える
 - **Windows-native**: 現状 unsupported。WSL なら (1) DROPBOX_ROOT または (4) ~/Dropbox 経由で動く
+
+---
+
+## <a id="pattern-b-mental-model"></a>9. Pattern B のメンタルモデル: 「同一 file への 2 つの access path」 と「同期チャネル 2 系統」
+
+Pattern B では collaborator (および将来の自分) に **2 つの mental confusion 源** が生まれる。 §0 trade-off 表で「mental model layer が増える」 と書いた具体内容がこれ。 Pattern B を採用した repo の CLAUDE.md / SETUP.md には、 以下 2 点を明示することを推奨する。
+
+### <a id="junction-two-paths"></a>9.1 junction = 「同一 file への 2 つの access path」 (= コピーではない)
+
+`<repo>/dropbox-refs/` は **symlink (POSIX) または junction (Windows)** で、 ターゲットは `$DBROOT/<subpath>/`。 すなわち:
+
+```
+<repo>/dropbox-refs/foo.tex
+≡ $DBROOT/<subpath>/foo.tex   (同一 file への 2 つの path)
+```
+
+これは **コピーではない**。 どちらの path で開いても同じ file を編集している。 保存タイミングのズレも同期競合も構造的に起き得ない (= junction の本質)。
+
+初見の collaborator は「Dropbox にもあるし repo にもある = 2 つのコピーを sync する仕組みが要るのか?」 と誤解しやすい。 「junction = 近道、 本体は Dropbox 側 1 つ」 と説明するのが mental model 上有効。
+
+### <a id="two-sync-channels"></a>9.2 同期チャネル 2 系統の table
+
+Pattern B では何が git で運ばれて何が Dropbox で運ばれるかが分裂する。 collaborator にこれを明示する義務がある (= [`shared-repo.md` standalone-operational-definition](shared-repo.md#standalone-operational-definition) の operational 完結性に相当):
+
+| チャネル | 何が運ばれるか | trigger |
+|---|---|---|
+| Dropbox client | `dropbox-refs/` 内の content (= asset folder = TeX 原稿 / 図 / 参考 PDF 等) | 保存と同時、 Dropbox client が常駐していれば即時 |
+| git push / pull | `dropbox-refs/` 以外の repo content (= notes / drafts/ PDF snapshot / CLAUDE.md / DESIGN.md / SESSION.md 等) | 明示的 `git add` + `git commit` + `git push` |
+
+**collaborator 視点の operating rule**:
+
+1. `dropbox-refs/` 配下を編集 → Dropbox sync に任せる、 git は無視
+2. それ以外 (notes / docs / PDF snapshot) を編集 → `git add` + `git commit` + `git push`
+3. 「PDF snapshot を提出版として commit する」 ような cross-channel 操作のみ明示的に行う (`cp dropbox-refs/<output> drafts/<dated>.pdf && git add -f`)
+
+### <a id="setup-md-template"></a>9.3 SETUP.md inline テンプレート
+
+Pattern B repo の SETUP.md に以下を追加することを推奨:
+
+```markdown
+## ワークフロー早見表 (Pattern B 共通)
+
+このリポは 2 つの同期チャネルを併用しています。 編集する file がどっち経由で
+collaborator に届くかを把握しておくと事故が減ります。
+
+junction = 「同一 file への近道」 です。 `dropbox-refs/<subpath>` と Dropbox 直
+path (例 `~/Dropbox/<subpath>` ・ `~/Library/CloudStorage/Dropbox/<subpath>` 等) は
+**同じ file** で、 どっちで開いても同じです。
+
+| 編集対象 | 同期チャネル | 普段の操作 |
+|---|---|---|
+| (project 固有: 例 .tex / 図 / 参照 PDF) | Dropbox 自動 sync | 保存だけで OK |
+| (project 固有: 例 notes / drafts/ PDF) | git push/pull | `git commit` + `git push` |
+
+詳細規約: [`~/Claude/claude-config/conventions/dropbox-refs.md §9`](dropbox-refs.md#pattern-b-mental-model)
+```
+
+`(project 固有: ...)` は各 project の実 path を書く。 SETUP.md は collaborator 向け cold reference なので、 抽象 (= 「assets vs notes」) ではなく具体 path を書くこと。
+
+---
+
+## <a id="other-cloud-storage"></a>10. 他クラウドストレージへの応用 (OneDrive / Google Drive)
+
+Pattern B の本質 (= 実 working tree と `.git/` をクラウド同期の外に置き、 asset folder へは gitignored な per-machine symlink で参照する) は Dropbox 固有ではない。OneDrive / Google Drive でも同型で使える。実証例: 授業教材 PDF を OneDrive に置いたまま、 個人リポから索引を git 管理する運用 (2026-06)。
+
+- **命名**: symlink は `<provider>-refs/` (例: `onedrive-refs/`, `gdrive-refs/`)。`.gitignore` に `/<provider>-refs` 行を入れる
+- **setup**: `dropbox-root.sh` 相当の resolver / YAML registry は無いので、 リポの CLAUDE.md に setup 1-liner を明記して per-machine 手動設置する。例 (macOS / OneDrive):
+
+  ```bash
+  ln -s "$HOME/Library/CloudStorage/OneDrive-<アカウント表示名>/<subpath>" onedrive-refs
+  ```
+
+  macOS の cloud storage は `~/Library/CloudStorage/<Provider>-<Account>/` に mount される。 同一 provider の複数アカウント (個人用 + 組織) が併存しうるため、 CLAUDE.md にはアカウント名まで書く
+- **汎用化のトリガー**: 複数リポ・共同編集者で使い回す段になったら registry + setup script を provider 横断に汎用化する (§8 「Dropbox 解約 / 移行」 と同じ路線)。 1 リポ 1〜2 マシンのうちは 1-liner で十分
+
+### クラウド asset の索引を自動生成する場合の gotchas (macOS launchd)
+
+asset folder の索引 (一覧 markdown 等) をリポ内に自動生成 + auto-commit する構成 (launchd agent) での実証済み注意点:
+
+- **WatchPaths はディレクトリ直下の変化しか発火しない**。 サブフォルダ内のファイル追加は検出されないので、 StartInterval (例: 1800s) をバックストップに併用する
+- **auto-commit は生成物 file のみ `git add`** する (= 作業中の他 file を巻き込まない)。 「生成日」 行だけの diff を変化とみなすと daily noise commit が積まれるので、 `git diff -I '^<生成日行 pattern>'` で除外し、 その場合は `git checkout -- <file>` で working tree を clean に戻す
+- push 失敗は放置でよい (= 次セッションの git-state-nudge hook が警告する)。 多重起動は mkdir lock で防ぐ
+
+## <a id="live-sync-no-timeline-evidence"></a>11. 同期中の file は「元の状態」の証拠にならない (時系列主張はスナップショットで)
+
+共同編集者が**いままさに** Dropbox 経由で編集している file を読んで、その内容から「元からこうだった / 修正前はこうだった」という時系列主張を組み立ててはいけない。読んだ瞬間の状態は相手の直近の保存が同期した**後**かもしれず、pre/post を取り違える (実例: 相手の数値修正が同期した後の file を読んで「この版は元から正しかった」と誤断定 → 修正前スナップショット PDF の照合で両版とも誤値だったと判明)。
+
+- **時系列を主張するときの根拠は immutable なもの**に限る: git commit / 日付つきスナップショット (`drafts/main-YYYY-MM-DD[-HHMM].pdf` 等) / ビルド成果物の mtime + md5
+- 逆に言えば、**節目ごとのスナップショット保存は「後から時系列を検証できる」ことが価値の半分** — 同日複数版は時分を付す (`expensive-intermediate-artifacts.md#snapshot-artifact-naming`)
+- mtime の並びも Dropbox 同期の到着順で乱れうる (build 成果物より新しい source が後から届く等)。「どちらが新しいか」を mtime 単独で断定しない
+
+## <a id="counterpart-ai-parallel-work"></a>12. 相手側にも AI がいる並行作業 (Pattern B 上の 2 セッション協働)
+
+共同編集者が自分側の AI セッションを走らせて同じ Dropbox/git を触っている場合の実証済み運用 (2026-08-29、双方 Claude で原稿仕上げ〜相互検証まで完走):
+
+1. **相手の active 編集 zone (原稿 dir 等) には書かない** — こちらは読み取り検証・別 dir (解析/notes) への追加のみ。衝突が構造的に起きない分担を先に切る
+2. **交換 channel は git に commit された note** (レビュー所見・検証結果・文案)。chat やメールでなくリポに置くと、相手の AI が pull して直接消費できる (実例: 査読 note の指摘 6 件を相手側 AI が独立検証つきで全反映し、こちらの追記 §を読んでさらに自己更新した)
+3. **着信検知は自分の commit を author filter で除外した monitor** にする (`git log --format='%an' | grep -v <自分>`) — 素朴な origin/main 監視は自分の push で self-echo する
+4. **数値・主張は互いに独立再計算で交差検証する** — 同じ結論に別実装で到達したら強い保証、食い違ったら環境差 (library バージョン等) の発見機会
+
+## <a id="cross-platform-path-hardcode"></a>13. 共有 code の OS 絶対パス hardcode: literal 名 file 化と「他マシンのパス」誤読
+
+Dropbox で共有する script に片方の OS の絶対パスを hardcode すると、もう片方の OS では**例外でなく silent な別動作**になる (2026-08-29 実測):
+
+- **機構**: `io.open(r"C:\claude\_out.txt", "w")` を macOS / Linux で実行すると、`\` と `:` は POSIX filename の合法文字なので **`C:\claude\_out.txt` という名前の 1 個の file が cwd に生まれる** (エラーは出ない)。cwd が同期フォルダ内なら、Dropbox は `\` `:` 入りの名前を「特殊文字」としてアップロード拒否 → 同期エラーとして表面化する
+- **誤読 trap**: 同期エラー dialog に出るこの file 名は **Windows パスと字面が完全に同一** (`C:\claude\_out.txt`)。「別の Windows マシン上の file の問題」と誤読して device 特定に向かう前に、**まずローカルで literal 名の file を探す** (`ls` / `find . -name 'C:*'`) — 1 コマンドで仮説が分岐する (実例: この確認を後回しにして device 調査に数 step 使い、file は最初から手元の共有フォルダ内にあった)。一般化すると「**パスに見える文字列は file 名かもしれない**」— error 表示の字面解釈を検証せず遠隔起源を結論しない ([`debugging-discipline.md`](debugging-discipline.md) の症状-原因距離の一種)
+- **修復**: file は rename で救済 (中身は正常な出力)。script は `_HERE = os.path.dirname(os.path.abspath(__file__))` 基準の相対化で両 OS 動作 + 出力が共有フォルダに載る副次利点
+- **half-migration trap**: パス portable 化の際、**入力側だけ直して出力側 (`open(..., "w")` / `savefig` / `to_csv` 等) を見落とす**のが実測の落ち方 (入力は即エラーで気付くが、出力 hardcode は silent に literal file を生むため残存する)。de-hardcode は **write 系 call を全部 grep してから完了宣言** (`grep -n 'open(\|savefig\|to_csv\|C:' *.py`)
+
+## <a id="per-reference-copy-table"></a>14. 文献ごとの写しの表 (`dropbox-refs/` はフォルダまでしか引けない)
+
+`dropbox-refs/` はフォルダを指すだけで、 「この引用の写しはどの file か」 には答えない。 文献フォルダの file 名は題名・DOI の末尾・雑誌の配布名のことがあり、 著者名だけで探すと見落とす (実測)。 原典を確かめる機会の多い repo は、 引用の鍵ごとの表を repo に置く。
+
+- **列** = 鍵 / 状態 (共有フォルダにある・無い・repo の原稿) / フォルダからの相対 path / 版 (出版版か arXiv の版か) と、 無いときの取れる経路 (arXiv 番号・DOI)
+- **symlink の行き先は共有フォルダの root にする** — 親の場所は人ごとに違っても、 root からの相対 path は同じになる。 表の path はこの root からの相対で書く
+- **対応は PDF の 1 頁目で確かめて書く** — 著者名 + 年の file 名は同じ年の別論文のことがあり、 手元の本は引用と別の版のことがある (実測)。 版が違うときは表に書く = 定理や式の番号が変わる
+- **入口は repo の CLAUDE.md** — session が探し始める前に読む場所に、 「原典を確かめる前に表を鍵で引く」 と書く
+- **共有フォルダの外の個人の path を表に書かない** — 共有層から narrower な層へ path を張らない ([`docs/personal-layer.md`](../docs/personal-layer.md))。 手元にしか無い写しは file 名だけを書く
+- **写しの場所を `.bib` に書かない** — 表と二重になる
+- **保ち方** — 引用を足した turn で行を足す。 表の鍵と原稿の引用の過不足を見る小さな検査を repo に置く
+- <a id="annotated-copy-hash"></a>**共有フォルダの写しは、 だれかが注釈 (印・下線・付箋・書き込み) を付けると file の sha256 が変わる** (実測)。 sha256 の不一致は「版が違う」 とも「注釈が増えた」 とも合うので、 版の照合を sha256 だけに頼らない。 記録と照合の道具には、 注釈に依らない確かめを併せて持たせる = 頁数、 PDF に刷られた版の印 (arXiv の押印の番号と版)、 注釈を外した頁ごとの文字の hash。 文字の hash は、 写しを開いて注釈を全部消した写しを memory の上で作ってから頁ごとに取る: 印・下線・付箋・手書きの線は頁の文字を変えないが、 文字を打ち込む型の注釈 (テキストボックス) は抽出した文字に混じる (実測、 PyMuPDF の `get_text`)。 注釈を頁に焼き込む保存 (平坦化) をした写しでは、 文字の層も変わる。 一致すれば同じ版に注釈が増えただけとして記録に書き、 外れれば版が違うものとして読み直す

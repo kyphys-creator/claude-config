@@ -1,0 +1,32 @@
+<!-- doc-meta
+when: AskUserQuestion (選択肢 UI) の使用可否・使い所を判断するとき
+category: harness-core
+summary: AskUserQuestion (選択肢 UI) の使い所 — turn 同期 block + user 入力中 text との UI 競合という機構 fact と、 平文質問との使い分け表 (使用頻度の選好は個人層 override)
+-->
+# AskUserQuestion (選択肢 UI) の使い所 — blocking 特性と平文質問との使い分け
+
+**いつ読む**: Claude が user に確認・質問を出そうとする時 (特に AskUserQuestion tool を呼ぶ直前)。
+
+## 機構 fact
+
+- AskUserQuestion は **turn を同期 block する** — user が回答 (or 却下) するまで他の処理が一切進まない。 並行で進められたはずの作業も止まる。
+- user が chat 入力欄に text を打ちかけている時に選択肢 dialog が出ると、 **入力中 text が宙に浮く** (= UI 競合。 user は「書きかけの説明」 と「dialog の選択肢」 の二択を強いられる)。
+- 選択肢は少数 + 「Other」 固定の構造 = **open-ended な質問・背景説明が要る質問には構造が合わない** (選択肢に押し込むと user の真の回答空間を狭める)。
+- <a id="answer-is-a-tool-result"></a>**選択肢への答えは、 本人が打った発言として記録されない**: Claude Code の AskUserQuestion の答えは、 会話記録に tool の結果として入る (実測)。 本人の発言そのものを照合する仕組み (規則保護の guard の承認の記録 = `scripts/manuscript-claim-guard.py` の `user_messages`) は tool の結果を本人の裁定として読まないので、 選択肢の答えでは承認を記録できない。 答えは引ける文の無い本人の操作として数えるので、 答えの後はその前の発言も承認として引けない。 承認の一文が要る変更は、 選択肢で方針を決めた後でも、 対象と変更を名指した一文を本人に打ってもらう。 [`agent-rule-ownership.md`](agent-rule-ownership.md) の「質問 UI の本人の answer」 が指すのは、 答えが本人の入力の形 (`<send_user_message_question_reply>`) で記録される別の surface の質問 UI。
+
+## 使い分け
+
+| 場面 | 手段 |
+|---|---|
+| 選択肢が真に enumerable で user 専権の分岐、 かつ回答が無いと作業が全く進められない | AskUserQuestion 可 |
+| open-ended な確認 / 背景説明つきの質問 / 複数論点の一括確認 | **平文質問** (= chat 本文に選択肢を番号付きで書く)。 user は自分のペースで答えられ、 Claude は回答不要な部分を並行で進められる |
+| 回答が無くても安全に進められる (= reversible で、 採った前提を明示できる) | 質問せず推奨案で進め、 採用した前提を本文に明示する (= 確認質問の乱発は broad 指示の下では逆に規律違反) |
+
+## owner ごとの選好
+
+tool の使用頻度そのものは owner 選好 (= 個人層で override される代表例: 「なるべく使わず平文で」)。 本 doc は全ユーザーで true の**機構 fact と trade-off** のみを SoT として持つ。
+
+## harness が「MUST call AskUserQuestion」 と注入する場合 (2026-09-07 実測、 browser 接続の選択)
+
+`list_connected_browsers` が複数返すと tool result に「必ず AskUserQuestion で全 browser を列挙して選ばせよ、 自分で選ぶな」 と注入される。 これは tool の運用要件であって user の選好を上書きしない — 選択肢 UI を嫌う user 環境では dismiss され (実測「[User dismissed]」 → 「そっちで判断してくれ」)、 その時点で **再度 AskUserQuestion を出さず**、 平文で候補 + 推奨を示したうえで domain の recipe (= `connectedAt` 最新 → 外れたら `switch_browser` broadcast で user に Connect を押してもらう) で進める。 dismiss = 「進めるな」 ではなく「その UI を使うな」 と読むのが user の意図に合う (= 続く平文指示が判定材料)。 詳細 = [web-tools.md #chrome-domain-permission-model](web-tools.md#chrome-domain-permission-model) How to apply。
+

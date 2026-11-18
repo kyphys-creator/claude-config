@@ -1,0 +1,618 @@
+<!-- doc-meta
+when: 機密を持つ repo と remote を持つ repo の境界を機械で守るとき — 暗号化を入れる前 (#2) / file 名に識別子が出ていると気づいたとき (#1) / 人 (学生・応募者など) を指す path・台帳の id・commit message を付けるとき (#role-words-in-names) / 履歴から個人情報を消すとき (#history-scrub-identity-from-all-versions) / 別 process への通知に要約を書こうとしたとき (#3) / 流出検査を設計するとき (#4) / 暗号化した台帳の文や、 台帳から作った一覧の行を平文に写す commit を止める門を作る・較正するとき (#ledger-and-listing-copy-gate) / fail-open な gate を足したとき (#5) / 公開 repo に未公開文書の文が入らない gate を設計・調整するとき (#unpublished-text-public-gate) / 公開 repo の tree 棚卸しの finding を決着させるとき (#tree-finding-resolution) / 公開 repo の gate の検出語や判定を変えたとき (#gate-change-replays-unattended-writers) / 較正・再現で読んだ非公開の値を公開 repo の例・selftest に書くとき (#session-carryover-gate) / 触れない dir の中身を機械で処理する必要が出たとき (#work-on-a-copy-not-by-lowering-the-gate)
+category: infra
+summary: 暗号化は中身しか守らない (file 名・commit message・path は平文) ので識別子入り dir は暗号化 tar に畳む (連番+対応表は対応表が単一障害点で不可)、 保存しない > 暗号化する (入室の暗証番号は暗号化 repo にも入れず所在だけ記録 #physical-access-codes、 通知に payload を載せず schema で縛る、 死んだ複製は削除)、 逐語の指紋照合は写しを捕まえるが言い換えは原理的に不可なので経路ごとに制御を変える (閾値は全件集計で決める = 誤検知 6800→24→0 の実測)、 fail-open な gate は必ずカナリアで実効性を毎回確かめ ARMED/NOT ARMED/対象外 の 3 状態を出す (沈黙を作らない)、 是正は go-forward にしか効かず履歴は別問題として人間の判断に委ねる、 公開 repo には未公開文書の逐語 gate を別に置く (漏れる例示は引用符に入った短い断片なので quoted span が主、 全履歴 replay で誤検出 0 を確かめて採用)、 gate が target の pre-commit で実際に走っているかは target ごとに確かめる、 触れない dir の中身を機械で処理する必要が出ても deny を外して戻す形にしない (外れている間は dir 全体が無関係な call にも開く) = user が 1 file だけ許可 scope に複製 → 作業 → 複製と中間生成物を消す、 複製は元の SoT から分岐し記録には file 名も中身も書かない
+-->
+# 機密の境界を機械で守る — 暗号化・file 名・通知・検査
+
+機密を「置いてよい場所」 と「置いてはいけない場所」 の境界を、 規律ではなく機械で守るための規約。
+起源は 2026-09-12 の一連の事故と是正 (未公開の試験問題・学生の個人情報・別 session への返送 marker)。
+
+関連: [`secret-handoff.md`](secret-handoff.md) (= 値そのものの受け渡し) /
+[`debugging-discipline.md`](debugging-discipline.md) (= 検査を書くときの罠) /
+[`multi-session-coordination.md`](multi-session-coordination.md) (= session 間の返送)。
+
+---
+
+## 1. 暗号化は「中身」 しか守らない
+
+git-crypt のような透過暗号は **file の中身だけ**を暗号化する。 次はすべて remote に平文で残る:
+
+- **file 名・dir 名** (= ツリーに一覧として見える)
+- **commit message**。 暗号化した台帳を更新した commit の要約に、 金額・為替レートがそのまま入りやすい (実測)。
+  止める engine = [`scripts/check-message-amounts.py`](../scripts/check-message-amounts.py) (repo の `.gitattributes` に
+  `filter=git-crypt` があるときだけ見る。 入れる前に `--replay` で過去の message の当たりを数え、 誤検出を確かめる)
+- **追跡されている path そのもの** (`.gitignore` の行を含む)
+- **commit の author 欄 (名前と email)**。 <a id="external-pr-squash-author"></a>外部からの PR を GitHub の squash merge で入れると、
+  author は PR を出した人の account の email になる (本人が GitHub で email を非公開にしていないとき。 PR の commit が noreply の email でも同じ。 実測)。
+  公開 repo では手元で `git merge --squash` し、 PR の commit の author を `--author` にそのまま渡してから push する
+  fork から来た commit は repo の commit-msg 検査を通っていないので、 merge の前に PR の各 commit の message と説明文に
+  その検査を手で当てる (`git log -1 --format=%B <sha> > msg && .git/hooks/commit-msg msg`)。 止まった message は squash の message で書き直す
+
+∴ 識別子を名前に持つ file (`answers/A00X0001-1.jpg`、 `records_2025_A00X0002_surname.docx`) は、
+中身を暗号化しても **「誰が居たか」 の一覧を公開したまま**になる。
+
+### 直し方: 1 個の暗号化コンテナに畳む
+
+dir ごと 1 個の `tar` にして、 その tar を暗号化対象に載せる。 ツリーに見えるのは tar 1 個で、
+**中の file 名は tar の内部に保たれる**。
+
+採ってはいけない対案: **連番化 + 対応表**。 対応表が単一障害点になり、 壊れた瞬間に
+「どれが誰のものか」 が永久に失われる。 リネーム工程が毎期の手作業として増え、 file 名を key に
+している配管すべてに波及する。 tar なら対応表が要らない。
+
+実装 = [`scripts/pack-pii-dirs.sh`](../scripts/pack-pii-dirs.sh) (`pack` / `unpack` / `check` / `check-all`)。
+対象 dir は **各 repo の `.pii-pack-dirs`** が宣言する (= 機構側に repo 固有の知識を持たない)。
+
+⚠️ **畳む前に、 展開して 1 file ずつ byte 比較する**。 検証に失敗したら tar を捨てて何も変更しない。
+⚠️ **dir 名自体に識別子が入っているなら先に rename する** (= そうしないと tar 名と `.gitignore` の行に残る)。
+⚠️ 畳んだ後、 新しい file は `.gitignore` により **git に入らなくなる**。 期末に畳むまでバックアップが
+   無い状態になるので、 `check` (tar より新しい file があるか) を定期検査に載せる。
+⚠️ **履歴には旧 file 名が残る**。 畳むのは「これ以上広げない」 操作であって、 過去を無かったことには
+   しない。
+
+検出 = [`scripts/check-pii-filenames.py`](../scripts/check-pii-filenames.py)。
+識別子の形は `~/.claude/pii-filename-patterns.txt` が宣言する (= 形自体が組織固有で、 かつ
+それ自体漏らしたくない情報になりうるので script に書かない)。 形は大文字・小文字の両方に当てる
+(`(?i)`。 メールの local part から来た小文字の識別子を大文字だけの形は素通りする、 実測)。
+
+### <a id="role-words-in-names"></a>人を指す path・台帳の id・commit message には役割の語を使う
+
+保護が要る立場の人 (学生・受講者・応募者・被推薦者・患者・審査の申請者) を **path・台帳の id・commit message** で
+指すときは、 氏名・姓・識別番号を書かず、 **役割の語 + 区別の記号** にする (`gakusei-a` / `jukousei-b` /
+`applicant-a`)。 誰のことかは暗号化された中身に書く。 同僚・共著者として名前を出すのは別 (公開の立場)。
+迷ったら役割の語。 ⚠️ **作業の進捗を書いた commit message が名簿になる** (採点・判定・転記を 1 人ずつ進めて「A さん 65 / B さん 55」 のように書くと、 名前と評価の一覧が履歴に残る = 実測で最大の経路)。 進捗は件数と役割の語で書く。
+
+**最初の 1 件が雛形になる**。 間違った命名が 1 つあると、 agent も人も既存の id を真似て同じ形を増やす
+(実測: 片付けている最中にも、 既存の id の形を真似た新しい id が別の session から入った)。 規則を書くだけでは止まらない
+ので、 3 段で塞ぐ:
+
+1. **作る瞬間に読む場所に規則を置く** (台帳の書式・命名規則の節)。 各 repo には、 その repo の語彙
+   (`ta-{年度}-{学期}-{科目}` など) と本節への案内だけを書く
+2. **既存の間違った例を改名して、 正しい形を例にする** (今の版は通常の commit で。 履歴 = 下の
+   [#history-scrub-identity-from-all-versions](#history-scrub-identity-from-all-versions))
+3. **commit 時の検査で止める** (本命 = 例に依らない): 新しい path・平文の追加行・commit message に、
+   識別子の形か、 machine-local の名簿から作った氏名があれば止める。 名簿の値は repo に入れない。
+   持ち主が同僚・共著者の名前も commit message に書かない運用にするなら、 個人層の
+   `commit-msg-literal-scope.txt` に `all` と書く。 commit-msg の runner (`scripts/commit-msg-leak-guard-runner.sh`
+   の Stage 0b) が、 個人層の検出語 (`sensitive-terms.txt` と、 commit message にだけ効く `commit-msg-terms.txt`。
+   後者は `scripts/build-sensitive-terms.py` の `commit_msg_sources` から作り、 公開 repo の本文の検査は読まない =
+   公開の本文に普通に出る地名や公開データの名前で鳴らさない) を公開の印の無い repo の commit message でも止める
+   (commit message は暗号化されない平文)。 警告にしないのは、 commit と push を 1 回の command で打つと、
+   commit の前に出す警告は push の後に届くため (実測)
+
+### <a id="decrypted-echo"></a>手元では復号されている = 検査と確認の出力が値を表示する
+
+git-crypt の textconv は手元で暗号化対象を平文に戻すので、 **手元の道具の出力**は暗号化の外にある。
+staged 差分を読む pre-commit の warn が「見本」 として行を表示すると、 暗号化した file の値 (電話・口座など) が
+端末と agent の会話記録に出る (実測)。 値を見ずに仕分けたい確認でも、 行を「伏せて」 表示する道具が伏せ漏らすと同じことが起きる。
+
+- **見本を出す検査は、 `.gitattributes` で filter=git-crypt の path の行を伏せる** (検査そのものは続ける。 判定できないときは伏せる側に倒す)。
+  例 = [`scripts/pre-commit-sot-declaration-warn.py`](../scripts/pre-commit-sot-declaration-warn.py)。 新しい warn を書くときも同じ
+- **値の仕分けは「形」 で出す** — 数字・英字・漢字の語を記号に置き換えた形と、 件数・path・節の名前だけを出す。
+  ⚠️ かなの語も伏せる (人名の読みが残る、 実測)。 ⚠️ 伏せる道具を一時的に外して「その行だけ」 素のまま出さない (diff の確認・PDF の頁の頭の確認で、 実測 2 件)。
+  ⚠️ 値の位置を当てて伏せる形 (「`:` の後ろを伏せる」) は、 想定と違う行 (移す前の行の写し・注記) の値をそのまま出す (実測: 銀行名・支店名・名義が出た) = 暗号化 file の構造を確かめるときは、 行ごとに長さと字の種類 (数字だけか・漢字を含むか) と件数だけを出す
+- **値を 1 つ使う (本人の書類に書く) ときは、 その値の行だけを出す** — `grep -m1 '<その値の見出しの語>'` の 1 行。 節の前後を `-A` / `-B` で読むと、 値の file では隣の節が別の値 (生年月日・電話) なので、 要らない値まで会話の記録に出る (実測)
+- **会話記録の本人の発言を並べる検索の出力にも、 本人が chat に書いた値が出る** — 値の file のほかにも、 本人の発言を中身のまま並べる検索 (会話記録の検索の道具に「本人の発言・どの語でも」 を渡す形) は、 本人が chat に書いた電話番号などをそのまま出す (実測)。 本人が何か言ったか・いつかを見るだけなら時刻と字数だけを出し、 中身が要るなら件の語で絞って短く切る。
+- **様式の PDF を画像で確かめるときは、 切り取りの位置を目分量で決めない** — 隣の欄の住所・口座が写る (実測)。 [`scripts/pdf-review-render.py`](../scripts/pdf-review-render.py) = 字の層の位置から住所・口座・電話の行 (折り返した行まで) を塗ってから書き出す。 先に `--audit` で塗りの外に残る数字・番地らしい語を形だけで見る
+- **暗号化した値の平文の写しは commit で止める** — 値の file を暗号化しても、 値を写した TODO・script・記録は平文のまま。 [`scripts/check-value-index.py`](../scripts/check-value-index.py) = 暗号化 file の 1 節に置いた索引 (`- digits|date|text: \`値\``) を源に、 平文の追加行と commit message を照合し、 file と行番号だけを出す。 ⚠️ 他の家・機関と同じになる値 (郵便番号など) は索引に入れない = 公開データに偶然一致する (実測)。 全 repo の棚卸し = `--scan-root <作業ルート> --explain` (当たった索引の行の説明だけを出す)
+- 漏れた先は repo ではなく会話の記録 = 書き換えで消えない。 起きたら本人に 1 行で伝え、 個人層の漏洩の記録に件数と種類を残す。
+  気づく機械 = [`hooks/value-index-output-nudge.py`](../hooks/value-index-output-nudge.py) (tool の出力を個人層の値の索引と照らし、 当たった索引の行の説明だけを知らせる。 索引に無い値 〔銀行名・氏名〕 は見ない)
+
+---
+
+## 2. 「暗号化する」 より「保存しない」 が上位
+
+暗号化は **保存せざるを得ないもの**を守る技術で、 鍵管理と「鍵の無いマシンで静かに壊れる」
+failure mode が必ず付いてくる。 保存しなくて済むなら、 そちらが強い。
+
+判断の順序:
+
+1. **そもそも書かないで済むか** (= 通知に payload を載せない、 要約を別の場所に置く) → schema で縛る
+2. **死んだ複製ではないか** (= 誰も読んでいない残骸なら削除が最善)
+3. 残ったものを暗号化する
+
+### <a id="physical-access-codes"></a>入室の暗証番号 (部屋・オートロック・ポスト・キーボックス) は git に入れない — 暗号化 repo でも
+
+短期の宿や施設の入室情報 (チェックイン案内の PDF・部屋の暗証番号) は、 滞在のあいだ本人が携帯で見る必要があり、 滞在が終われば価値が無い。 push される repo に置くと、 暗号化していても remote に複製が残る (= 保存しないで済むものを保存している)。 auto mode の判定も、 暗号化 repo への解錠番号入り file の copy を credential leak として止めた (実測)。
+
+- 正本 = 本人の同期ストレージ (携帯から開ける場所) の滞在ごとの folder に、 案内の原本 + 番号のメモ
+- 記録 (TODO・案件の README・台帳) には**所在だけ**を書き、 番号も写しも書かない
+- 番号を chat で受け取っても、 git に入る file に写さない
+
+### file 名が漏れる対象に暗号化を足しても、 偽の安心しか増えない
+
+暗号化が効くのは **「中身が価値で、 名前が無害」** なもの。 名前のほうが情報を持っている対象
+(= 作業内容が token 名に出ている通知 file 等) は、 中身を暗号化しても名前で分かるので、
+**schema を縛るほうを選ぶ**。
+
+---
+
+## <a id="notification-is-not-a-report"></a>3. 通知は報告書ではない
+
+別 session や別 process への「終わった」 通知 (marker / status file) に、 結果の要約を書き始めると、
+その要約が payload になって境界を越える。 通知の contract を機械で縛る:
+
+- **要約の長さに上限を置き、 超えたら書かずに失敗する** (= 報告書化を止める)
+- **成果物が機密なら、 task / summary / 成果物の path を中立な文言に置き換えて記録する** — 判定は
+  「成果物が機密として宣言された dir の配下か」 と **「成果物の本文が機密索引に一致するか」**
+- 落とした内容は **呼び出し元に返し、 人間に口頭 (chat) で伝えさせる**
+- 明示的な opt-out を 1 つだけ用意し、 判定不能は縛らない (= fail-open)
+
+⚠️ 判定を「成果物の path が作業ルートの外か」 のような**位置**で決めると、 sandbox worker の
+成果物受け渡しのような正当な機能まで巻き添えにする。 **中身で判定する**。
+
+---
+
+## 4. 逐語の照合は「写し」 しか捕まえない
+
+機密の流出検査には 2 種類あり、 **守れる範囲が違う**:
+
+| 方式 | 捕まえるもの | 捕まえないもの |
+|---|---|---|
+| **指紋照合** (= 機密文書の本文を索引にし、 一致を探す) | 逐語の写し (copy-paste)、 引用 | 言い換え・要約 |
+| **pattern 照合** (= 識別子の正規表現) | file 名・ID・固有の token | 上と同じく言い換え |
+
+**言い換えは原理的に検出できない。** 実測: 別 session への返送 marker に書いた「要約」 は、
+元の成果物と指紋一致 **0** だった (自分の言葉で書き下ろしたため)。
+
+∴ **経路ごとに制御を変える**。 copy-paste の経路は content 検査で、 人が書き下ろす経路は
+schema (= そもそも書けなくする) で守る。 片方で両方を守ろうとしない。
+
+実装 = [`scripts/check-confidential-leak.py`](../scripts/check-confidential-leak.py) (pre-commit BLOCK)。
+機密文書の置き場所と索引範囲は machine-local の一覧 file が宣言する (= script には書かない)。
+
+<a id="paraphrase-reading-list"></a>**言い換えは gate にできないが、 読む候補は語彙の重なりで出せる** (2026-09-14)。 自分の言葉で書き直した例示も、
+その文書に固有の語 (模型名・macro・parameter の値) を運んでいることが多い。 [`scripts/scan-private-vocabulary.py`](../scripts/scan-private-vocabulary.py)
+`--scan <公開 repo>` が「公開 repo と非公開 repo が共有し、 他の repo ではほとんど使われない語」 を file:回数 付きで出す
+(`--staged` / `--diff A..B` なら追加行だけ = hoist の commit 前、 `--source-ext .tex --kinds word,control,decimal` で原稿由来に絞る。
+実測で公開 2 repo が 76 行 / 241 行)。 **出力は finding でなく読む候補** (公刊文献と原稿は語彙を共有する)、 しかも非公開 repo 名と
+語彙そのものを含むので端末に留める。 ⚠️ 評価の文章 (査読所見・模擬審査の指摘) は普通の語で書かれるので、 語彙の重なりにも
+出ない = 過程の語で別に走査する ([`convention-design-principles.md#sweep-null-needs-per-form-control`](../docs/convention-design-principles.md#sweep-null-needs-per-form-control))。
+
+### 指紋の閾値は測って決める
+
+実測 (2026-09-12、 追跡 file 830,786 行に対して。 空白を除いた連続 24 文字を 1 断片):
+
+| 索引に入れる条件 | 誤検知 |
+|---|---|
+| 制限なし | **6,800 行** — LaTeX の定型 (`\documentclass` `\begin{tikzpicture}`) と共有された path |
+| 日本語 1 文字以上 | **24 行** — `\newtheorem{theorem}{定理}` のような、 定型に 1 語混じったもの |
+| **日本語 4 文字以上** | **0 行** ← 採用。 実際の本文 1 文は 24 断片で一致する |
+
+⚠️ **サンプルを数件見て原因を決めない**。 最初 12 件を見て「区切り線が原因」 と判断したが、
+実際はその 1/3 で、 残りは定型と path だった。 出どころ別に**全件**集計して初めて分かった。
+
+⚠️ ASCII だけの識別子 (file 名等) は日本語比率の下限で落ちる。 そこは pattern 照合が担当する
+= **役割分担**であって、 片方の閾値を緩めて両方を拾おうとしない。
+
+### <a id="ledger-and-listing-copy-gate"></a>暗号化した台帳の文と自前の一覧の行を、 平文に写す commit で止める
+
+git-crypt は台帳の path を守るだけで、 台帳の文を別の path に写した平文は守らない (§1)。 写しの経路 (会話記録を語で広く拾った出力・締めの一括の写し・手で書く使い捨ての code) は多く、 どれも agent の手書きなので、 道具の側に網を張っても迂回される。 平文に入る口は commit の 1 つ = commit の門で止める。 規則を 2 つに分ける:
+
+- **自前の道具が出す一覧の行の形** (session の開始に注入する一覧など、 台帳から作った行): 行の構造 (行末の付箋 `[<repo>:<id>]`・メールの要約の行の頭) を、 一覧の書き手の側の module が宣言し、 門はそれを読む。 書き手の試験が「合成の一覧に門が当たる」 を確かめる = 書式を変えると試験が落ち、 形と書式が離れない。 規約・記録が 1〜2 行を引くのは普段の書き方なので、 数行以上の写しで止める。 形を決めたら過去の履歴に当て、 誤報の型を見て締める (実測: 最初の形は、 論文の引用 key `[Surname:2026abc]` と、 道具の版つきの数の表を一覧の行と数えた → 名前と id の字を一覧の実物の字種に締めた)。 書き手の code とその試験は門が見ない (見ない file の一覧も形の module が持つ)。
+- **暗号化した台帳の欄の文の逐語**: 台帳の欄 (題・現在地・問い・決まったこと) の文を上の指紋と同じ窓 (空白を除いた 24 字、 日本語 4 字以上) にし、 平文の追加行と照らす。 窓の重なりは多く、 大半は正当な重なり = 誤報の源は (a) 前から平文に在った文 (b) 記録と台帳の両方に書く決まりの文 (本人の発言の逐語の引用) (c) 作業の repo の状態を、 その repo の記録と台帳の両方に書いた二重の記録。 (a) は数えない: 同じ file の前の版に在る窓と、 前の版の tree の平文に在る文 = `git grep -o -h -F -e <文> … <rev> --` (git-crypt の blob は object store の中で暗号文なので、 tree-ish への grep は平文の file にしか当たらない = 平文の側の索引は持たない。 問う文は 1 commit に 1 回でまとめる)。 (b) は引用の形 (本人「…」) の中を数えない。 (c) は形で分けられないので閾値で通す。
+- **閾値は過去の commit への当て直しで決める**。 台帳の今の版の窓をそのまま当てると、 後で台帳が平文の文を引いた逆向きの重なりまで写しと数える = 窓は、 その commit より前に作られた entry の分だけ数え、 さらに台帳自身の履歴で、 その commit の時点の版にその窓が在ったかを確かめる (`git log -1 --before=<commit の時刻> -- <台帳の file>` の版を `git cat-file --textconv` で読む)。 その時点の版が今の履歴に無い (台帳の file の分け方を変える前など) 窓は、 確かめられない分として別に数える。 閾値は「既知の漏れを止め、 二重の記録の大半を通す」 行数に置き、 手前は file と行番号だけの警告にする (実測: 閾値を下げて増える分は二重の記録だった)。
+- **出力と索引**: 出力は file と行番号と規則の名前だけ ([#decrypted-echo](#decrypted-echo))。 台帳の窓の索引は毎 commit 作り直す (窓の hash を平文の cache に置かない = 暗号化の外に写しを増やさない)。 平文の追加行に日本語の長い行が無い commit では索引を作らない。 台帳を読めない機械 (鍵が無い・YAML の library が無い) では逐語の照合だけを飛ばして 1 行出し、 一覧の形の規則は回す (実測: 索引の段の故障を検査全体の故障として返すと、 一覧の形の当たりまで捨てていた)。
+
+### <a id="unpublished-text-public-gate"></a>公開 repo には「未公開文書の逐語」 の gate を別に置く (2026-09-13)
+
+上の指紋照合は「local-only repo の実体」 を remote 付き repo に入れない gate で、 日本語だけを索引にする。
+**英文の原稿**と、 **remote は持つが公開ではない repo** (= 共著者と共有する原稿 repo) の本文は、 その索引の外にある。
+公開 repo の規約の「実例」 に未公開原稿の文をほぼ逐語で写した commit が 1 週間で 3 回 landed したのは、 この隙間だった。
+
+- **target は公開 repo だけ** (`.claude/public-repo.marker`)。 原稿 repo や決定台帳は原稿を引くのが仕事なので対象にしない。
+- **源の宣言は個人層**: `discover: ~/Claude .tex` (= 非公開 repo の `.tex` 全部。 新しい原稿 repo も自動で入る)、
+  非公開に持つ第三者の記録 (受講生の感想など) を足す `include:`、 公刊済み・第三者の本文を外す `exclude:`、
+  源の file にも入っている公開の文 (owner が記入した公式の様式の見出しなど) を索引から差し引く `public: <file> sha256:<hex>`
+  (file ごとに中身で固定する = 書き換えた file は差し引かない。 源の file でないもの・公開 repo の中の file は宣言しても無視する、
+  symlink は実体の path で見る)。 script には置き場所を書かない。
+- **検出は 3 つ**。 英語の 2 つ (下の 2 行) の較正で分かったのは、 漏れた例示の大半が**引用符に入った 5〜9 語の短い断片**だったこと
+  (内容語の shingle だけでは 7 語で 1 件も拾えなかった):
+  - **quoted span** = backtick・二重引用符・日本語の鉤括弧 「…」『…』 の中の、 空白区切りで 5 語以上 (内容語 3 以上) の文で、 5 語の窓が全部源に在るもの。
+    鉤括弧は入れ子の外側と内側を別々の span として見る (「… 『内側』 …」 の内側も見る)。
+  - **prose run** = 引用符なしで、 内容語 6 個の連続が源と一致するもの (markdown の fence の中は除く)。
+  - **japanese run** (2026-11-09〜) = 空白を除き NFKC で揃えた 24 字のうちかな漢字が 4 字以上の窓が源と一致するもの (引用符の有無に依らず、
+    続いた追加行はつないで見る)。 英語の 2 つは日本語を語の切れ目として捨てるので、 第三者の日本語の文の写しはそれまでどの段も通った
+    (実測)。 24 字より短い断片は通る。
+- **正規化**: LaTeX の comment・数式・preamble・引用 key・制御綴り・謝辞の節と、 LaTeX の源の code (`\texttt`・`\verb`・`\ttfamily` を
+  含む `{…}` の group・verbatim 系の環境) を除き、 日本語は英語の 2 つの run を切る (日本語は japanese run が見る)。 code を除くのは、 源の報告に引いた
+  環境構築の command が公開 repo の CI の file と同じ語の並びになった誤検出のため (実測)。
+  3 つ以上の top-level dir に現れる shingle は定型として捨てる。 索引は hash だけを cache に置く。
+- **較正** (公開 2 repo の全履歴 1,667 commit に replay):
+
+| 設定 | 検出 | 内訳 |
+|---|---|---|
+| 内容語 shingle のみ、 7 語 | 0 | 漏れた例示も拾えない |
+| 内容語 shingle のみ、 5 語 | 9 | 半分が TikZ の option・path・公的機関の名前・よくある物理の句 |
+| quoted span、 語を letter の塊で数える | 26 | 大半が backtick の path (`a/b-c.md` が 5 語に数えられた) |
+| **quoted span (空白区切りで 5 語) + prose run 6 語 + 謝辞の除外** | **10 (4 commit)** | **全件が原稿由来、 誤検出 0** ← 採用 |
+
+- <a id="quote-forms-in-calibration"></a>**較正は、 書き手が実際に使う引用の形を全部持たないと穴を「0 件」 に見せる** (2026-10-19 追補)。
+  上の較正は ASCII と curly の引用だけを数えたので、 日本語の文書がふつうに使う鉤括弧の中の英文は当たりとして一度も現れず、
+  「誤検出 0・全件拾えた」 と読めた。 実測: 鉤括弧の中の 5〜8 語の英文が、 この gate の後も公開 tree に入っていた (引用符なしの
+  検出は内容語 6 連なので、 短い引用には届かない)。 鉤括弧を足した版で公開 clone 24 本の全履歴 (7,599 commit、 鉤括弧を含む追加行
+  約 2 万 + message 約 2,600) を通し直すと、 新たな当たりは 9 件で、 誤検出は 3 件 = 全部が公刊版に載っている文 (源の live 版にも
+  同じ文が残るため)。 一般句・合成例の一致と、 message・無人の書き手の当たりは 0。 公刊版の文は許可の一覧を作らず、 例の側を合成に
+  書き換えた。 鉤括弧の中で日本語と英文が混ざる span を英文の断片ごとに見る案は、 同じ履歴で当たりが path の誤検出 1 件だけだったので入れていない。
+  一般則 = sweep の「無い」 は形ごとに陽性対照を通してから信じる ([`../docs/convention-design-principles.md#sweep-null-needs-per-form-control`](../docs/convention-design-principles.md#sweep-null-needs-per-form-control))。
+  較正の陽性対照は、 書き手の言語で使う引用の形ごとに 1 つずつ selftest に置く。
+- <a id="japanese-run-calibration"></a>**japanese run の較正** (2026-11-09): 公開 repo 全部の全履歴 (commit の追加行と message) に replay すると、
+  本物の漏洩の写しは当たり (実測)、 誤検出は 2 つの形だった = (1) 公式の様式の見出しが、 源 (owner が記入した様式) と層1 の道具の
+  selftest の両方にある → `public:` で公式の kit の file を宣言して差し引いた (2) owner の書いた 1 文が、 公開の規約と非公開の記録の
+  両方にある → 記録の側を規約の節への参照に置き換えた (同じ文を 2 か所に持たない)。 窓を 16 字にすると当たりは約 6 倍になり、
+  増えた分は定型句 (挨拶・一般的な言い回し) だった = 24 字を採った。 日本語の窓は markdown の code fence の中も見る (24 字のかな漢字は
+  code でなく、 記録の書式の例として fence に貼った 1 件が漏洩の形そのもの)。
+- <a id="leak-tiers-before-approval"></a>**公開 repo の保護された file (検査の engine・runner・hook) の候補は、 本人に承認を頼む前に漏洩の段を通す** —
+  commit の門は最初に承認の guard を回し、 承認の無い候補はそこで止まるので、 漏洩の段 (Tier A〜G) の当たりは承認の後の commit で
+  初めて出る。 そこで候補を直すと、 承認は候補の中身に結びついているので頼み直しになる (実測: 候補に活動の語・非公開 repo 名と同じ綴りの
+  合成の語・源との逐語の一致・pipefail の形が 1 つずつあり、 どれも承認の前に見つかった)。 やり方 = 公開 repo の写しの clone に候補を
+  stage し、 保護された file は保護の外の path (拡張子も配線と読まれない形) に置いて、 本物の個人層を渡して runner を回す。 検査の engine
+  自身の候補は写しの working tree に置いて stage しない (runner は working tree の engine を呼ぶ)。 写しだけの手順で、 本物の repo の path は変えない。
+
+- **捕まえないもの = 言い換え** (上の表どおり)。 未公開の結果を自分の言葉で書いた例示は通るので、
+  規律 ([`CLAUDE.md#non-identifier-content-leak`](../CLAUDE.md#non-identifier-content-leak)) はそのまま要る。
+- ⚠️ **gate を作ったことと、 target の commit で走っていることは別の事実**。 同じ日に、 指紋 + pattern の gate
+  (`check-confidential-leak.py`) が層3 の chain にだけ配線され、 公開 repo の pre-commit (`public-precommit-runner.sh`)
+  からは呼ばれていなかったと分かった = 一番守るべき target で走っていなかった。 両方を public runner の Tier D にした。
+  配線は target の種類ごとに、 実際の commit (一時 repo で可) で止まることを確かめる (#5 のカナリアと同じ)。
+- ⚠️ **公開 repo の gate の唯一のスイッチは `.claude/public-repo.marker`**。 同じ日に、 GitHub で public の clone 7 本が marker を
+  持たず、 Tier A-D のどれも走っていなかったと分かった (新規 repo の setup 経路は marker を書くが、 他所で作られた repo の clone は
+  一度も通らない)。 点検 = [`scripts/check-public-marker.py`](../scripts/check-public-marker.py) (GitHub の visibility と marker と
+  hook を突き合わせる。 marker を pull した直後の別マシンは `--hooks-only --fix-hooks` が hook を揃える)。
+- **配線の確認は 2 段**: `--check-wiring` = 本番の索引でカナリアが止まるか。 `--check-wiring --through-hooks` = 一時の公開 repo に両 hook を入れ、 引用を含む stage と message が実際の commit で拒否され、 平文の commit が通るか。 後者は runner の配線切れや設定の解決失敗まで捕まえる (約 5 秒)。
+- 止まったときは file と行と源の名前だけを出し、 一致した本文は出さない。 公刊版に在る文だと確かめた場合だけ
+  `CLAUDE_UNPUBLISHED_GUARD=0` で 1 回通す (agent が使うのは本人の指示があるときだけ = [agent-rule-ownership.md#guard-escape-hatch](agent-rule-ownership.md#guard-escape-hatch))。
+
+### <a id="session-carryover-gate"></a>公開 repo には「同じ session で非公開の source から読んだ値」 の gate を置く (2026-11-05)
+
+検出器を較正する・例を本物らしくする turn では、 非公開の記録 (暗号化した repo の commit message、 非公開 repo の file) を
+tool で読み、 その値を同じ session の中で公開 repo の selftest・コメント・docstring の例に写す (実測。 額の組・本数・
+コードの一覧の形で入った)。
+写した値は識別子でも語の一覧の語でも 5 語以上の文でもないので、 上の網 (Tier A-F) はどれも見ない。
+「commit の前に、 較正で目にした値で追加行を grep する」 は散文の手順で、 commit と push を 1 本で打つと気づくのは push の後になる。
+
+- **源は会話記録**: 「この session で何を読んだか」 は会話記録が持っている。 engine =
+  [`scripts/check-session-carryover.py`](../scripts/check-session-carryover.py) は、 commit の時点までの記録の tool の出力のうち
+  **非公開の source を読んだもの** から値を集める (公開とみなすのは、 tool の入力に出る場所がすべて公開の印の repo の中のときと
+  web だけ。 場所の分からない出力は非公開に数える)。 **agent 自身が先に書いた値は数えない** (= 合成の値)。
+- **規則は「額の形」 に絞る**: 3 桁区切りの数の組 / 7 桁以上の 3 桁区切りの数 / 数と大文字 3 字のコードの組 / コード 4 つの並び。
+  件数の単位が続く数・合成の例の形 (連番・同じ数字)・主要通貨と形式名だけの並び・日付の断片・CSS の色は数えない。
+- **較正** (公開 repo の commit のうち、 message の session の印から会話記録を引けたもの 1,631 commit に replay):
+
+| 設定 | 当たった commit | 内訳 |
+|---|---|---|
+| 数 (4 桁以上) の組 + 6 桁の数 + 数と後ろの 2 語 + コードの並び | 210 | 大半が一般の定数・ID・寸法・言い回し (「数と後ろの 2 語」 だけで 321 行) |
+| 3 桁区切りの組 + 7 桁 + 数とコードの組 + コードの並び | 7 | CSS の色・日付の断片 + 大文字の語・規格番号が残る |
+| **上 + 日付の断片・CSS の色・規格名の除外** | **3** | **漏れた 1 commit (3 か所とも)・会話記録から数えた件数 1・公開の料金の表 1** ← 採用 |
+
+- **捕まえないもの**: 言い換え・計算し直した値 (足した・丸めた)、 1 つだけの短い数、 Codex の commit (会話記録の場所が違う)、
+  subagent の中の commit。 規律 ([`CLAUDE.md#non-identifier-content-leak`](../CLAUDE.md#non-identifier-content-leak)) はそのまま要る。
+- <a id="session-carryover-rewritten-line"></a>**前からある数の行の言い直しは数えない**: 当たった値が、 その file の commit 済みの版 (pre-commit = HEAD、 replay = その commit の親) に既にあれば数えない = 既に公開の surface にある値で、 新しい持ち込みでない。 前は、 公開の doc に前からある数の組の行の括弧の中の 1 句だけを言い直しても、 その行が差分の追加行になって止まり、 数を別の行に移して通した (実測)。 同じ hunk の削除行だけを見る形では、 行を移した場合を救えない。 別の file に写した値と、 その file に無かった値は今までどおり数える。 前の commit で既に漏れた値はこの検査では見えなくなる = tree の棚卸しの側で拾う
+- **配線** = 公開 repo の pre-commit の Tier G (`public-precommit-runner.sh`、 session の env `CLAUDE_CODE_SESSION_ID` が在るときだけ。
+  tree の棚卸しでは走らせない = session が読んだものでなく tree 全体を見る場だから)。 止まったら file と行と規則の名前だけを出す。
+  公開の値がたまたま同じ (公開の料金など) と確かめた場合だけ `CLAUDE_CARRYOVER_GUARD=0` で 1 回通す (本人の指示があるときだけ)。
+
+---
+
+## 5. fail-open な gate は、 効いているかを毎回確かめる
+
+検査は fail-open (= 設定不足・source 不達・正規表現破損で黙って素通り) に作るのが正しい。
+gate 自身の不調で作業全体を止めないためである。 しかしその代償として
+**「効いていないことに気づけない」** — 「gate が在る」 という誤った安心だけが残る。
+
+∴ **fail-open な gate には必ず、 実効性を毎回確かめる別の検査を付ける**:
+
+- 設定 file が **カナリア** (= 無害な合言葉) を宣言する
+- 検査は **本番の設定のまま** 一時 repo を作り、 カナリアを実際に BLOCK できるか試す
+- 結果を **必ず 1 行出す**。 沈黙という状態を作らない:
+  `ARMED` / `NOT ARMED` (理由つき、 FAIL) / `対象外` (= 宣言された対象に実体が無い) /
+  `未配線` (= 対象の宣言そのものが無い)
+
+⚠️ <a id="not-configured-is-not-nothing-to-protect"></a>**`対象外` と `未配線` を混ぜない** — 対象を宣言する設定が空 / 不在のとき、
+検査は「守るべきものが無い」 と **確かめずに断定**できてしまう (= 空の設定が「対象なし」 と同じ顔をする、
+[`docs/convention-design-principles.md#detector-config-must-be-derived`](../docs/convention-design-principles.md#detector-config-must-be-derived))。
+設定が無いなら、 そのマシンに実体が在るかは **未確認**であって、 無いことの証明ではない。
+2 つは別の語で出し、 `未配線` では「在るなら宣言するまで gate は走らない」 まで書く
+(= 読んだ人が「自分の環境は守られている」 と誤読しないところまでが報告)。
+
+⚠️ **カナリアの値を engine 側に literal で書かない** — 書くと engine 自身の commit が自分の
+gate に弾かれる。 値の home は設定 file だけにし、 engine は directive 名だけを持つ。
+
+同じ理由で、 **暗号化を入れたら「このマシンで実際に読めるか」 の検査も必ず付ける**
+([`scripts/check-gitcrypt-readable.py`](../scripts/check-gitcrypt-readable.py))。
+ロックされたマシンでは暗号文がそのまま読め、 fail-open な呼び出し側は **黙って 0 件**を返す。
+「1 件も無い」 と「読めていない」 が区別できなくなるのが最悪の壊れ方。
+鍵を持たない環境 (CI 等) は **SKIP を宣言して緑にしない**。
+
+### <a id="protected-dir-access-guard"></a>読むだけでも触らせない dir は、 path rule でなく PreToolUse hook で守る
+
+**罠**: settings の `Read(path)` / `Edit(path)` の ask / deny rule は、 Bash では file を名指しする読み方 (`cat` など) にしか効かない ([`claude-code-permissions.md#file-rule-tools`](claude-code-permissions.md#file-rule-tools))。 **上位 dir から再帰する検索は、 保護 dir の名前を 1 度も書かずに中へ届く** (実測: repo を横断して探す sweep が上位 dir からの `find` で保護 dir を拾い、 続く loop の `git -C` と相対 path の `grep` が中を読んだ。 確認は 0 回)。 Grep / Glob tool を上位 dir から走らせたときに path rule が効くかは未検証 (確かめるには保護 dir を検索することになる) なので、 同じ hook で先に塞ぐ。
+
+**機構** = [`hooks/protected-dir-access-guard.py`](../hooks/protected-dir-access-guard.py) (PreToolUse `Bash|Grep|Glob|Read|Edit|Write`、 名指しは **ask**、 上位 dir からの走査は **止める** (exit 2)。 同じ script が PostToolUse でも走り、 許可された事実を記録する = 下の「1 回限り」)。 Bash の command は単純 command ごとに語に分けて読む (引用符の中の `/`・文の中の語では当てない):
+
+- 確認を出す = path の名指し (実体 path / home 直下の symlink 別名 / `~` / `$HOME` / `親/名前` / 親か名前を書いた glob / 同じ command で代入した変数。 相対の語は直前の `cd` と cwd から読み、 python の code の中の path も数える。 **除外を添えても名指しは名指し**) ・ 再帰の起点が中 ・ cwd が中 ・ Grep の起点が中か glob が名前を書く ・ Glob の pattern が中を名指す ・ Read / Edit / Write / NotebookEdit の file が中
+- <a id="stop-ancestor-scan"></a>止めて直させる (本人に確認を出さない) = 片の先頭の再帰の道具 (find / grep -r / rg / fd / du / tree …) の起点が上位 dir (引数か cwd・直前の `cd`) ・ mdfind / locate (起点が上位か無い) ・ 上位 dir からの `**/` ・ python の走査と上位 dir の path ・ Grep / Glob の起点が上位 dir。 止めた理由に、 起点を絞る形と保護 dir を除く形 (`-prune` / `--exclude-dir` / `-g '!…'` / `mdfind -onlyin`) を書いて返す ・ 起点が値の読めない変数・`$()`・xargs で、 その源 (for の並び・代入・echo の引数・xargs に流す前の片) に上位 dir の path がある。 前置き (sudo / nice / timeout / env / stdbuf / xargs / `uv run` …) は option ごと外して読み、 `bash -c` / `eval` の文字列と shell・python に流す heredoc の本文は中身として読む
+- 出さない = 名前を含む文 (commit message・規約の grep・file を書くだけの heredoc の本文) ・ 再帰しない一覧 ・ 保護 dir の外の具体的な dir への再帰 ・ **保護 dir の中身を除く書き方を添えた走査** (find の `-prune`・`-not -path '*/<名前>/*'`・grep の `--exclude-dir`・rg の `-g '!…'` など、 道具ごとの形は hook の docstring。 ⚠️ dir だけを除く形 = `-not -name <名前>`・`-not -path '*/<名前>'`・grep の `--exclude=<名前>` は除外と数えない = 中身が出る)
+- 保護 dir そのものには触れない (親だけを実体化して比べる)
+- **宣言** = `~/.claude/protected-dirs.txt` と `~/.claude/leak-pattern-sources.txt` (§4 の作業リポ登録)。 remote に出してはいけない実体の置き場は、 触ってもいけない dir でもある — 別の list にすると片方だけが更新される ([`docs/convention-design-principles.md#detector-config-must-be-derived`](../docs/convention-design-principles.md#detector-config-must-be-derived))
+- <a id="swap-the-new-gate-in-first"></a>⚠️ **どちらも machine-local なので、 二重の門を入れ替えるときは順序が要る**: この一覧 file は**即時**に効き、 settings の rule は**次 session から**効く。 だから path rule の kind を緩める (`deny` → `ask`) ときは **先に一覧を配り、 後から rule を外す**。 逆にすると、 file を名指ししない読み方が確認なしで通る窓が開く。 一覧を git の宣言から配る engine = [`scripts/sync-protected-dirs.py`](../scripts/sync-protected-dirs.py) (足すだけ・冪等。 宣言に無い行と他経路の一覧は消さない)、 rule 側は [`multi-machine-state.md#gate-rules-reassert-every-session`](multi-machine-state.md#gate-rules-reassert-every-session)。 ⚠️ 一覧が空のマシンでは hook は何も守らない (fail-open) ので、 **緩める前にそのマシンの `--canary` が保護 dir を数えているか**を見る
+- **名指しの確認は deny にしない**: その dir の作業 session では中で作業するのが正当。 止まるのは仕様で、 本人は dialog の command から「中に入る」 と読める。 **上位 dir からの走査は確認にせず止める**: 本人は dialog から中に届くかを読めず、 読まずに押す (実測: 走査の確認の大半は文中の語の誤検出で、 その許可が下の「1 回限り」 を開いた session の大半は保護 dir を一度も名指していなかった = 押すたびに関門が黙って開く)。 走査は Claude が起点を絞るか除外を足せば同じ結果が得られる ([`claude-code-permissions.md#ask-only-owner-judgeable`](claude-code-permissions.md#ask-only-owner-judgeable))。 ⚠️ **ただし settings 側に `deny` を重ねている環境がある** (= 作業 session でも Claude には触らせない、 と決めた dir)。 hook の ask と deny rule が同じ command に当たると **hook の理由だけが返って deny は見えない** ので、 拒否の原因を hook だと読み違える ([`claude-code-permissions.md#hook-masks-deny`](claude-code-permissions.md#hook-masks-deny))。 deny を重ねてあるかは settings の `permissions.deny` を読んで確かめる (hook の挙動からは分からない)
+- <a id="one-approval-per-session"></a>**同じ session で毎回聞くと、 人は読まずに押す** — 中で作業する session では確認が儀式になり、 gate の意味が消える。 そこで **PostToolUse で「実際に tool が走った」 = 許可された事実を記録し、 以後その session ではその dir について `allow` を返す** (記録は session ごと・dir ごと・古い分は間引く。 session をまたいでは開かない)。 ⚠️ 記録するのは PostToolUse だけ (= 拒否された call では開かない)。 開くのは名指しの確認を許可したときだけで、 上位 dir からの走査は開いた session でも止める。 ⚠️ **trade-off**: 1 回許可すると、 その session の後続の call は確認なしで中に触れる — **その session に外部由来の指示 (web・mail・他人の文書) が混ざれば同じ扉を通る**ので、 開けた session ではそれらを持ち込まない。 ⚠️ PostToolUse の配線が無いと記録されず毎回聞かれる (= 上の「儀式」 に戻る) ので、 `--canary` はその欠落も 1 行で言う
+- fail-open なので §5 のとおり `--canary` で毎回確かめる (ARMED / NOT ARMED / 未配線 / 対象外)
+- ⚠️ 射程外 = script file の中の走査、 script の引数や `python -m` で渡す起点、 同じ command で定義していない変数 (環境変数) の起点、 hook の表に無い道具。 目的は事故の防止で回避への対策ではないので、 **横断の検索・sweep を書く側の規律**と併用する: 対象は repo の一覧 (registry) から取り、 上位 dir からの `find` で発見しない
+
+### <a id="work-on-a-copy-not-by-lowering-the-gate"></a>触れない dir の中身を処理する必要が出たら、 gate を下げずに「1 file だけ外に出してもらう」
+
+`deny` で守った dir の file を Claude に処理させたくなる場面はある (機械でしかできない検査・変換・印刷の前処理など)。 このとき **deny を外して作業して戻す**のは最悪の選択肢 — 外れている間は**その dir 全体**が、 当の作業に関係しない call にも開く。 外し忘れれば boundary は黙って消える。
+
+⚠️ **「作業のたびに本人が許可する dir」 は、 下げて戻すのではなく最初から `ask` にする** (= 別の判断)。 本人が中で作業する dir を `deny` にすると、 許可を出しても通らず、 通すために毎回 gate を触ることになる (= 上の最悪の選択肢を常態化させる)。 その dir は `ask` にして **本人が許可した操作だけを通す** — dir が開きっぱなしにならない (path rule の確認は操作ごとに出る。 hook の名指しの確認は、 許可した session の中では 2 回目から聞かない = [#one-approval-per-session](#one-approval-per-session))。 ⚠️ `ask` は kind を変える恒久的な判断なので、 **git に載せた宣言で全マシンを揃える** ([`multi-machine-state.md#gate-rules-reassert-every-session`](multi-machine-state.md#gate-rules-reassert-every-session))。 file を名指ししない読み方 (`find` / `grep -r` / script の中の走査) は path rule の射程外なので、 [`#protected-dir-access-guard`](#protected-dir-access-guard) を併せて配線する。 以下は「本人も触らせるつもりがない dir」 の話。
+
+**順序**:
+
+1. **やらずに済ませられないかを先に見る**: 出力だけが要るなら、 手順を user に渡して user の手元で実行してもらう (= 中身が Claude の context にも tool 結果にも入らない。 **最も安全**)
+2. それでも Claude が処理する必要があるなら、 **user が対象 file だけを許可 scope の dir に複製**する。 露出が「1 file・1 回」 に限られ、 boundary の設定は動かない。 **複製は user が行う** (Claude が copy すると、 保護 dir を読む操作そのものが deny に当たるうえ、 「Claude が勝手に外へ出した」 形になる)
+3. 終わったら**複製と中間生成物を消す**。 消す対象を作業の最後に 1 行で列挙する (temp dir の中間 file・render した画像・抽出した部分 file は忘れられやすい)
+
+**⚠️ 複製した瞬間に増える risk** (= 「1 file だけ」 は無害の意味ではない):
+
+- **複製は元の SoT から分岐する**: 元が直っても複製は直らない。 複製から作った成果物 (印刷物・変換結果) は、 **どの版から作ったか**を残さないと後から照合できない ([`office-automation.md#printed-artifact-staleness`](office-automation.md#printed-artifact-staleness) と同じ構造)
+- **複製先が backup・同期・索引の対象だと露出が伸びる**: home 直下の同期 folder に置くと、 消す前に別の場所へ渡ることがある。 置き場は同期されない local dir を選ぶ
+- **記録に中身を書かない**: 作業の記録・別 session への通知・commit message には、 **file 名も中身も書かない** (= 記録は remote に乗る。 [`#notification-is-not-a-report`](#notification-is-not-a-report) の「通知は報告書ではない」 と同じ)。 書くのは「1 件処理した」 までで、 所在は口頭 (chat) で渡す
+
+**これを「回避の手口」 にしない**: 2 の判断をするのは user であって Claude ではない。 Claude 側の既定は 1 で、 2 は user が明示的に選んだときだけ成立する。 Claude が「こうすれば通ります」 と先に手を動かす形にすると、 gate は事実上無い。
+
+---
+
+## 6. 過去の分は別問題として扱う
+
+ここまでの操作はすべて **go-forward** にしか効かない。 既に commit / push されたものは
+履歴に残る。 是正のたびに次を明示する:
+
+- **今回の操作で止まるもの** (= 今後の書き込み)
+- **止まらないもの** (= 履歴、 既に配られた copy、 別 session の transcript)
+- 履歴の書き換えを行うかは、 clone を壊す不可逆操作なので **必ず人間の判断**に委ねる
+
+既存の記録を新しい基準で棚卸しする口を用意しておくと、 基準を変えた時に遡れる
+(= 「後から機密と分かったもの」 を中立化する操作も含めて)。
+
+公開 repo の未公開文書の逐語は、 gate (追加行だけを見る) とは別に `scripts/check-unpublished-quote.py --scan-tree <repo>` で現在の全 file を棚卸しできる (2026-09-13 に公開 2 repo を走査し、 残っていた 1 件を一般形に直して 0 件)。
+
+### <a id="fictional-replacement-check"></a>平文に写った件名・名前を作り物に替えたら、 見つけたのと同じ走査を回し直して確かめる
+
+暗号化した台帳と同じ文 (メールの件名・差出人の名・人の名前) が平文の file (試験の例・記録の引用・台帳の注記) に在ると分かり、 作り物や説明の言葉に替えるときの罠 (実測):
+
+- **元の件名の前後を少し替えただけの作り物は、 指紋の窓に当たり続ける** — 窓は件名の語尾の定型 (案内の語 + 英文の併記) と、 ML の印 + 件名の書き出しでも当たる。 判定に効く語 (分類器・義務の網が拾う語) は残し、 それ以外の連なりを窓の長さより短く切る。 置換の後に、 **見つけたときと同じ索引・同じ窓**で走査を回し直し、 残った行が道具の決まった文 (件名の型・フォルダの名・雑音の型・config が拾う差出人の語) だけかを 1 行ずつ見る
+- **差出人の表示名 (機関の部署名も) も窓に当たる** — 試験の判定が address で決まるなら表示名は作り物に替える。 config が表示名を語として拾い、 試験がその語で拾えるかを見るなら、 表示名は道具の決まった文として残す
+- **id や名前を替えると、 key で並べる関数の結果の順が変わる** — 順に依る assertion (`result[1]` を見る) が落ちる。 直す前と後で試験の件数が同じかを数え、 落ちたら並び順を先に疑う
+- **置換に使った code を平文の path に置かない** — 置換の表は元の文を持つ。 元の文は置換の commit の差分にそのまま残る (戻す・確かめるのはそちらで) ので、 code を残しても得るものが無い
+- 走査は件名・差出人の窓だけを見る = 名前だけ・本文だけの行 (fixture の名乗り、 返事の本文の写し、 file 名) は拾わない。 是正の記録に、 走査の範囲の外として書く
+
+### <a id="history-scrub-identity-from-all-versions"></a>履歴から個人情報を消すときは、 消す一覧を台帳の全版から作り、 検証は一覧と独立に回す
+
+実測: 名簿から作った一覧で履歴を書き換え、 同じ一覧で検証して 0 件を確かめたが、 次の初めの 4 種類が残っていた (終わりの 2 種類は、 個人の値を消す別の書き換えの予行で見つかったもの)。
+
+- **今の台帳にいない人**: 途中で抜けた人 (履修をやめた人・異動した人) の識別子と氏名。 一覧は**今の版でなく台帳の全ての版** (暗号化されていれば復号して) から集める
+- **表記の揺れ**: ローマ字の語順 (`SURNAME Given` / `Given Surname`)、 大文字小文字、 姓だけ、 敬称つき。 台帳の表記だけを消すと、 本文の別の表記が残る
+- **path と commit message**: 暗号化した repo でも file 名と message は平文 ([§1](#1-暗号化は中身-しか守らない))
+- **検出器の形の穴**: 識別子の形を大文字だけで書くと、 メールの local part から来た小文字の file 名を素通りする
+- **数字の値の区切りの揺れ** (郵便番号・電話・口座): 区切りの位置が違う形 (相手の登録の崩れを書き写した例など) や区切りなしでも書かれる。 置き換えの規則は数字の並びだけを見て、 区切りの有無と位置を問わない形にする (実測 = 区切りの位置が違う 1 か所が、 一覧に頼らない検査で見つかった)。 短い値 (下 4 桁・支店番号) は形が他の数字と重なるので、 文脈の語 (「下 4 桁」「支店 (…)」) つきの規則だけにする
+- **書き換えの規則を説明する doc 自身**: 計画書や結果の記録に「置き換える語」 を並べると、 その doc が今の版に平文で残る。 一覧は repo の外の設定だけに置き、 doc には種類と件数を書く (実測 = 予行の「今の版は変わらない」 の検査がこの 1 本で止まった)
+
+検証を消した一覧と同じ一覧で回すと、 0 件になるのは当然 (= 定義が見落としたものは検証も見落とす)。 検証は一覧と独立した検出で回す (識別子の**形**を全 file・全 message・全 path に当てる / 全台帳の姓を course の区切りなしで当てる)。 残った当たりを 1 件ずつ仕分け、 著者名・教員などの守る語を決めて規則に足す。 識別子の形は短い git hash にも当たるので、 16 進だけの token は形で外す。
+⚠️ **書き換えた mirror の検証は、 書き換えた ref だけで見る** (`git log refs/heads/main`)。 `--all` は書き換えなかった ref (hosting の `refs/pull/*`・古い branch) が指す旧い履歴も含み、 値が残っているように見える (実測)。
+逆に、 その ref は remote でも旧い object を持ち続ける = 古い branch は push で消し、 `refs/pull/*/head` は hosting 側 (GitHub は Support) に消してもらう。 消すまでは「書き換えで消えた」 と言わない。
+
+file 名の書き換えは `git filter-repo` の `--filename-callback` で行う。 `--file-info-callback` で改名すると後の commit の削除が旧名のまま残り、 消したはずの file が最新の版に復活する (実測)。 2 つの callback は同時に使えないので 2 段に分ける (1 段目 = 改名、 2 段目 = 中身と message。 2 段目の `commit-map` は filter-repo が 1 段目と合成済み = 元の sha → 最終の sha)。 書き換えの後は、 元の最新の版との差が意図した変更だけかを `git diff --name-status` で確かめ、 暗号化 blob の集合が変わっていないことも確かめる。
+
+### <a id="gate-installed-after-history"></a>gate を入れても、 入れる前から在った中身は検査されていない
+
+pre-commit gate は **staged 差分 (= これから足す行) しか見ない**。 だから **既に履歴のある repo に
+gate を後から入れても、 その repo の中身は一度も検査されないまま**残る。 「gate を入れた」 は
+「検査した」 ではなく、 設置直後の finding 0 は *在庫を見ていないから 0* でしかない。
+一般則 = [`docs/convention-design-principles.md#detector-installed-after-the-stock`](../docs/convention-design-principles.md#detector-installed-after-the-stock)。
+
+∴ **gate を設置したら、 同じ turn に tree 全体を 1 回通すまでが 1 単位**:
+[`scripts/scan-public-tree.sh`](../scripts/scan-public-tree.sh) が tracked file を temp dir に展開して
+fresh な index に置き、 **全 file が「追加行」 に見える状態**で同じ runner を走らせる (= Tier A-E が
+そのまま tree 全体に当たる)。 `--all` で marker つき repo を横断、 結果は machine-local の台帳に記録し、
+**finding があった repo は「走査済」 にしない**。
+
+<a id="scan-zero-needs-control"></a>⚠️ **棚卸しの「0 finding」 は、 検出器がその大きさの入力で効くと確かめた回だけ信用する**。 棚卸しは tree 全体を
+1 回の入力として渡すので、 commit 1 本の差分より桁で大きい。 実測: 非公開 repo 名の照合が `printf | grep -q` を
+`pipefail` の下で使っていて、 入力が pipe の容量を超えると一致が黙って消え、 非公開 repo の path を含む公開 repo を
+「0」 と記録した (commit の gate は差分が小さいので同じ照合が効いていた = 型は [`shell-env.md#pipefail-grep-q-sigpipe`](shell-env.md#pipefail-grep-q-sigpipe))。
+もう 1 つの形 = **漏洩以外の段が漏洩の段より前にある** runner は、 その段が止めた tree で漏洩の段に届かない
+(SESSION の形・壊れた text の検査が止めた tree を「0」 と記録する作りだった)。 3 つめの形 = **識別子の段 (Tier A〜C) に受理済みの
+当たりがあると、 runner が後の段 (Tier D〜F) を回さない** 作りで、 棚卸しはその repo を D〜F を見ずに「受理済みのみの 0」 と記録した
+(実測)。 4 つめの形 = **target の種類で動く段**: 作業リポの機密の検査 (Tier D-2) は remote のある repo でだけ動くので、 remote の
+無い一時 repo で回す棚卸しでは一度も走っていなかった (実測 = カナリアは remote ありで止まり、 無しで通る)。 ∴ 棚卸しの道具は
+(1) 走査の前に、 架空の非公開 repo 名を先頭に置いた大きな tree で検出器が拾うかを 1 回確かめ、 拾えなければ走査せずに止める
+(2) runner が非 0 で終わったのに漏洩の段の見出しも「漏洩の段を通った」 の 1 行も無いときは「未走査」 と記録する
+(3) 台帳は repo ごとの最新の行で読み、 対照が通り、 かつ Tier D〜F まで回って未公開文書の逐語の検査がその機械で armed だった回の 0 (印 `ctl-df`) だけを走査済に数える (= それより前の 0 は、 検出器が直った後の回で自動で走査し直される)
+(4) runner に棚卸しの印 (`CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS=1`) を渡し、 runner は印があれば A〜C の当たりの後も D〜F を回す (commit の動きは変えない。 G は棚卸しでは回らない作り)
+(5) 一時 repo に network に出ない仮の remote を置く (6) `--all` は未記録 → 最新の行が 0 → 最新の行が finding の順に回す (finding の残る repo が毎回の上限を使い切って後ろの repo に届かない形を避ける、 実測)
+(実装 = [`scripts/scan-public-tree.sh`](../scripts/scan-public-tree.sh) の `control_check` / `scan_one` / `already_scanned`)。
+一般則 = [`docs/convention-design-principles.md#sweep-null-needs-per-form-control`](../docs/convention-design-principles.md#sweep-null-needs-per-form-control)。
+
+<a id="ledger-skips-bypassed-commits"></a>⚠️ 台帳は走査済の repo を HEAD が進んでも見直さない (新しい行は commit の gate が見る前提)。
+この前提は gate を通った commit にしか成り立たない: GitHub の画面での編集・他の人の PR の merge・hook の入っていない機械からの commit は gate を通らない。
+台帳を持たない runner (CI) で棚卸しを回すと毎回 tree 全体を見直すので、 それがこの抜け道を定期的に見る唯一の網になっていることがある (実測)。
+CI を速くするために棚卸しの段を外す前に、 代わりに tree 全体を定期的に見直すものがあるかを確かめる。 外さない理由は workflow の該当の段にコメントで残す。
+
+既に公開されていて「見た上で残す」 と決めたものは、 repo の `.claude/public-tree-accept.txt` に
+理由つきで 1 行書く。 この受理は **棚卸しにだけ効き、 commit gate には効かない** (= 新しい書き込みは
+今までどおり止まる)。 受理できるのは token を名指しできる Tier A だけで、 件数と file 名しか出ない
+Tier B/C (= 実名・非公開 repo 名) は受理させない — 寝かせてよい物を型で絞る。
+
+⚠️ 射程は **現在の tree** まで。 過去の commit の中身と commit message は別
+(= message の棚卸しは `check-unpublished-quote.py --replay`、 履歴の書き換えは人間の判断)。
+
+⚠️ **vendored / 生成物の dir を名前で走査から外さない**。 実測: 大量の finding の出元が他人の package cache に
+見えた repo で、 中身を分けると実体の大半は **build tool の生成物に焼かれた、 共同作業者の開発機の home path**
+(= owner 側の漏洩) だった。 dir 名で外していたらそれごと隠れる。 生成物を追跡しているなら直し方は
+**追跡を外す** (+ 標準の `.gitignore`) で、 除外ではない。
+
+#### <a id="published-metadata-is-public"></a>公刊済みの著作の書誌は、 構造で検出器から外す
+
+arXiv / DOI で公開された著作の **題名・著者・要旨**は定義上もう公開されている。 ところが論文を記録する bot の
+archive は著者名をそのまま持ち、 自分の論文が載った日には要旨が手元の原稿と逐語で一致する。 実測: その archive を
+stage すると実名 (Tier B) と逐語 (Tier D) が必ず落ち、 **無人の自動 commit が毎回止まる** (= 止める物は無いのに
+transport が黙って壊れる)。 README の参考文献 link も、 改稿中の原稿と同じ題名で Tier D に当たる。
+
+許可 list で逃がすと論文が増えるたびに古くなる。 書誌は行の構造で見分けられるので構造で外す
+([`scripts/lib/published_metadata.py`](../scripts/lib/published_metadata.py)、 runner の Tier A-C と Tier D / E の engine が共有):
+- JSON: arXiv id か arXiv / DOI / INSPIRE の URL を持つ object の `title` / `abstract` / `authors` の**値の行**
+  (pretty-print のときだけ。 1 行 JSON は外さない = 鳴る側)
+- Markdown: 公開先 URL への link **だけ**で出来ている行
+- **外さない**: 同じ object の `reason` / `summary` 等 (= 書き手の文) と、 link の外に語がある行。
+  ⚠️ 書き手の文を AI が生成する bot では、 生成の指示に「購読者・共同研究者の名前を書かない」 を入れる
+  (= 構造で外せない側の文は、 源で書かせない)
+
+#### <a id="name-compound-allow"></a>姓の短い term が地名などに当たるときは、 複合語だけを許可する
+
+実名 gate の term には姓の 2 字 prefix も入る (= 本文では姓だけで書かれるため)。 その 2 字が地名・歴史上の人物名の
+一部に現れると、 公開の地図や冗談の文言で鳴る。 prefix ごと stoplist に落とすと「X さん」 も止まらなくなる。
+∴ **その複合語だけ**を個人層の設定 (`compound_allow`) に書き、 照合の前に本文から消す
+(行の種類の正本 = [`scripts/lib/sensitive-terms.sh`](../scripts/lib/sensitive-terms.sh)、 commit gate・commit-msg・週次監査で共通)。
+builder は **3 字以上の term や ASCII term を含む複合語を拒否**する (= 氏名を消す抜け道にしない)。 同じ行に
+姓だけの言及が残れば今までどおり止まる。 足すのは中身を読んで人を指さないと確認したときだけ。
+
+#### <a id="generated-data-declaration"></a>外部の公開データを機械が変換して置いた file は、 生成元つきで宣言して棚卸しから外す
+
+官公庁の公開データを CI が毎日 JSON に直す、 のような file は第三者の公開記録で、 人名・連絡先・日付と件数が数千行並ぶ。
+実名・連絡先・活動の事実の棚卸しが全部鳴り、 行ごとの承認もデータ更新のたびに失効する。 受理一覧に
+`generated: <glob>  # <生成元>` と書くと、 **棚卸しからだけ**外れる (commit gate には効かない)。
+path 単位の除外は後から入った本物も黙らせる ([`#semantic-detector-ack-ratchet`](../docs/convention-design-principles.md#semantic-detector-ack-ratchet)) ので、 代償を型で絞る
+([`scripts/lib/public_tree_accept.py`](../scripts/lib/public_tree_accept.py)): 宣言できるのは **データ形式の file だけ** (文章・code が 1 つでも当たれば宣言ごと無効)、
+glob は tracked file に当たること、 生成元を書くこと、 外した数を走査のたびに表示すること。
+
+#### <a id="tree-finding-resolution"></a>棚卸しの finding を決着させる判定表
+
+finding は「直す」 か「見た上で残す」 のどちらかで閉じるが、 残し方は finding の種類で口が違う。 **上から順に当てる**
+(= 直せるものを残す口に流さない):
+
+| finding の中身 | 決着のさせ方 |
+|---|---|
+| owner 側が書いた識別子・非公開 repo 名・未公開の文 | **本文を一般形に直す** (Tier B/C は受理できない) |
+| 開発機の home path が設定・build spec に焼かれている | **bug fix として直す** ([`#personal-path-is-also-a-portability-bug`](#personal-path-is-also-a-portability-bug)) |
+| selftest・doc の**合成例**に書いた絶対 path (`/Users/<誰か>/…`) | **書き換える** = `/tmp/synthetic/…` の形 (Tier A は home dir の path を識別子に数えるので、 合成でも止まる = 実測) |
+| IDE / game engine 等が生成する cache・log・user 設定を追跡している | **追跡を外す** + その tool の標準 `.gitignore` (dir を名前で走査から外すのではない) |
+| upstream (fork 元・同梱 runtime・exporter) の連絡先・例示 path・版番号 | Tier A の **受理** (token + 理由) |
+| IP に見える版番号 (browser の User-Agent の `Chrome/<major>.0.0.0`・assembly の `Version=<n>.0.0.0` 等) | Tier A の **受理** |
+| 姓の短い term が地名・歴史上の人物名・普通語の一部に当たる | 個人層の **`compound_allow`** ([`#name-compound-allow`](#name-compound-allow)) |
+| arXiv / DOI の書誌 (題名・著者・要旨)、 公開論文への link だけの行 | 何もしない (runner が構造で外す = [`#published-metadata-is-public`](#published-metadata-is-public))。 残るなら構造 (id / URL) が無い |
+| 外部の公開データを機械が変換した file | **`generated:` 宣言** ([`#generated-data-declaration`](#generated-data-declaration)) |
+| 名前が公開 repo 自身の identity の一部 (公開 mirror の源の名前など) | 非公開 repo 名の例外 list (owner 判断、 criterion は層1 の安全規則) |
+| 未公開文書の逐語の検査の当たりが、 源の file にも入っている公開の文 (公式の様式・kit の見出し) | 個人層の源の宣言に **`public: <file> sha256:<hex>`** (その公開の file を中身で固定して宣言する、 [`#unpublished-text-public-gate`](#unpublished-text-public-gate)) |
+| 同じ当たりが、 owner の文を公開の文書と非公開の記録の両方に持っている形 | **同じ文を 2 か所に持たない** (非公開の記録の側を公開の文書の節への参照に置き換える) |
+
+- 未公開文書の逐語の当たりが表の「未公開の文」 の行か「両方に持っている」 の行かは、 両側の句が入った commit の日時で決める (`git log -S'<句>' --reverse --format='%h %ad'` を公開の repo と源の repo の両方で回す)。 公開の側が先なら、 源の文書が公開の文を使った二重持ち (漏れではない)。 源の側が先なら、 未公開の文が公開の側に写った漏れ。 1 つの file の当たりでも、 句ごとに向きが分かれることがある (実測) = 当たりごとに見る
+- <a id="fix-the-source-of-a-copy"></a>当たった file が、 別の repo・dir にある正本から写して置く file (公開用の release copy・build の出力・submodule に写す配布物) なら、 正本の側も同じ文に直し、 写しを正本と同じ中身にする。 写しだけを直すと、 次に正本から写す commit で同じ当たりが戻る (そのときは commit の門が止めるが、 写す人は何が当たったか分からない)。 写しかどうかは、 その repo の公開の手順 (CLAUDE.md の release の節など) を読み、 正本と公開の版を `cmp` で比べて確かめる。 submodule に写す形なら、 親の repo の pin も同じときに進める
+- どの種類の term が当たったかは gate の出力から分からない (件数と file 名だけ) — [`scripts/explain-sensitive-hits.py`](../scripts/explain-sensitive-hits.py) `--repo` が同じ除外を当てた後の残りを種類つき・term を伏せて出す
+- **archived の公開 repo** は push できない。 受理一覧を入れるなら unarchive → commit (message に `[skip ci]` = 古い CI を起こさない) → push → すぐ archive に戻し、 戻ったことを確認する
+- 決着させたら **本番の台帳で** `scan-public-tree.sh --repo <repo> --force` を 1 回通す (= temp の台帳で確かめただけでは進捗にならない)
+
+#### <a id="gate-change-replays-unattended-writers"></a>gate を締めたら、 その前に立つ無人の書き手の過去の出力を通し直す
+
+検出語の再生成・Tier の追加・runner の修正は、 **公開 repo に自動で commit する routine** (日次の archive 等) を黙って止めうる。
+書き手は失敗を warning で握りつぶす設計のことが多く、 その日の出力に偶然当たる語が無ければ、 当たる出力が出る日まで表に出ない。
+実測: 検出語を締めた後、 論文を記録する bot の archive が共著者名と手元の原稿と同じ要旨で必ず止まる状態になっていたが、 締めた当日の出力は通っていた。
+
+∴ gate を変えた turn に、 無人の書き手の直近の commit を **今の** gate に通す: [`scripts/replay-public-gate.sh`](../scripts/replay-public-gate.sh)
+`--repo <repo> --path <書き手の出力先> --since "14 days ago"` (C が変えた file だけを temp repo に置き、 親の版 → C の版の差分として runner を回す)。
+止まる commit があれば、 誤検知なら検出器側を直し ([上の判定表](#tree-finding-resolution))、 本物なら書き手の出力 (生成の指示) を直す。
+定期実行にも載せる (= gate の変更と書き手の出力の変化のどちらからでも鳴るように、 手元の検査 runner に「手元の gate を通る書き手の repo × 直近 14 日」 で)。
+replay が見るのは leak の gate だけ: CI の bot (author が `[bot]`) の commit は手元の gate を一度も通らない書き手なので既定で飛ばして件数だけ出し
+(実測: 公開データを毎日 commit する bot が Tier A/B で十数本止まる判定になったが、 その repo の棚卸しは `generated:` 宣言で決着済で直すものは無かった)、
+原稿の主張の gate は「今の session に著者の承認があるか」 を見るので過去の commit では必ず落ちる = agent session の env を外して人の commit として通す。 一般則 =
+[`docs/convention-design-principles.md#detector-change-breaks-downstream-writers`](../docs/convention-design-principles.md#detector-change-breaks-downstream-writers)。
+<a id="replay-commit-messages"></a>**`replay-public-gate.sh` が通すのは本文 (pre-commit の runner) だけで、 commit message は見ない** = commit message にだけ効く一覧 (個人層が本文の一覧と別に持つ人名の一覧など) を変えた turn は、 replay が全部通っても変えた一覧は確かめていない。
+書き手の repo を cwd にして、 直近の commit message を 1 本ずつ file に書き、 [`scripts/commit-msg-leak-guard-runner.sh`](../scripts/commit-msg-leak-guard-runner.sh) `<message の file> message` に通す (終了値が 0 でない commit が「今なら止まる」)。
+止まるはずの 1 行 (非公開の repo 名など) も同じ形で通し、 門が効いていることを見てから「止まる commit なし」 と書く (実測)。
+
+**照合の形そのもの (検出器の述語) を変えたとき**は、 直近の書き手に加えて、 公開 clone の全履歴の追加行と commit message を新旧の検出器の両方に通し、
+**新版だけが当てた件**を 1 件ずつ読む (公刊物の文・合成例・一般句の一致 = 誤検出、 未公開の逐語 = 直す)。 変えた形を含まない行は新旧で判定が同じなので、
+その形を含む行だけを照合すれば全履歴でも数分で済む (実測)。 ⚠️ `check-unpublished-quote.py --replay` は message を見ず新旧も比べないので、 今はこの比較を手で組む
+(新旧の engine を import し、 同じ索引で `quoted_hits` を呼んで差を取る)。 新しい版は、 元の `scripts/` を全部 symlink で写した一時 dir に置いて動かす
+([`agent-rule-ownership.md#candidate-in-mirror-dir`](agent-rule-ownership.md#candidate-in-mirror-dir))。
+
+#### <a id="boundary-rule-change-sweeps-repo-policies"></a>公開の境界の規則を変えたら、 公開 repo ごとの「何を書くか」 の方針を新しい規則の語で探す
+
+公開 repo の DESIGN / CLAUDE には、 その repo で何を書くかを決めた方針の文があることがある (外部の指摘の書き方・匿名化の仕方など)。
+層1 の境界の規則 (本 doc・[`CLAUDE.md#non-identifier-content-leak`](../CLAUDE.md#non-identifier-content-leak) とその下の class) を足す・締めるとき、
+**それより緩い repo の方針は残ったまま、 その方針どおりに書いた中身が公開に残る** (実測: ある公開 repo の方針が「氏名を伏せれば、 原文と非公開 repo への path は書く」 としていた)。
+方針の文は普通の語で書かれるので、 検出器では止められない。 ∴ 境界の規則を変えた turn に、 公開の印のある repo の方針の文を新しい規則の語で 1 回探し、 緩い方針を言い直す:
+
+```bash
+for d in ~/Claude/*/; do [ -f "${d}.claude/public-repo.marker" ] && git -C "$d" grep -n -i -E '<新しい規則の語 (例: レビュー|コメント|PII|匿名)>' -- DESIGN.md CLAUDE.md AGENTS.md; done
+```
+
+### <a id="visibility-decided-at-publish-time"></a>公開にするかは、 中身が出来てから・公開する直前に決める
+
+repo を作る時点の「公開してよいか」 は、 **まだ書かれていない中身についての予測**でしかない。
+実際に書かれるもの — とくに **設計判断の記録** — は、 他の repo との比較や没案の理由を含むので、
+**非公開の対象への参照が自然に生える**。 その参照は削れば判断の記録が読めなくなる種類のもので、
+「公開のために薄める」 と資料の価値そのものが落ちる。
+
+∴ visibility は **初回 push の直前にもう一度判定する**。 判定材料は、 上の tree 全体の走査結果が
+そのまま使える (= Tier C が出るなら、 その repo は公開に向いていない、 という情報)。
+
+- 非公開への参照が **消せるなら**消して公開する
+- 参照が **判断の記録そのもの**なら、 repo を非公開にする方が安い
+- 公開を選ぶなら、 その repo は以後すべての commit が gate を通る (= 毎回の税) ことも見込む
+
+⚠️ 公開 → 非公開へ倒しても、 **公開されていた間のことは取り消せない** (= 公開 event は外部の
+記録に残りうる)。 「短時間だから無かったこと」 にはせず、 何が外に出たかを書き残す。
+visibility の **判断基準そのもの** (何を公開する人なのか) は個人の層に属する。
+
+### <a id="personal-path-is-also-a-portability-bug"></a>個人の環境に依存する literal は、 漏洩であると同時に移植性のバグ
+
+成果物に焼かれた **home 直下の絶対 path・machine 名・個人の dir 構成** は、 識別子が漏れるだけでなく
+**書いた本人以外の環境では解決しない**。 つまりこの class の是正は「公開のために我慢して薄める」 のではなく、
+**直して初めて正しく動く**。
+
+- build spec の `pathex`、 3D モデルの texture 参照、 project file の library path、 IDE の設定 — いずれも
+  他人の clone では**その path が存在しない**ので、 既に壊れているか、 黙って fallback している
+- ∴ 見つけたら「漏洩の是正」 ではなく **bug fix として直す**。 実行時に解決する形 (= 成果物の置き場所から
+  相対で引く / tool が注入する変数を使う) に置き換えると、 識別子も消え、 どの clone でも動くようになる
+- ⚠️ 直す前に **その literal が今も使われているか**を確かめる (= 参照する側の code を読む)。 使われていないなら
+  消すだけでよく、 使われているなら「今どのマシンでも解決していない」 ことを確認してから置き換える
+  (= 動いているものを壊さない。 実測では、 壊れていた方が普通だった)
+
+**別 OS で書かれた成果物にも同じものが在る** — 検出側が 1 つの OS の表記しか見ていないと素通りする
+([`docs/convention-design-principles.md#sweep-null-needs-per-form-control`](../docs/convention-design-principles.md#sweep-null-needs-per-form-control))。
+
+公開層に上げてしまった物を**非公開へ戻す**ときは、 消すのでなく移す: ① 非公開 repo へ verbatim で写す (anchor id も同じに) →
+② 公開側は一般則だけに書き直す (script なら結果を実装した関数を非公開の module へ、 汎用の道具は残す) → ③ 非公開側の呼び元
+(shim・検査・文献台帳) を新しい置き場所へ付け替え、 検査を回す → ④ 公開側の転送表・索引から消えた anchor の行を削る。 履歴には残るので、
+履歴を書き換えるかは owner の判断 (既定 = 書き換えない)。
+
+<a id="cleanup-record-by-location"></a>**是正の記録は、 消した文言を書き写さずに所在で書く** (2026-09-14)。 結果表や漏洩の台帳を diff を読みながら埋めると、
+消したはずの文言が記録の側に移り、 そこから commit message へ運ばれる。 [`scripts/commit-hunk-anchors.py`](../scripts/commit-hunk-anchors.py)
+`<commit | A..B>` が hunk ごとに file・新しい側の行・直前の anchor (Markdown の `<a id>`、 Python は def/class) だけを出す
+(本文も見出しの文字列も出さない。 `--summary` で file × 節ごとの件数)。 公開 2 repo の是正 92 行の表をこれで埋めた。
+
+---
+
+## 7. この規約を実装している script
+
+| script | 役割 | 設定の home |
+|---|---|---|
+| [`check-confidential-leak.py`](../scripts/check-confidential-leak.py) | 指紋 + pattern で pre-commit BLOCK / 配線監査 (カナリア) | `~/.claude/leak-pattern-sources.txt` / `~/.claude/leak-candidate-dirs.txt` / 各機密 repo の `.leak-patterns` |
+| [`check-pii-filenames.py`](../scripts/check-pii-filenames.py) | 追跡 file 名の識別子を検出 | `~/.claude/pii-filename-patterns.txt` |
+| [`pack-pii-dirs.sh`](../scripts/pack-pii-dirs.sh) | 識別子入り dir を暗号化 tar に畳む / 畳み忘れ検出 | 各 repo の `.pii-pack-dirs` |
+| [`check-gitcrypt-readable.py`](../scripts/check-gitcrypt-readable.py) | 暗号化 file がこのマシンで読めるか (全 repo) | `.gitattributes` の `filter=git-crypt` 宣言 |
+| [`check-public-marker.py`](../scripts/check-public-marker.py) | 公開 repo の gate が入っているか: public なのに marker 無し / private なのに marker / marker があるのに hook 無し | GitHub の visibility (gh) と各 clone の marker・hook |
+| [`check-unpublished-quote.py`](../scripts/check-unpublished-quote.py) | 未公開文書の逐語 (quoted span / prose run / japanese run) を公開 repo の commit と message で BLOCK / 配線監査 (カナリア 2 本、 `--through-hooks` で実 hook) / 現在の tree の棚卸し (`--scan-tree`) | 個人層の `unpublished-sources.txt` (public runner が渡す) |
+| [`check-activity-facts.py`](../scripts/check-activity-facts.py) | owner の非公開の活動の事実 (応募・採否・事務の指摘・推薦の時期と件数と固有名) を公開 repo の commit と message で見る: 固有語 = BLOCK / 出来事の語 × 日付・件数 = 警告 / `--scan-tree` = 承認済み一覧つきの棚卸し ([`CLAUDE.md#owner-activity-facts`](../CLAUDE.md#owner-activity-facts)) | 個人層の `activity-fact-terms.txt` と承認済み一覧 |
+| [`scan-private-vocabulary.py`](../scripts/scan-private-vocabulary.py) | 公開 repo が非公開 repo と共有する珍しい語の一覧 (言い換えを読む候補、 gate ではない。 tree 全体 / `--staged` / `--diff`) | 無し (`.claude/public-repo.marker` の有無で公開・非公開を分ける、 `--source` / `--exclude` で絞る) |
+| [`commit-hunk-anchors.py`](../scripts/commit-hunk-anchors.py) | commit の hunk の所在 (file・行・直前の anchor / def) だけを出す = 是正の記録を本文なしで書く | 無し |
+| [`scan-public-tree.sh`](../scripts/scan-public-tree.sh) | 公開 repo の tree 全体を pre-commit gate の全 Tier に通す (= gate は差分しか見ないので、 gate より古い中身はこれでしか見つからない)。 `--all` で横断、 台帳で 1 repo 1 回 | 各 repo の `.claude/public-tree-accept.txt` (棚卸しでだけ効く受理一覧) |
+| [`check-session-carryover.py`](../scripts/check-session-carryover.py) | 同じ session で非公開の source から読んだ値 (額の組・本数・コードの並び) を公開 repo の commit で BLOCK (Tier G、 #session-carryover-gate) / 過去の公開 commit の replay (較正) | 無し (源 = その session の会話記録) |
+| [`check-value-index.py`](../scripts/check-value-index.py) | 暗号化した値 (電話・口座・生年月日・住所) の平文の写しを、 公開 repo の commit と message (Tier F) と非公開 repo の pre-commit の連鎖で BLOCK / 全 repo の棚卸し (`--scan-root --explain`) ([§1 の decrypted-echo](#decrypted-echo)) | 個人層の `value-index.txt` (索引の在り処 = 暗号化 file の節) |
+| [`pdf-review-render.py`](../scripts/pdf-review-render.py) | 様式の PDF を目視用の PNG にする前に住所・口座・電話の行を塗る / `--audit` = 塗りの外に残る語を形だけで | 無し (見出しの語は `--label` で足す) |
+| [`hooks/protected-dir-access-guard.py`](../hooks/protected-dir-access-guard.py) | 保護 dir を名指す操作に確認を出し (PreToolUse、 ask)、 上位 dir から中に届く走査は止めて直し方を返す (exit 2) / `--canary` で本番配線の実効性 ([§5 の節](#protected-dir-access-guard)) | `~/.claude/protected-dirs.txt` / `~/.claude/leak-pattern-sources.txt` |
+
+いずれも **機密文字列も個人の配置も script 側に持たない**。 設定 file が無い環境では
+「対象外」 として何もしない (= 他の利用者の環境を壊さない)。

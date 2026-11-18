@@ -5,13 +5,24 @@
 
 ## 共通規約
 
-このマシンで Claude Code を使うときの共通規約は `<base>/CONVENTIONS.md` を参照（`claude-config/CONVENTIONS.md` の symlink）。
+このマシンで Claude Code を使うときの共通規約は `<base>/CONVENTIONS.md`（`claude-config/CONVENTIONS.md` の symlink）。
+
+以下のタイミングで読み込む:
+
+- リポで作業を始める時 — §3「リポでの作業開始手順」
+- `git commit` / `git push` の前 — §3 push 前チェック + §4 Git 規約 + §5 安全規則
+- 新規リポ作成時 — §1, §2
+- 情報の記録先で迷った時 — §2「記録先の判別」表
 
 ## 個人層について
 
-個人ごとの好み・身元情報・リポ一覧などを Claude に覚えさせたい場合は、**個人層** (層 2) を作ることを推奨します。詳細とテンプレートは:
+個人ごとの好み・身元情報・リポ一覧などを Claude に覚えさせたい場合は、**個人層** (層 3) を作ることを推奨します。詳細とテンプレートは:
 
 - 概念: `<base>/claude-config/docs/personal-layer.md`
 - テンプレート: `<base>/claude-config/templates/personal-layer/`
 
 個人層は不要なら作らなくても OK。このファイル単独で claude-config の共通規約は有効です。
+
+## チャット応答での数式の書き方
+
+数式を含む返事を書く前に、`<base>/claude-config/conventions/chat-math-rendering.md#by-surface` を読み、読む画面の既定を適用する。Codex app と Claude の Code タブでは組版表示を使い、区切り・制約はそれぞれの節で確認する。Claude の Code タブでは、`\` を含む式は直前に半角空白を置いた ` \( … \)` で書き、添字と上付きは `{}` で包み、数・区間は地の文で書く (同じ正本の `#code-tab-default-form`)。ターミナル・読む画面が分からないときは Unicode で書く。ソースを転記する場合の扱いも同じ正本に従う。

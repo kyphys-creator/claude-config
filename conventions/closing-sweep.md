@@ -1,0 +1,282 @@
+<!-- doc-meta
+when: session の終わりに、 その session (と委ねた agent・子 session・別 session) で得た知見・手順・使い捨ての script を正本へ上げ、 正本と参照・SESSION・TODO を整えて commit するとき (= 締めの sweep・仕上げ) + 締めの sweep を個人層の skill や定型の指示にするとき
+category: harness-core
+summary: 締めの sweep (仕上げ) の手順の正本 — 集める (会話記録・委ねた先の 5 つの口) → 層を決める (1 件を分けて置く・2 回目は仕組みに・公開層の境界) → 並列の締めと分担 → 正本と参照 → SESSION・TODO → commit → 横断と報告 (「残り」 に入れる前に会話で決まっていないかを確かめる)。 誰でも使える `/wrap` = skills/wrap (この doc を順に読ませる)、 個人層の同名の skill はそれを正本として指し、 道具の path と本人の決めごとだけを持つ (#personal-skill)。 層1 に置くものは claude-config に PR で出す (#upstream-pr)
+-->
+# 締めの sweep (仕上げ) — 知見を正本へ上げて整える手順
+
+session の終わりに「全ての知見・手順・script をなるべく上の層に上げ、 session・正本・参照を整える」 作業の手順の正本。
+各段の規則の本文はそれぞれの正本にあり、 ここは順番と入口だけを持つ (= 規則を複製しない)。
+skill としての入口 = 誰でも使える `/wrap` ([`../skills/wrap/SKILL.md`](../skills/wrap/SKILL.md))、 個人の値の持ち方 = [#personal-skill](#personal-skill)。 層1 に置くものの出し方 = [#upstream-pr](#upstream-pr)。
+
+以下の `<id8>` = その session の id の先頭 8 文字 (Claude Code の記録 file 名の uuid)、 道具の path は本 repo からの相対。
+
+## <a id="scope"></a>0. 範囲を決める
+
+- 対象 = **この session で起きたこと** (変えた file、 user の訂正、 分かった壊れ方、 その場で書いた一回きりの command・script、
+  研究の知見、 設計の考え方 = 返事にしか無いものを含む。 文脈圧縮より前の分も含む = 0.3) **+ この session から委ねた先で得られたもの** (0.5)。
+  それ以外の session の作業・未着手の案件には手を出さない。
+- 事故の 3 条件 (文脈圧縮の直後・session の終わり・同じ file への並列作業) は、 公開層に owner や第三者の事実・未公表の結果が漏れやすい条件 (実測)。
+  当たるなら、 **公開層に上げる文のうち事実を含みうるもの**を絞り、 残りは plan か TODO に積んで次の session に回す。
+  これは漏洩の対策であって作業量の上限ではない = 技術の仕組み (道具・hook・検査) や手順の一般形を作ることは、 この条件でも絞らない。
+  同じ時間帯に走っている他の締めとは、 1.5 の宣言で書く file を分ける。
+- <a id="dialogue-window-sweep"></a>**研究の対話係の窓で締めを頼まれたら、 締めは一覧を作って指揮所に渡すところまで** ([multi-session-coordination.md#research-dialogue-and-conductor](multi-session-coordination.md#research-dialogue-and-conductor) の対話係の窓 = 研究と作文だけをする窓): 0.3 の集め方で、 決まったこと・未決の論点・残したい知見と手順の一覧を作り、 1 から 4 の段 (正本・参照・SESSION・TODO への書き込み、 commit + push) は指揮所に渡す。 一覧は指揮所への 1 通にし、 長ければ共有のメモの置き場か作業用の一時 dir の 1 file にして path を渡す。 指揮所が一覧を正本に移し、 対話係の窓は指揮所が返した結果の path を提出に使う (実測: 対話係の窓が締めで規則の文書に追記して commit し、 分担の外れになった)。
+- <a id="delegated-sweep"></a>**ある session の締めを別の worker に渡す** (元の session が止まった・context が大きい・別 vendor に任せる) ときは、 渡す先は自分で締めを回せる session にし (subagent に渡すと、 その締めで得た知見がまた依頼元の締めに積もる = [multi-session-coordination.md#self-closing-delegate](multi-session-coordination.md#self-closing-delegate))、 依頼の spec に 3 つ書く:
+  (1) 対象の session の完全な id と記録の種類 (Claude Code か Codex)。 worker にとって上の「この session」 は対象の session で、 その種類の道具で読む = Claude の session なら 0.3・0.5 の道具を対象の id で回し、 0.95 の inventory (Codex の session 用) は使わない
+  (2) 既に済んだ拾い出し (考え方・研究の中身の回収など) の結果の file。 それを入力にして拾い直させない
+  (3) 触らせない file (提出前の原稿など) と、 保護された file のうち B に当たらない変更は本人に聞くこと ([#protected-files-need-ruling](#protected-files-need-ruling))。
+  渡す先の model は締めに合うものにする (締めは確立した手順の運用 = [multi-session-coordination.md#model-fit-before-sending](multi-session-coordination.md#model-fit-before-sending) の表の下位の側。 個人層の規則が締めの model・effort を決めていれば、 その値で起こす = 掲示板の request の `--expect-model` / `--effort`。 子に頼む向きの同じ段 = [multi-session-coordination.md#wrap-model-before-ask](multi-session-coordination.md#wrap-model-before-ask))。
+  元の session が掲示板の依頼の依頼元なら、 検収は依頼元か本人の番で、 締めを受けた worker は状態を記録するだけ (実測: この 3 つを書いた spec で、 別 vendor の worker が Claude Code の session の締めを最後まで回した)。
+  <a id="delegate-spec-tool"></a>**依頼書の骨は道具で作る** = `python3 scripts/wrap-delegate-spec.py <対象の session の id8> [--quote '<本人の頼み (逐語)>'] [--out <file>]` が記録から 3 つ (対象の完全な id・記録の path と文脈圧縮の回数・0.3・0.5 の道具の行 / その session と、 その session が起こした子の commit と wrap の記録 / 触らせない file の欄) と、 依頼元が回す `--check` の 1 行と、 提出に書くこと (見た範囲 / 見ていない範囲) を埋める。 渡す側が記憶と自分の語で依頼書を書くと 3 つが抜け、 「移すもの」 が記憶からの一覧になる (実測: その依頼書で回した worker は会話記録を読まず、 引き継ぎに「見ていない: 会話記録」 と書いた)。 締めの頼みが wrap の語で来なかったとき (wrap の語を含まない普通の語の頼み) は skill が起動せず、 この節に届かなかった (実測) = 骨の道具は、 入口の hook (個人層の配線) から 1 行で指す。 この骨で渡した依頼を受け取ると、 受け取りの直後の照合 (`scripts/child-wrap-check.py --hook-accept` が呼ぶ `wrap-delegate-spec.py` の `accept_lines`) が依頼元の `--check` の 1 行を出し、 締めの Stop hook はその turn を締めの turn と数える (下の段落の 1 行が対象の id で通るまで 1 回差し戻す)。 同じ受け取りで、 提出・引き継ぎ (と、 その turn に読んだ file) の「見ていない・確かめていない」 の行を、 依頼書の本人の頼みの逐語と並べて出す (印の無い依頼の受け取りには出さない = 依頼の多くの提出が「見ていない」 を書くので、 どの受け取りにも出すと読まれなくなる。 中身の見えない依頼は依頼書の path を掲示板に持たないので、 worker は骨の 1 行目の印を引き継ぎの file に写す) = 照らす相手は依頼書の完了条件でなく本人の逐語 (実測: 中身の見えない依頼は完了条件の文を持てず、 「見ていない: 会話記録」 は完了条件と食い違わなかったが、 本人の頼みは session 全体の知見だった)。
+  <a id="delegated-reply-knowledge-check"></a>[#reply-knowledge](#reply-knowledge) の処分の file は worker が書いて `--check` を通し、 依頼元も自分の締めの turn で同じ `--check` の 1 行を回す = 締めの turn を確かめる Stop hook は、 その session の会話記録の中の `--check` しか見ない (worker の窓で通しても依頼元の turn には数えない)。 worker は結果の file と提出に、 依頼元がそのまま回せる 1 行を書く (実測: worker が書いた処分の file を、 依頼元が自分の窓で回して通した)。
+  worker は道具に `--delegated` を付けて回す = 最後の圧縮の後の、 問いでない依頼への返事も P として並ぶ (既定では出ない = 依頼元の context にはあるが、 worker の context には無い。 実測: 付ける前は worker が会話記録を手で抜き出して読んだ)。 依頼元に渡す 1 行にも同じく付ける。
+  処分の file は、 何を移したかを書く md の末尾に置かず、 独立の file (`.txt`) にして md から指す = 道具は `#` で始まらない行を全部処分として読み、 根拠は 1 語だけを取る (注記は `#` の後。 md の文の行は候補に無い id として並ぶ)。
+  <a id="delegated-replies-are-claims"></a>締めを受けた worker にとって、 対象の session の返事は委ねた先の報告と同じく検証前の主張 ([#collect-from-delegates](#collect-from-delegates) の「報告は検証前の主張」) = 正本へ移す前に、 返事が指す code・台帳・頁で 1 回裏を取り、 食い違えば一次の側で書いて食い違いを添える (実測: 返事の図の説明の 1 点が code と違い、 別の 1 点は返事そのものが事実と逆で、 依頼元の検収で直った)。
+  同じ session の 2 回目の締めで前の締めの処分の file を写すときは、 候補の番号でなく時刻と問いの文で突き合わせる = 道具が直ると番号は振り直される (実測: 1 回目の後の直しで前の範囲に候補が増え、 番号がずれた)。
+
+## <a id="collect-from-transcript"></a>0.3 会話の全体から集める (文脈圧縮の前も)
+
+文脈圧縮の後に手元にあるのは要約だけで、 圧縮より前の user の訂正・分かった壊れ方・打った command は要約から落ちていることがある。
+会話記録 (transcript) は圧縮の後も全体が file に残っているので、 要約でなく記録から集める。 圧縮が起きていなければ、 user の発言と研究の中身は context にある。
+**要約が自分で「未記録」「直していない」「保留」 と書いた項目は、 要約の文で済ませず、 1 件ずつ今の記録と照らす締めの入力にする** (下の「研究の中身」 の行の道具が S として並べる。 実測: 締めが拾ったのは要約の未記録の項目の一部で、 拾わなかった項目に返事にしか無い導出があった)。
+**返事にしか無い知見 (研究の中身・考え方) も、 圧縮の有無に関わらず道具の一覧で回す** — 表に道具のある行と「会話を頭から読む」 行が並ぶと、 道具のある行だけを回して締め、 読む行が抜ける (実測: 道具の行を 1 本の command で全部回し、 返事を 1 件も引かないまま「足したものは無い」 と報告した)。
+**その場で書いた script は、 圧縮の有無に関わらず下の道具で一覧を出す** — context から思い出すと file に残らない形 (heredoc で interpreter に流した code・`-c` の code) を数え落とす (実測: file の script だけを数え、 結果を記録の根拠に使った heredoc の code を落とした)。
+
+| 集めるもの | 引き方 |
+|---|---|
+| user の発言 (訂正・決定・依頼) | `python3 scripts/search-agent-transcripts.py --session <id8> --role user --regex . --limit 0` (`--limit` の既定は 200 件 = 長い session では前の方だけが出る。 切ったときは最後に件数を知らせる。 圧縮の前も含めて時刻順に全部) |
+| その場で書いた script (file に書いたもの + heredoc・`-c` で流したもの) | `python3 scripts/session-scripts-report.py <id8>` = 1 本ずつ、 commit 済み (✅) / repo の中で未 commit (🟡) / repo の外 (⚠️) / 流しただけで file に無い (⚠️) を出す。 ✅ でないものは 1 本ずつ、 1 の表の [#evidence-scripts](#evidence-scripts) の行で決める |
+| 根拠の無い検算の主張と先送り (返事と記録に書いた文) | `python3 scripts/session-claims-report.py <id8>` = 「手で確かめて一致」「独立に再現」 のうち根拠の file を指さない行 (A) と、 「次に〜とき」「後で」 のうち carrier を指さない行 (B) と、 「足したものは無い」「すべて記録済み」 のうち下の照合を指さない行 (C)。 誤検出は出るので 1 行ずつ読み、 A は 1 の表の [#unbacked-checks](#unbacked-checks)、 B は 3 の [#deferrals](#deferrals)、 C は下の「研究の中身」 の行の照合で決める |
+| 答えの無い箱の問い (turn 終わりの箱で問い、 本人の答えが無いまま流れたもの) | `python3 scripts/session-open-questions-report.py <id8>` = 1 件ずつ読み、 まだ要る問いは TODO の `ask` に写す (箱の問いは次の自動の turn で画面から消える。 記録に残らないので誰も問い直さない。 実測) |
+| 取得して読んだ原典 (論文・資料の PDF。 一時 dir に落としたもの・取り込み口に置かれたものも) | `python3 scripts/session-fetched-docs-report.py <id8>` = arXiv の取得 (URL のある command、 URL を本文に持つ session の script の起動、 取得の道具 `ai-collaboration/scripts/fetch-literature.py` の引数と `--list` の一覧、 WebFetch の番号) と手元の PDF (Read・curl の書き先・WebFetch の保存先・メールの添付を保存した先・取り込み口・検査のための写しの元・PDF を読む道具 〔`fitz.open`・`pdftotext` など〕 に渡した path。 引用符の中の空白・括弧を含む path と、 空白を逃がした path も 1 つの path として読む) を 1 件ずつ、 repo に保存あり (✅) / repo の dropbox-refs を通る共有の置き場 (✅、 git の外と分かる印 = [`dropbox-refs.md`](dropbox-refs.md)) / 保存なし (⚠️) / もう無い (❌) で出す。 ✅ でないものは 1 の表の [#fetched-originals](#fetched-originals) の行で決める。 試験の材料の文字列 (python の文字列の中の command) も path として並ぶことがある = 1 件ずつ読む |
+| 打った command・commit | `python3 scripts/search-agent-transcripts.py --session <id8> --tool-runs --regex '<語>'` (例 = `git commit`。 2 回以上打った command は 1 の表の「再利用できる script」 の候補) |
+| agent の報告 | 0.5 の表の 1 行目 |
+| <a id="reply-knowledge"></a>研究の中身 | `python3 scripts/session-reply-knowledge-report.py <id8>` = 読む範囲の一覧: 文脈圧縮の要約が「未決」 と書いた項目 (S)・user の問いとその turn の返事 (Q)・圧縮より前の、 問いでない依頼への返事 (R)。 ⏪ = 圧縮より前 (context に無い、 全文 = `--show <id>`)。 1 件ずつ読み、 返事に書いた計算結果・導出・読み・見積もり・否定的な結果・「確かめていない」 の一覧と、 agent の報告の検算済み・未検証の一覧を拾って記録する (返事にしか無いものは session が終わると消える)。 一覧の外の返事 (圧縮の後の、 問いでない依頼への返事) は context で読む (締めを渡された worker の context には無い = `--delegated` で P として並べる、 [#delegated-reply-knowledge-check](#delegated-reply-knowledge-check))。 終わったら 1 件ずつの処分 (記録済み / 足した / 記録しない + 根拠の `path:行` か `<repo>@<commit>`、 記録しないなら理由) を file に書き、 `--check <file>` を通す。 照合は根拠の行を候補の隣に出す = 「直していない」 の項目に、 その話を扱わないと書いた行を根拠に挙げるような食い違いが見える (「記録済み」 の根拠の行が未決の書き方なら ⚠️ が付く = その項目を読み直す)。 `/wrap` の turn では Stop hook がこの照合の通過を確かめる (配線されている環境) |
+| 考え方 (メタの知見) | 同じ一覧 (Q の返事に判断の理由・捨てた案が出やすい) と context を読み、 返事に書いた比較・判断の理由・捨てた案とその理由・壊れ方の推論 (なぜ起きたか) と、 user が述べた考え方・好みを拾う。 user の分は言葉のまま。 処分は上の行の file に一緒に書く |
+
+- 拾った user の訂正は、 1 の表の「user の訂正」 の行どおり、 訂正された規則の文を記録にある user の言葉で言い直す。
+- <a id="numbers-not-recorded"></a>**締めの道具の 🔢 の行は、 研究の中身の行の入力にする** — `session-scripts-report.py` と Codex の inventory が、 実行出力と記録を照合した候補。拾い方・探す記録・丸め・解釈の限界の正本 = [`scripts/lib/output_numbers.py`](../scripts/lib/output_numbers.py) 冒頭。
+  1 件ずつ、 note に書く (数値を出した code も根拠として隣に置く) か、 書かない理由 (置き換えた後の値が記録にある、 形式の確かめだけ) を報告に書く。
+  向きは `session-claims-report.py` の逆 (あちらは記録に書いた主張に根拠の code が無いもの、 こちらは code が出した数値が記録に無いもの) = 両方を回す。
+  code が「保存済み (✅)」 でも、 その code が出した数値を記録に書いたとは限らない (実測: code は残したのに、 code が出した計算結果を note に書かずに締めた)。
+
+## <a id="collect-from-delegates"></a>0.5 委ねた先から集める (agent・子 session・別 session への依頼)
+
+委ねた先の報告は user に見えず、 委ねた側が拾わないとどこにも残らない。 subagent の口は、 子が自分で締めを回さない分がここに積もる = 成果物と知見が残る仕事は、 最初から自分で締められる session に渡す ([multi-session-coordination.md#self-closing-delegate](multi-session-coordination.md#self-closing-delegate))。 5 つの口を全部見る (委ねられた側として引き受けた依頼も含む)。
+
+| 口 | 見る場所 |
+|---|---|
+| この session の agent (subagent、 前景も background も、 Workflow tool が起こした agent も = 記録は `subagents/workflows/<run>/`) | **context にあっても** `python3 scripts/subagent-reports.py <id8> --max-chars 0` で記録から引き直す (Workflow の agent は数百本になる = `--json` で書いた file の一覧を取り、 repo の外 〔一時 dir〕 に書いた検算の script・報告を記録の隣へ写す。 一時 dir から消えた分は `replay-session-scripts.py` が agent の記録からも戻す。 実測: 道具が Workflow の agent を数えず 0 件と出し、 記録が根拠に引く script が一時 dir にしか無かった)。 出るもの = 受け渡しの報告の全部 (再開した agent は再開のたびに 1 本 = 最後の 1 本だけ読むと前の回の発見が落ちる) と、 その agent が書いた file の一覧 (= 「二重に上げない」 の照合と上げ漏れの点検に使う)。 0 件 = agent を使っていない、 見た dir も出る |
+| この session が共有の掲示板に出した依頼 (子 session・別 vendor の agent・動いている別 session) | 掲示板の道具 (engine = `ai-collaboration/board/board.py`、 契約 = `ai-collaboration/board/CONTRACT.md`) の `inbox --sync` の検収待ち・返事 → `show --request <id>` で提出物。 検収待ちは先に検収 (accept / revise) する |
+| この session が worker として引き受けた依頼 | 同じ `inbox --sync` で、 引き受けた request を全部 `submit` したか (成果物の path + commit)。 出していなければ出し、 出せないなら理由を note に書く |
+| Bash から起こした worker (headless の `claude -p` / `codex exec` と、 Codex アプリに出る起動の道具 `codex-app-launch.py start` / `continue` = 掲示板がこの道具で起こした Codex の worker も。 封じた sandbox の盲検 reviewer を含む) | `python3 scripts/headless-worker-reports.py <id8> --max-chars 0` で起動を記録から数え上げる (他の口には現れない)。 実行位置・注入記録・起動の出力の thread id を持つ候補と、 引用や未対応構文の文字列候補は別の件数 = 文字列候補は元の tool call を確認する。 出るもの = 起動ごとの作業 dir・model・effort、 記録の約束の根拠、 作業 dir の成果物 (HANDOFF・結果・教訓候補) の本文、 worker が書いた script の一覧、 worker 自身の会話記録の場所 (Codex アプリの起動は thread の rollout)。 起動の道具の起動文には記録の約束が自動では入らない = 起動文 file か sandbox の AGENTS.md に書いてあるかを見る。 sandbox なら一覧の「回収:」 の行 (sandbox の外の台帳から 未 / 済 / 済の後に増えた) で受領がまだかを確かめ、 未か増えたなら `ai-collaboration/scripts/make-review-sandbox.py collect` → `inspect-review-sandbox.py receipt`。 この session が起こしていない sandbox (本人がアプリで起こした回・別の session の回) は一覧に出ないので、 root の全体を `make-review-sandbox.py status` で見る。 走らせ直した回 (同じ dir に起動が 2 件以上、 `continue` を含む) は全部の回を見る。 worker の会話記録が分かれば、 file にならなかった code も見る: Claude なら `session-scripts-report.py <worker の id>` (harness の scratchpad に書いた file と、 heredoc・`-c` で流した code) と `replay-session-scripts.py <id> --out <受領の dir>/recovered/`、 Codex なら `codex-wrap-inventory.py <thread id> --section commands --max-chars 0` で `/tmp`・`$TMPDIR` への書き込みと流した code を探す。 結果に効いたものは受領の dir に file で置く (実測: reviewer が scratchpad に書いた code は後で disk から消え、 会話記録にだけ残った) |
+| Bash から起こした背景の CLI session (`claude --bg`。 掲示板の起動の `--launch` も同じ) | 上の行の道具は `claude -p` / `codex exec` / `codex-app-launch.py` だけを数え、 `claude --bg` を 0 件と出す (実測)。 `search-agent-transcripts.py --session <id8> --tool-runs --regex 'claude[^\n]*--bg\|backgrounded'` で起動と、 出力の `backgrounded · <id>` の id を拾い (file の編集の中身にも当たる = Bash の command の行だけを読む)、 掲示板の依頼なら 2 行目の口で提出を、 そうでなければ `search-agent-transcripts.py --session <その id> --role any --regex .` で報告を読む |
+| file や token で受け渡す子 (掲示板に出さない区分の依頼) | spec に書いた決まった path の成果物と、 受領の印 (受け取りの道具 = [`scripts/surface-spawn-results.py`](../scripts/surface-spawn-results.py)。 引数なし = 未受領の marker だけ、 受領した turn で `--consume <token>`。 marker の dir は個人層の shim か `CLAUDE_SPAWN_RESULTS_DIR` で渡す) |
+
+拾ったものの扱い:
+
+- **報告は検証前の主張** — 正本 (特に層1) に書く前に、 報告が指す commit・file・出力を 1 回見て裏を取る。 裏が取れないものは「未確認」 と書いて queue。
+- **子がすでに上げたものは二重に上げない** — 子の repo の `git log` を先に見る。 子の hoist が公開層の境界 (1 の ⚠️) を破っていたら直す。
+- <a id="live-child-hoists-own-findings"></a>**まだ動いている子の file には触らず、 子の発見は子の締めで上げさせる** (並列作業 = 事故の条件)。 親は子の報告・提出物に書かれた手順・壊れ方・規則を、 自分で正本 (特に層1) に上げない。
+  上げる前の検証に要るもの (子がその場で書いた code・試した経路・数値の出どころ) は子の会話記録にしか無く、 親が 0.3 の道具を自分の id で回しても出ない (実測: 親が子の報告から規則を先に層1 に上げた後、 子の締めで、 子が使い捨ての code で済ませていた読み方に既存の道具があり、 その道具が壊れていたことと、 根拠の code が file に無かったことが見つかった)。
+  親の持ち場は 2 つ: (1) 検収 (accept) の時点で、 報告の主張を再現できる command で 1 回裏を取る ([`multi-session-coordination.md#review-handoff`](multi-session-coordination.md#review-handoff)) (2) 子の締めの後に、 発見が正本に上がったかを子の commit で確かめる (上がっていなければ子に 1 行頼む)。
+  相手に届く経路 (`SendMessage` など) があれば「終わったら締めを」 と 1 行頼み、 無ければ queue。 子がもう居ない (落ちた・閉じた) ときだけ、 親が子の記録を引いて (`search-agent-transcripts.py <request id か role id> --role any`、 `session-scripts-report.py <子の id8>`) 自分で上げる。
+- **機密の区分を引き継ぐ** — 掲示板に出さない区分の依頼・機密フォルダの成果は中身を上げない (公開層へは方法だけ。 区分の正本 = 掲示板の契約 `ai-collaboration/board/CONTRACT.md` の Source-classification gate)。
+- 子 session の transcript は `search-agent-transcripts.py <request id か role id> --role any` で引ける (報告に書かれなかった壊れ方・user の訂正を拾うとき)。 この session の agent の記録も `--session <id8> --role any '<語>'` で引ける (agent の発言は `assistant(agent)`、 親が渡した指示は `parent` = `--role user` には入らない)。
+- ⚠️ **agent の「考え中」 は記録に中身が残らない** (実測: すべて空) = agent が考えたこと (捨てた案・途中で気づいた壊れ方・確かめていないこと) は、 報告か成果物に書かれた分しか後から引けない。 **書かせるのは委ねる瞬間** (締めの時点では agent はもう考え終わっている): Agent tool への委任は hook [`delegation-record-clause.py`](../hooks/delegation-record-clause.py) が指示の末尾に約束の段を自動で足し、 掲示板の依頼と別 session への依頼は spec に書く。 headless の起動は hook [`headless-record-clause-nudge.py`](../hooks/headless-record-clause-nudge.py) の自動注入経路と sandbox の HANDOFF 要件を確かめる ([`multi-session-coordination.md#worker-record-clause`](multi-session-coordination.md#worker-record-clause))。 締めでは報告と成果物のその段 (捨てた案・途中の発見・未検証) を読み、 1 の表で置き場所を決める。
+
+## <a id="any-os"></a>0.9 どの OS でも同じに動かす
+
+- 集める道具は全部 Python (標準 library だけ) なので、 macOS・Linux・Windows (Git Bash / PowerShell) で同じ command が通る。
+  shell の glob・`find`・`sed -i` のような OS で振る舞いが違う書き方を、 この手順や skill に足さない。
+- `python3` が動かないとき: Windows は Store の偽物が「Python」 とだけ出して成功で終わる → `py -3` で同じ command ([`windows-msys.md#python3-missing-store-stub`](windows-msys.md#python3-missing-store-stub))。
+  Mac で終了値 69 なら Xcode のライセンス未同意 ([`shell-env.md#system-python3-is-xcode-gated`](shell-env.md#system-python3-is-xcode-gated))。
+- skill を link でなく copy で置く環境 (Windows など) では、 repo の skill を直しても今の session は古い copy を読んでいることがある。
+  疑いがあれば repo の SKILL.md とこの doc を直接読む (copy は次の session 開始で作り直される作りにしておく)。
+
+## <a id="codex"></a>0.95 Codex で回すとき
+
+明示的に選んだ個人層の正本skillをCodexにも登録し、この手順を参照する。手順の写しは作らない。
+登録名がwrapの場合、アプリの `/wrap` skill選択、`$wrap`、個人層の自然文triggerから同じ正本skillへ入る。slash selectorの画面描画は利用環境で別に確認する。
+配置と不足の検出は、選択済みpersonal layerの `codex/skills.json` と層1のCodex installer・SessionStart・auditが持つ。
+技術上の正本 = [`../codex/PARITY.md#wrap-workflow-integration`](../codex/PARITY.md#wrap-workflow-integration)。
+
+| 口 | Codexで行うこと |
+|---|---|
+| 0.3の会話・道具・変更file | SessionStartで渡された**完全なsession ID**を使い、`python3 scripts/codex-wrap-inventory.py <full-id> --section messages --max-chars 0` と `--section commands` を読む。長い1件は `--call-id <id> --max-chars 0`。利用者向けに公開された `reasoning.summary` も回収し、要約が提供されない場合を明示する。非公開の内部思考・raw content・暗号化された思考本文は回収しない。userMessageという搬送上のラベルを本人の承認とは扱わない |
+| 0.5のnative/hosted subagent、headless worker | 同じ道具の `--section workers --max-chars 0`。再開した回の報告も全件。APIで結び付くnative子と、worker側hookの観測したturn・Claudeログ範囲を読む。型の不明・履歴の不在・ephemeral・環境が消された起動はUNAVAILABLEを確認し、元のcommand出力と明示された成果物も読む。0件と同一視しない |
+| hostedのcollaboration tool | 利用可能なら `collaboration.list_agents` でこの親のtreeを照合する。native hookの発火を仮定せず、委ねるpromptに最初から記録条項を入れる。報告が現在のcontextに無ければ、inventoryのagentThreadIdでnative readerへ、または記録したtool input/resultを確認する。回収不能は理由を残す |
+| 掲示板 | `--agent codex --session <native-id>` に加え、inventoryのboard routeが示すこのsessionで使ったrole aliasもinbox/showで同期する。閉じた依頼を未処理へ戻さず、提出・検収を別々に確かめる |
+| 別sessionのapp tool | inventoryのother-session routeにある作成・fork・送信の結果から、実際のthreadId/hostIdで `read_thread` 等を使う。clientThreadIdの段階は未解決として追う。先行するforkの写しを今回の発見に数えない |
+| token方式 | inventoryにあるこのsessionの `--record` / tokenだけを0.5の道具で照合する。他sessionのmarkerを消費しない |
+
+- `--section summary` / `--section commands` の 🔢 も、 [0.3 の数値の候補](#numbers-not-recorded)として研究の中身の拾い出しに使う。
+- スクリプトは、圧縮前と取得できた子を含む inventory JSON を `python3 scripts/session-scripts-report.py --inventory <inventory.json> --json` に渡す。一行のコードも呼び出し ID から確認し、候補 ID ごとに保存先か除外理由を記録する。同じ入力に `--check-dispositions <照合表.json>` を加えて記入漏れを確かめる。結論の根拠に使ったコードは [#evidence-scripts](#evidence-scripts) に従って保存する。抽出器が扱えない道具や取得不能な記録は原記録・成果物と照らし、確認できない範囲を報告する。
+- 委ねるpromptには3項目を最初から入れる。Codexのnative子とCodex環境を引き継ぐheadless子にはworker側hookも渡す。
+  親のCLIをrunnerで包んで許可判定を変える方式は使わない。通常のCLI入力を保ち、hookを止めるflagや環境の消去がある場合は
+  到達を仮定せず記録・報告から確かめる。実装と機械別の限界は上のPARITYへ。
+- worker観測を回収して正本へ記録した後に、`codex-wrap-inventory.py <full-id> --mark-collected <記録先またはcommit>`。
+  `--prune-collected` は回収済みのmetadataだけを保存期間後に整理する。未回収のものは残す。
+- inventoryはCodexのsandbox (workspace-write) の中では動かない: 起動するapp-serverが `CODEX_HOME` に状態を書けず、起動直後に終わる (実測)。inventoryのcommandは最初からsandboxの外での実行 (承認を求める実行) で回す。その場合の失敗には、道具が原因と直し方を出す。
+- APIが使えない場合は `search-agent-transcripts.py --agent codex --session <id>` と `--tool-runs` を補助にする。
+  Claude専用readerの0件をCodexの不在証明にしない。未確認の口を明記する。
+- 掲示板から来た作業で保護対象の候補ができたら、対象・差分・影響をこのchatでまとめて提示し、本人の具体的な裁定を使う。
+  案内文・他agentの引用・「続けて」等を、まだ見せていない候補の承認として代用しない。承認の照合規則は変更しない。
+- 個人overlayや宣言を編集したMacでも、installerのrefreshを同じturnで当てる。pullを待つ手順は残さない。
+
+## <a id="placement"></a>1. 何をどの層へ
+
+1 件ずつ、 4 層のゲートで置き場所を決める (正本 = [`../docs/personal-layer.md`](../docs/personal-layer.md))。
+表の「個人層」 の具体的な file (作業の規律・文体・文献台帳・経路台帳・Office の運用) は、 個人層の入口 (CLAUDE.md の読み込み必須の表) から辿る = skill に一覧を写さない (写すと入口の表と食い違う)。
+
+| 見つけたもの | 置き場所 |
+|---|---|
+| 誰にでも効く手順・道具の壊れ方・一般則 | 層1 `conventions/` (AI 協働の検証系は `ai-collaboration/`)。 壊れ方のエラー文が決まっているなら、 その文を [`hooks/known-errors.json`](../hooks/known-errors.json) にも 1 件足す (次に同じエラーが出た瞬間に節が出る = [`debugging-discipline.md#known-error-lookup`](debugging-discipline.md#known-error-lookup)) |
+| 規約・仕組みの設計の考え方 (なぜその形にしたか、 効かなかった形とその理由) | 層1 [`../docs/convention-design-principles.md`](../docs/convention-design-principles.md) (節を足したら同じ dir の `convention-design-principles.index.yaml` に slug)。 個人の作業の規律は個人層 |
+| 個人の流儀・個人の事実・machine 別の差 | 個人層 (該当の規約 file)。 user が述べた考え方・好み (研究の趣味・文体を含む) も該当の規約 file に言葉のまま |
+| その project の決定・手順 | その repo の DESIGN / CLAUDE / docs (判断の理由と捨てた案も = 返事にしか無い比較を残す) |
+| 研究の中身 (計算結果・導出・物理の読み・見積もり・否定的な結果・検算した範囲と未検証の一覧・残る課題の評価) | その研究 project の repo の note (数値は出した script と出力を根拠として同じ repo に)。 **会話の返事にしか無いものを 1 件も残さない**。 確かめていない読みは「未導出」「未検算」 と書いて同じ note に。 user が「やらない」 と決めた検証も言葉のまま記録する。 note は repo の索引 (README) と DESIGN から指す。 **agent の読みと著者の判断を分ける** = 著者の判断は発言のまま note の判断の節に ([`manuscript-value-triage.md`](manuscript-value-triage.md))。 2 つ以上の project に効く結果は、 出た project の note を正本にして他方の索引から指す (写さない)。 公開層に上げるのは方法だけ |
+| 研究の方法の教訓 (分野を問わない推論の罠・検算の手・記法の規律) | [`paper-audit.md`](paper-audit.md) (主張と推論の検査) / [`physics-notes.md`](physics-notes.md) (ノートの書き方) / `ai-collaboration/conventions/physics-verification-cycle.md` (検証の仕組み) の該当節。 方法だけ = 結果・数値・project 名を持ち込まない |
+| 文献についての知見 (その論文が何を示したか、 受け止められ方、 どの project に効くか) | 個人層の文献台帳 |
+| <a id="fetched-originals"></a>取得して読んだ原典の file (論文・資料の PDF。 頁を読んだものも、 語を検索しただけのものも) | 判定・計算・引用の根拠に使ったものは全部、 その研究 project の repo の原物の置き場へ。 版を固定して取り直し (arXiv は vN)、 取り込む前に `scripts/downloaded-file-scan.py` で構造を検査し、 note に file 名・版・sha256 を書く (共有フォルダの写しは注釈が付くと sha256 が変わる = 照合の仕方は [`dropbox-refs.md#annotated-copy-hash`](dropbox-refs.md#annotated-copy-hash))。 「頁を読んだものだけ」 と線を引かない = 語の検索で除外した論文も判定の根拠で、 一時 dir と一緒に消えると判定をだれも確かめ直せない (実測)。 保存しないのは 2 つ = 本文を取得していないもの (要旨だけで判定。 note に「保存していないもの」 と書く) と、 依頼が repo に原物を入れないと決めているもの (番号・版・sha256・読み方の表を note の隣に置く = 同じ版を取り直して照合できる)。 公開 repo には第三者の原典を置かない |
+| <a id="promote-dated-conclusions"></a>日付つきの記録 (調査・検品・受領の note) にだけ書いた、 後まで効く結論 | その project の生きている正本 (living note・索引・文献台帳の notes) へ上げ、 日付つきの記録はその根拠として指す。 日付つきの記録は次に正本を引く人の経路に無い = そこに置いたままの結論は、 次に同じ問いを一から調べ直させる (実測)。 <a id="dated-open-items-go-stale"></a>**同じ記録の「未解決」「本人の判断待ち」 の一覧も同じ扱いが要る** — 一覧は carrier ではないので、 項目は別の場所 (TODO・掲示板・他の session) で決着し、 記録だけが未決と言い続ける。 その lineage をもう一度開く turn (締め・引き継ぎ・再読) で、 1 項目ずつ現在地を確かめて同じ記録に決着を書き戻し、 残る項目は carrier を名指しする (実測: 締めで読み直したとき、 一覧の全項目が他所で決着していた) |
+| Office の様式・紙の書類で分かった壊れ方・訂正・窓口の指摘 | 一般形 = [`office-automation.md`](office-automation.md) (Office の罠) / [`form-case-pipeline.md`](form-case-pipeline.md) (様式の案件の仕組み)、 機械と運用の差 = 個人層、 様式ごとの規則 = 案件の instance の spec と規則の doc。 道具 (build・検査) で止められる形にできるなら、 文を足すより先にそうする |
+| user の訂正 | 訂正された規則の文そのものを**言い直す** (追記して古い文と同居させない) |
+| その場で 2 回以上打った command・使い捨て script | 再利用できる script にして正しい層の `scripts/` へ (冒頭に説明、 生成索引を作り直す) |
+| <a id="evidence-scripts"></a>その場で書いた script で、 file として残っていないもの (0.3 の `session-scripts-report.py` の ✅ 以外) | 1 本ずつ決める: (a) **出力を記録・note・規約・報告の根拠に使った** (「実測: …」 と書いた、 数値を写した、 結論の理由にした) → 1 回きりでも、 その記録の隣に file として置き、 記録から指す (根拠の再現の手段が記録と一緒に残る)。 置いた file の拡張子が global の gitignore に掛かる (`*.out`・`*.log`) と、 dir ごとの `git add` は黙って飛ばす = 足した後に `git status --short --ignored -- <dir>` で確かめる ([`expensive-intermediate-artifacts.md#global-ignore-silent-skip`](expensive-intermediate-artifacts.md#global-ignore-silent-skip))。 <a id="transcript-output-copies"></a>code が出した出力 (会話記録の tool_result) は、 記録の隣に写さないのを既定にする = 根拠に使った数・行を、 どの command の出力かを添えて記録の本文に書き、 出力そのものは会話記録に残す (会話記録を起動時に消す設定 〔`cleanupPeriodDays`〕 の機では、 記録に書いた数・行と、 隣に置いた code を回し直す手段が残る)。 道具が会話記録を経ずに file に書いた出力のうち、 path・行番号・件数・道具の決まった文だけで、 当たった行の本文・窓を持たないものは、 会話記録の写しではないので記録の隣に置ける (今の台帳を索引にする走査のように、 回し直しても同じ数が出ない結果が残る。 置く前に、 同じ検出器か開いて読んで、 本文・窓が無いことを確かめる)。 記録の本文に書き切れない会話記録の出力を写すときは、 根拠に要る行だけを抜く = 会話記録を語で広く拾った出力は、 session の開始に注入・Read した一覧 (期限・メールの件名・台帳の題) をほぼ必ず含み、 git-crypt は path で守るだけなので、 暗号化した台帳から来た文が平文の path にそのまま移る。 置く前に置く先の区画 (`git check-attr filter -- <置く path>`) を元の置き場と比べ、 字数が他より大きい出力は開いて読む (実測: 一括で書いた出力の 1 本だけが他の数倍の字数で、 開かずに commit・push した。 一般則 = [`confidential-repo-boundary.md#decrypted-echo`](confidential-repo-boundary.md#decrypted-echo))。 守りの道具 (guard) を名前で読み込む code は、 その道具の配線として file 全体が守られ (判定は code の file の文字に guard の名があるかで、 読み込まずに説明の文やコメントに名を書いただけの code も配線と数える = 実測)、 記録の隣に置く書き込みに本人の裁定が要る ([`agent-rule-ownership.md`](agent-rule-ownership.md) の表の「個々の検査実装」 の行、 実測) = 裁定を取るまでは、 code の所在 (会話記録の session id と、 下の戻す command) とまだ置いていない理由を同じ dir に書き、 根拠の数・行は記録の本文に書く (名前を隠す形に書き換えて置くと、 守りを避ける形になる)。 一時 dir から消えていたら (❌ もう無い) `python3 scripts/replay-session-scripts.py <id8> --out <記録の隣の dir> <名前>` で会話記録の Write / Edit から戻す (Bash で直した分は戻らない = 道具が印を出すので、 置く前に読んで直す)。 file に書かずに流した code (⚠️ 流しただけで file に無い) は同じ道具の `--bash-match <名前>=<目印>` で、 目印を含む Bash の command をそのまま <名前> に書き出す (目印は path や変数名のような素の語 = 引用符・改行を含む目印は記録の escape と合わないことがある。 目印を含む後の command も `.2` 以降に出るので、 置く前に読む) (b) 他でも使える → 上の行 (c) 根拠に使っていない一度きり (形式の確かめ・file を直すための置換) → 置かず、 報告に「置かない・理由」 を 1 行 |
+| <a id="unbacked-checks"></a>検算・照合の主張で、 script も出力も無いもの (頭の中で計算して「一致」「再現」 と書いた) | 記録に残すなら、 その場で script にして回し、 記録の隣に置いて記録から指す (通らなければ主張を直す)。 手計算は記録の根拠にならない = 書いた本人にも後から再現できない。 置かないなら主張を記録と返事から消す。 書く瞬間の規則: 受領・検品の記録に「独立に確かめた」 と書く前に script を書く (実測: 受領の記録に手計算の検算を書き、 script にしたら道具の側の偽の失敗と本物の一致が分かれた) |
+| agent・worker が書いた script (subagent の成果物、 sandbox の `checks/`・`scratch/` と規則の外 = 受領の dir の `outside-rules/`、 子 session の使い捨て) | 一覧を道具で出し (`subagent-reports.py` / `headless-worker-reports.py`)、 1 本ずつ決める: (a) その研究・案件に固有 → その project の repo に置き、 索引から指す。 独立な実装であること自体が証拠なので、 起票側の code に混ぜず元の形で残す (b) 分野や案件を問わず使える → 一般化して正しい層の `scripts/` へ (selftest をつけ、 元の script を動かして同じ値が出ることを確かめてから。 公開層へは下の ⚠️ の境界を当てる) (c) 一度きりで再現に要らない → 置かない、 と報告に書く。 worker の HANDOFF が各 script の汎用性を書いていれば、 判断の入力にする (検証前の主張として) |
+| 外部 service の新しい経路 | 個人層の経路台帳 ([`machine-route-first.md`](machine-route-first.md)) |
+
+- **「なるべく上層に」 = 1 件を分けて置く** — 仕組み・壊れ方・方法の一般形を上げられる一番上の層へ、 固有の事例 (名前・数値・日付) は下の層に残して一般形を指す。
+  丸ごと 1 層に置かない (上へ丸ごとは漏洩、 下へ丸ごとは埋没)。 下の ⚠️ の「迷ったら書かない」 は事例の側にかかる。 一般形は境界を通る形に書いて上げる。
+- <a id="protected-files-need-ruling"></a>**規則・検査・hook・設定の保護された file の変更は、 締めの中でも締めの外と同じ線で裁定の要否が決まる** (線の正本 = [`agent-rule-ownership.md#additive-and-free-zones`](agent-rule-ownership.md#additive-and-free-zones) の B)。 B に当たる変更 = git repo の中の規則の文書への変更で、 緩和の語を足さず・既存の文を隠さず・見出しで過去のものにせず・その会話で agent が断った件の規則に触れないもの は、 その場で当て、 入れた turn の返事に何を変えたかを書く。 B に当たらない変更 (設定・hook・repo の外の file、 緩和の語か隠しを含む変更、 断った件の規則の変更 = guard が見逃した場合も) は、 直す前に候補の全文を一時 dir に作り、 diff を本人に見せ、 承認の発言を記録してから当てる (記録と適用の道具・判定の正本 = [`agent-rule-ownership.md`](agent-rule-ownership.md))。 guard は編集の tool と commit の門で働き、 shell で書いた変更と repo の外の file は見ない = 「guard が止めなかった」 は B に当たる証拠にならない。 候補の全文を repo に置いて別の窓に渡すときは、 規則の文書と同じ形の path (`conventions/` という名の dir の下の `.md`) を使わず、 拡張子 `.txt` の file にする = その形のままだと、 候補そのものが規則の文書の新設として commit の門で止まり、 当てる先の場所に合わせた相対 link も今の場所では切れて link の検査に当たる (実測)。 候補の全文が lock の印 (`agent-authority:begin` の区画か `agent-authority:file` の印) を含むと、 名前と拡張子を変えても、 印を持つ新しい file として commit の門で止まる (実測) = 全文でなく、 当てる先の基準の commit に当てる差分 (`diff -u`) で置き、 差分を当てた全文の SHA-256 と戻し方 (基準の版を `git archive <commit> <path>` で取り出して `patch -p1`) を隣の記録に書く。 置く前に、 差分の中の印の語を数えて 0 なのと、 差分を当て直した全文の SHA-256 が候補と同じなのを確かめる。 新しい規約の file は、 頭の doc-meta の区画 (file の先頭の HTML コメントで、 中の行が `when:`・`category:`・`summary:` だけ) を門が隠しと数えないので、 緩和の語と隠しが無く入口の文書でなければ commit の門も通る (区画の中の緩和の語は数える。 前は区画のコメントの印を隠しと読み、 どの新しい規約の file も commit の門で本人の承認を求められていた = 実測)。
+  guard が止める変更を先に書いてから commit すると commit の gate で止まり、 同じ commit に入れた別の file も止まる (実測)。 下の [#upstream-pr](#upstream-pr) の「1 件ごとに聞かない」 は B に当たらない変更には掛からない。
+- **2 回目なら仕組みにするかを決める** — 同じ壊れ方・同じ訂正がこの session で 2 回目なら、 文を足して終えず、
+  検出器・hook・script にするかを決める。 その場で作らないなら、 理由と一緒に plan か TODO に積む。
+
+⚠️ **公開層 (層1・公開 repo) に書く 1 文ごとに境界を当てる** — 判定の問い =
+「この一文から、 owner または特定の第三者について、 いつ・何を・何件・どうなったかが分かるか」。
+分かるなら書かない (来歴は「実測」 とだけ)。 迷ったら書かない。 境界の全文 = [`../CLAUDE.md#owner-activity-facts`](../CLAUDE.md#owner-activity-facts) / [`#non-identifier-content-leak`](../CLAUDE.md#non-identifier-content-leak) / [`#third-party-facts`](../CLAUDE.md#third-party-facts)。
+commit 前に `git diff --cached` を 1 回読み、 `scripts/check-activity-facts.py` (Tier E) の WARN 行を読む。
+
+## <a id="concurrent"></a>1.5 同時に走る締めと分担する (掲示板の touch)
+
+締めが同じ時間帯に何本も走ると、 同じ共有 file (入口の CLAUDE.md・生成索引・層1 の規約) で互いの hunk が混ざり、
+同じ知見が別々の file に二重に上がる。 **書き始める前に、 書く file を掲示板に宣言する**。 先に宣言した側がその file を持つ
+(一般則 = [`multi-session-coordination.md#concurrent-closing-sweeps`](multi-session-coordination.md#concurrent-closing-sweeps)、 道具 = 掲示板の engine の `touching` / `touch` / `untouch`)。
+
+1. **他の締めを見る** — `board.py touching --sync --thread <その日の締めの thread>` で、 同じ知見を別の file に上げようとしている相手がいないか題の行を読む。
+2. **宣言する** — 1 の表で決めた置き場所を全部 (再生成する索引・README・正本の登録簿も) `touch --path …` に並べ、 `--summary` に題を 1 行、
+   `--session-name` に相手が message を送れるこの session の名前を書く。
+   - 🟢 = 書いてよい。 🔴 = 先に宣言した締めが持っている。 その file には書かない:
+     同じ知見なら自分では書かず、 足りない根拠だけを持ち主に渡す。
+     別の知見なら `touching --path <file> --wait` を background で回し、 起きたら file を読み直してから書く
+     (並列中の「まだ無い」 は数分で腐る = [`multi-session-coordination.md#absence-check-staleness`](multi-session-coordination.md#absence-check-staleness))。
+   - 持ち主が居ない (落ちた session) なら待たない。 居るかは `python3 scripts/session-model.py <id>` の status で見る (`(not live)` なら居ない。 掲示板の 🔴 と手放すときの「次の持ち主」 の行は、 持ち主が終わっていても出る = 実測)。 file を読み直し、 相手の未 commit の hunk が混ざっていれば
+     [`multi-session-coordination.md#temp-index-commit`](multi-session-coordination.md#temp-index-commit) で自分の分だけを commit する。
+   - 途中で書く file が増えたら、 書く前に同じ command で足す。
+3. **手放す** — 4 の push の後に、 commit を `untouch --reference '<repo>@<commit>'` に並べて手放す。
+   - 「次の持ち主 = X」 と出たら X に 1 行送る (掲示板は push しない)。
+   - 「最後の 1 本」 と出たら、 その日の締め全員の分の横断を 1 回だけ回す。 生成物は clean な tree で `--check`
+     ([`multi-session-coordination.md#regenerated-docs-foreign-untracked`](multi-session-coordination.md#regenerated-docs-foreign-untracked))、 壊れた link・消した語の残りを確かめる。
+
+## <a id="sot-and-refs"></a>2. 正本と参照
+
+- 同じ内容は 1 か所 (正本) にだけ書き、 他は pointer にする。 「正本は X」 と書いたら正本の登録簿に登録する (登録簿を持つ repo)。
+- **正本を README・SESSION に置かない** — 正本の置き場所は CLAUDE.md / DESIGN.md / conventions / 台帳 / 案件の note / script の冒頭。
+  README は入口の link か生成した索引、 SESSION は案件ごとの現在地 1〜2 行と正本への link だけ。
+  「README / SESSION が正本」 と書いた行を見つけたら、 中身を正本へ移し、 その行は移した先を正本と書き直す
+  (公開 repo の build / deploy の手順は README に利用者向けの写しを残してよいが、 正本は CLAUDE.md)。
+  契約 = [`../CONVENTIONS.md#session-no-durable-record`](../CONVENTIONS.md#session-no-durable-record) / [`#readme-style`](../CONVENTIONS.md#readme-style)、
+  gate に止められたときの直し方 = [`memory-file-slimming.md#session-shape-gate`](memory-file-slimming.md#session-shape-gate)。
+- 節を移した・名前を変えたら、 その節を指す参照を同じ commit で直す。
+- 生成物は手で直さず生成し直す。 手で書く file の一部だけが生成区画 (`AUTO-… BEGIN` と `END` の印で囲まれた区画) のときも同じで、 区画の中に足した文は次の作り直しで消える (実測 = 共有 repo に配る規則を区画に直接足して消えた)。 区画に入れたい規則は生成の元に足して作り直す: 本 repo に file を足した・doc-meta を変えたら `python3 scripts/generate-tree.py --write` (新しい file は `git add` の後) → `--check` が 0。 他の repo の生成索引も、 その repo の生成器で。
+- 道具の振る舞いを変えたら、 その道具を説明している doc (repo の CLAUDE.md・使い方の節・層1 規約) を全部直す。 grep は関係 repo 全体に
+  (Bash tool の素の `grep -r` は ignore された dir を飛ばす = `command grep -r`、 [`shell-env.md#bash-tool-grep-ignores-gitignore`](shell-env.md#bash-tool-grep-ignores-gitignore))。
+
+## <a id="session-todo"></a>3. SESSION・TODO
+
+- SESSION.md は案件ごとの現在地を**置き換える** (日付つきの節・commit hash・経緯を足さない。 中身の置き場所 = 2 の「正本を README・SESSION に置かない」)。
+- 動いた TODO は現在地の欄を上書きし、 期限と status を実態に合わせる (自分の番が残るなら「待ち」 にしない)。
+- 掲示板の依頼の状態 (誰の番か・閉じたか) を SESSION・入口の一覧・TODO に書く前も、 5 の報告と同じく `show --request <id> --sync` で読み直す (実測: 提出の後に相手が受け取って閉じていたのに、 手元の記憶から「相手の番」 と書いて commit し、 書き直しの commit が要った)。
+- メールを送った・受けたなら記録の道具で記録する。
+- <a id="deferrals"></a>この session が記録や返事に書いた先送り (「次に〜するとき」「後で」「推す = 〜 (次の機会に)」) は、 締めの中で今やるか、 期限つきの TODO・plan・掲示板の依頼に載せる。 記録の中の「次に〜とき」 は carrier ではない (次の session はその文を探さない)。 返事の中で自分に約束した先送り (「返事が来たら、 次にこの session で見たときに伝えます」) も同じで、 session は持ち主が閉じる = 待ちを運ぶのは session の外の carrier (新着を拾う surface・期限つき TODO) で、 返事ではその carrier を名指しする (実測)。 拾い方 = 0.3 の `session-claims-report.py` の B
+- 一時 dir (scratchpad・`/tmp`・desktop の side session が共有する notes の folder = 家族の session の archive で app が消す、 [`multi-session-coordination.md#side-session-notes-deleted-on-archive`](multi-session-coordination.md#side-session-notes-deleted-on-archive)) に置いた成果 (候補・証拠・出力) は、 残すなら repo に移して所在を正本に書き、 要らないなら消す (一時 dir は session の後にだれも見つけられない)。 掲示板の note・提出が一時 dir の path を指していれば、 repo の path に書き直す。 個人情報を含む複製 (記入済みの様式・刷った PDF) は必ず消す。
+
+## <a id="commit"></a>4. commit + push
+
+- repo ごとに `git fetch` → behind 0 を確かめ、 **`git commit -- <自分の path>`** (他 session の staged を巻き込まない)。
+  commit 前に `git diff -U0 -- <path> | grep -c '^@@'` で自分の分だけか数える ([`multi-session-coordination.md#staging-window-race`](multi-session-coordination.md#staging-window-race))。
+- 自分が触っていない dirty file (credential・他 session の作業) は commit しない。
+- push の後に 1.5 の 3 で手放す。
+
+## <a id="report"></a>5. 横断 sweep と報告
+
+- 最後の commit の後に 1 回、 error を見つけるつもりで横断を見る (変えた関数の他の呼び元、 消した語の残り、 壊れた link)。
+  壊れた link は手書きの検査を書かず道具で見る: `python3 scripts/fix-md-links.py --base <作業ルート> --files <変えた md> --list` (0 件なら `missing target: 0`)。
+- <a id="stop-own-watches"></a>**最終 message の前に、 この session の背景の作業を道具で数え、 要らなくなった見張りを止める**:
+  `python3 scripts/lib/session_background_tasks.py self` が、 生きている背景の作業 (Bash の背景・前景から背景へ移った command・Monitor。
+  subagent が仕掛けたものは誰のかを添える) を並べ、 見張りか (掲示板の `watch`・`touching --wait`、 照合の `--wait` / `--wait-due`、
+  起動の確かめの `--wait-first-turn`、 Monitor) と Monitor の残り秒を付ける。
+  - **締めの後に畳まれる session** (依頼元が archive する子・worker) は、 見張りを全部 `TaskStop <id>` で止め、 もう一度回して残っていないのを見てから終える。
+    掲示板の worker はこれを submit の後に回す。 submit の後は依頼元に message で知らせ、 submit の出力が見張りの 1 行を出したら、 依頼元が同じ機械で生きていても見張る
+    (判定を書くのが依頼元と別の検収係の session で、 submit の時点でだれもその役を引き受けていないと、 判定は掲示板にだけ書かれ message では届かない = 実測。
+    見張りの張り直しの検査 = [掲示板の契約](../../ai-collaboration/board/CONTRACT.md#codex-reach))。 依頼が閉じてから締めに入ったなら、 その見張りは終わっている = 数えて残りが無いのを見る
+  - **締めの後も続く session** (子を待つ親、 message を送れない相手 〔Codex・別の機械〕 と掲示板でやりとり中の session) は、 まだ答えを待っている見張り
+    (動いている子への `--wait` / `--wait-due`、 その相手への `watch` = [掲示板の契約](../../ai-collaboration/board/CONTRACT.md#codex-reach) で唯一の経路) を残し、
+    待ち終えた見張り (閉じた依頼・終わった子・用の済んだ Monitor) だけを止める。 残した見張りは名前を最終 message に書く (動いている間はこの session も畳めない)
+  - 見張りでない作業 (計算・長い検査) は止めずに、 最終 message と依頼元への報告に名前を書く (動いている間は畳めない)。 締めの中で新しい Monitor を仕掛けない
+  (1 回だけ待つなら、 待つ相手が終われば必ず終わる背景の Bash = [`shell-env.md#background-done-notice-before-exit`](shell-env.md#background-done-notice-before-exit))。
+  道具が数えられない (exit 2) ときは「数えられなかった」 と書き、 「無い」 と書かない。
+  なぜ: desktop app は session の背景の作業が生きている間はその session の archive を断り、 断りの文はどの作業かを言わない。
+  記憶で数えると漏れる (Monitor は turn が終わっても期限まで生き、 閉じた依頼に仕掛けた掲示板の `watch` は何時間も終わらない。
+  実測: 締めの後に残った見張りで親の archive が断られた。 締めの最中に仕掛けた Monitor も残った)
+- 最終 message に書くもの:
+  - 何を・どこへ移したか (repo と file の link、 1 行ずつ。 出所 = この session / agent / 子 session を添える)
+    - <a id="report-from-diff-stat"></a>**報告を書く前に、 作業の始点からの差分を点呼表にする**: repo ごとに `git diff --stat <始点の commit>..HEAD` を出し、 変えた file が 1 つずつ報告に入っているかを当てる。 依頼元や共同研究者に「やったこと」 を伝える file・便も同じ (実測: 記録の書き直しと規則の文書への節の追加が報告から漏れ、 本人に「漏れなく伝えた？」 と聞かれて見つかった)。 記憶から書いた報告は、 大きな変更だけを拾って周辺の変更を落とす
+  - 研究の中身を扱った session なら、 拾った知見の件数と置いた note (会話にしか無かったものを何件記録したか)。 考え方 (0.3 の表の行) も同じく件数と置き場所。
+    件数は [#reply-knowledge](#reply-knowledge) の照合の結果 (候補 N 件 = 記録済み a / 足した b / 記録しない c) から書く。 「足したものは無い」「すべて記録済み」 は照合が通った後に、 候補の件数と一緒にだけ書く (照合の前に書くと確かめていない不在の主張になる = 実測)
+  - その場で書いた script の一覧 (0.3 の道具) の ✅ 以外 1 本ずつの扱い (置いた先か、 置かない理由 = 1 の [#evidence-scripts](#evidence-scripts))
+  - `session-claims-report.py` の A (根拠の無い検算)・B (先送り)・C (漏れが無いの主張) を 1 行ずつどうしたか (script にした先・消した・やった・載せた carrier・照合の結果)
+  - `session-open-questions-report.py` の問いを 1 件ずつどうしたか (写した TODO・答えが出ていた・もう要らない)
+  - 2 回目の壊れ方・訂正があれば、 仕組みにしたか、 しなかった理由と積んだ先
+  - 委ねた先のうち、 まだ動いている・検収していない・裏が取れなかったもの。 掲示板の状態 (検収待ち・誰の番か) を書く直前に、 その request を `board.py show --request <id> --sync` で読み直す
+    (手元の checkout と数分前の表示は古い。 並列の session が検収役を移している・検収を済ませていることがある = 古い状態のまま「本人の一言が要る」 と報告し、 要らない判断を求めた実測がある)
+  - 見た範囲 / 見ていない範囲 (「完了」「✓ pass」 で締めない)
+  - 今回は上げずに queue したもの (理由と置き場所)
+  - 公開層に上げなかったもの (理由 = 1 の ⚠️ の境界のどれに当たるか)
+  - 他の締めに譲った・待った file (1.5 の 🔴) と、 その中身を誰に渡したか
+  - 背景の作業: 止めた見張りの task id と、 止めずに残した見張り・背景の作業の名前 ([#stop-own-watches](#stop-own-watches))
+  - 規則の文書を変えたことを記録する検査が書くよう求めた行があれば、 そのまま ([`agent-rule-ownership.md#additive-and-free-zones`](agent-rule-ownership.md#additive-and-free-zones))
+- ⚠️ <a id="leftovers-check"></a>**「残り」 に入れる前に、 その件がもう会話で決まっていないかを確かめる** — 「残り」 は今の状態 (済んでいない・送っていない) から組みがちで、
+  そうすると会話の中で扱いが出ていた件まで未決として戻り、 「残りもぜんぶやって」 で実行に回る (実測 = agent が「しなくてよい」 と勧めた件を残りに入れ、 実行しかけた)。 1 件ずつ:
+  1. **会話を引く** — その件についての user の言葉と、 agent の推奨とその後の user の反応を探す。 文脈圧縮の後は要約に残っていないことがあるので、 件の語で会話記録を引く (0.3 の道具)。
+  2. **user が言葉で決めていた** → 残りに入れない。 決定として記録先 (その件の TODO など) に user の言葉のまま書く。
+  3. **agent が勧め、 user が異を唱えずに次へ進んだ** → 推奨どおりに扱い、 残りには入れない。 報告では別枠に「推奨どおり〜 (違えば一言)」 と 1 行。
+     記録には user の決定としてでなく「推奨・異論なし」 と書く (黙っていたことを user の言葉にしない)。
+  4. **会話に出ていない** → 残りに入れる。 「残りを全部やって」 がかかるのはこの群だけ。
+  - 予防 = 勧めた turn で、 その件の記録に推奨を書いておく (後の一覧を記録から組める)。 決定の書き方の一般則 = [`actor-attribution.md#decision-state-at-record-time`](actor-attribution.md#decision-state-at-record-time)。
+
+## <a id="personal-skill"></a>`/wrap` skill — 誰でも使える版と、 個人の値
+
+- claude-config は誰でも使える `/wrap` を [`../skills/wrap/SKILL.md`](../skills/wrap/SKILL.md) に持つ (本文 = 「この doc を 0 から 5 まで順に」 + 誰にでも同じ値 + [#upstream-pr](#upstream-pr))。
+  配線 = [`../scripts/install-shared-skills.sh`](../scripts/install-shared-skills.sh) (Claude Code の `~/.claude/skills/` と Codex の `~/.codex/skills/` に置く。 macOS・Linux は symlink、 Windows は copy で、 元が変われば作り直す)。
+  呼ぶのは `setup.sh`・pull の post-merge・個人層の session 開始の bootstrap (どれも [`../scripts/sync-hook-settings.sh`](../scripts/sync-hook-settings.sh) 経由) と Codex の [`../scripts/setup-codex.sh`](../scripts/setup-codex.sh) = 人が覚えて入れる手順は無い
+- 個人層に同名の skill (`~/.claude/skills/wrap`、 Codex は個人層の `codex/skills.json` の宣言) を置くと、 そちらが起動する (配線の script は個人層・本人の skill を置き換えない)。
+  その skill の本文は「手順の正本 = 誰でも使える版 (`skills/wrap/SKILL.md`) → この doc」 を指す 1 行と、 その人に固有の値だけを持つ:
+  個人層の道具の path と引数 (どの掲示板・どの thread で宣言するか、 file 受け渡しの道具、 生成索引の生成器、 正本の登録簿)、 本人の決めごとのうち一般形を持たないもの (言葉のまま、 日付つき)。
+  個人層の置き場所の一覧は持たない (= 1 の冒頭どおり入口から辿る)。
+- 手順そのものを skill に写さない (2 か所が食い違う)。 手順を直すときはこの doc を直す。 個人の決めごとが誰にでも効く一般形を持つなら、 一般形をこの doc に置いて skill からは消す
+  (本人が skill に置くよう言った言葉は残す)。 OS ごとの罠・Codex の入口と読み替え・合成 file の作り直しも 0.9 / 0.95 が持つ = skill に書かない。
+
+## <a id="upstream-pr"></a>claude-config への改善案は PR で出す
+
+1 の表で層1 (claude-config) に置くと決めたもの (誰にでも効く手順・道具の壊れ方・規約の穴・雛形の不足) は、 手元 (個人層・作業 repo) だけに置かず claude-config に入れる。
+claude-config に push できない人は fork から PR を出す。 誰でも使える `/wrap` はこれを既定にしている = 1 件ごとに user に可否を聞かない (止めるのは user が止めたとき)。 保護された file (規則・検査・hook・設定) は、 B に当たらない変更について [#protected-files-need-ruling](#protected-files-need-ruling) のとおり本人の裁定を先に取る。
+
+1. **一般形にする** — 1 の ⚠️ の境界 (識別子・本人や第三者の活動の事実・未公開の中身・個人の path) を 1 文ずつ当てる。 PR の本文・diff・commit message・branch 名・commit の author は公開される。 author は GitHub の noreply (`git config user.email` が `@users.noreply.github.com` か確かめる)。 なぜ気づいたか (個人の事例) は自分の個人層・作業 repo の記録に残す
+2. **1 PR = 1 つの改善** — 本文 = 何が困ったか (一般形)・何を変えたか・どう確かめたか
+3. **確かめる** — claude-config の root で `bash scripts/run-all-checks.sh` を回し、 落ちた検査が自分の変更か既存か (main でも落ちるか) を本文に書く。 OS の違いが関わる変更は、 確かめた OS を書く (PR では Linux の CI = `.github/workflows/checks.yml` も回る)。 Windows・Codex の罠は [§0.9](#any-os) / [§0.95](#codex) とそこから辿る正本
+4. **出す** — claude-config の clone で `gh repo fork --remote --remote-name fork` (fork が既にあれば不要) → branch を切る → `git push fork <branch>` → `gh pr create`。 push できる人 (所有者) は fork せず [4](#commit) の規則で直接 commit する
+5. **報告** — 出した PR の link と要約を最終 message に書く

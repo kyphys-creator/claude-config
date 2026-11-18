@@ -34,6 +34,8 @@ chmod 600 ~/.secrets/git-crypt.key
 
 > **Why `~/.secrets/`?** `setup.sh` auto-detects this path and unlocks encrypted repos automatically during bootstrap (Step 5b). If you use a different path, update `setup.sh` accordingly.
 
+> **One key for this repo only?** `setup.sh` tries `~/.secrets/<repo>.key` first and falls back to `~/.secrets/git-crypt.key`. For a repo you may share later, or one that holds other people's personal data, export to `~/.secrets/<repo>.key` instead: sharing it then hands over this repo's key only, with no [rotation](#rotate-key) first.
+
 ### 4. Configure `.gitattributes`
 
 Create `.gitattributes` in the repo root to specify which files to encrypt:
@@ -57,13 +59,25 @@ private/** filter=git-crypt diff=git-crypt
 SESSION.md filter=git-crypt diff=git-crypt
 ```
 
-### 5. Commit and push
+### 5. Commit, check, and push
+
+Write `.gitattributes` before adding any sensitive file: a file committed before a pattern covers it stays in plaintext in the history.
 
 ```bash
 git add .gitattributes
 git add .  # encrypted files are added normally
+git-crypt status
 git commit -m "Initial commit (git-crypt encrypted)"
-git push
+```
+
+`git-crypt status` lists every file as `encrypted:` or `not encrypted:`; only the files you meant to leave readable should be in the second group. Before the first push, confirm that a committed blob really is ciphertext. Check it as a yes/no and never print its bytes, because if encryption failed those bytes are the plaintext. Push only inside the branch where the check passed; a `git push` on its own next line would run after a failed check too:
+
+```bash
+if git cat-file -p HEAD:<an encrypted file> | head -c 9 | grep -qa GITCRYPT; then
+  echo encrypted && git push
+else
+  echo "PLAINTEXT - do not push"
+fi
 ```
 
 Files matching the `.gitattributes` patterns are now encrypted on GitHub.
@@ -90,6 +104,44 @@ git-crypt unlock ~/.secrets/git-crypt.key  # replaces with your shared key
 
 **Trade-off**: Simpler key management, but one compromised key exposes all repos. Acceptable when all repos belong to the same owner and threat model.
 
+## <a id="rotate-key"></a>Rotating the Key (sharing a repo that used a reused key, or someone leaves)
+
+Before sharing a repo that uses a reused key (above) with another person, give that repo its own key (handing over a reused key opens every repo). Do the same when someone leaves or the key may have leaked. Content stays the same; every encrypted file is re-encrypted with the new key:
+
+```bash
+# in an unlocked clone with no uncommitted changes
+git-crypt status -e | awk '$1=="encrypted:"{print $2}' > /tmp/enc-paths
+mkdir -p /tmp/plain && while IFS= read -r p; do mkdir -p "/tmp/plain/$(dirname "$p")"; cp -p "$p" "/tmp/plain/$p"; done < /tmp/enc-paths
+git-crypt lock && rm -rf "$(git rev-parse --absolute-git-dir)/git-crypt" && git-crypt init
+(cd /tmp/plain && find . -type f | sed 's#^\./##') | while IFS= read -r f; do cp -p "/tmp/plain/$f" "$f"; done
+git add --renormalize . && git-crypt status | grep -c WARNING              # 0 = everything encrypted
+git-crypt export-key ~/.secrets/<repo>.key && chmod 600 ~/.secrets/<repo>.key
+git commit -m "git-crypt: rotate the key (no content change)" && git push
+rm -rf /tmp/plain /tmp/enc-paths
+```
+
+- Commits before the rotation stay readable only with the old key. To re-encrypt old plaintext versions too, rewrite history ([`sensitive-repo-patterns.md`](sensitive-repo-patterns.md), Pattern 2-5).
+- Generate and export keys, and commit the rotation, in the owner's terminal (observed: Claude Code's auto mode blocks key generation as a write to a secret store, and right after the rotation an agent-side check that reads HEAD's encrypted files cannot inspect them).
+- Other clones must not pull while still unlocked with the old key: smudging new-key commits fails and changed encrypted files disappear from the worktree (observed). Order: place the new key → `git-crypt lock` → `git pull` (or the follow tool for rewritten history) → `git-crypt unlock ~/.secrets/<repo>.key`. A clone that already broke recovers with `git-crypt lock --force` → `git reset --hard origin/<branch>` → `git-crypt unlock <new key>`. `scripts/git-rewrite-follow.py` stops such a clone before resetting. ⚠️ **`lock --force` restores encrypted files only**: depending on how the clone broke, changes to plaintext files from the new history (`.gitattributes` etc.) and new untracked files can remain, and the follow tool's `reset --keep` then stops on "uncommitted changes overlap" (observed). Check that each leftover matches the new history (`git show origin/<branch>:<path> | cmp - <path>`); if it does, move it aside and rerun the follow. For a file that differs, check whether it is an older version from the new history (`git log -p origin/<branch> -- <path>`) or a local edit before deciding (observed: the partly written copy was a slightly earlier version from the new history).
+
+## <a id="encrypt-existing-files"></a>Encrypting Files That Were Already Committed in Plaintext
+
+When some files of a repo that does not use git-crypt yet (ledgers, lists, records) should be encrypted from now on. Content stays the same:
+
+```bash
+# in a clone with no uncommitted changes. With a reused key, unlock alone installs the key and the filter without init (observed). With a dedicated key, git-crypt init
+git-crypt unlock ~/.secrets/git-crypt.key
+# write the paths in .gitattributes, then re-add the index blobs (adding the attribute alone leaves the index blobs in plaintext)
+git rm --cached -q <path>... && git add .gitattributes <path>...
+for p in <path>...; do git cat-file -p ":$p" | head -c 9 | grep -qa GITCRYPT || echo "PLAINTEXT: $p"; done   # no output = all encrypted
+git commit -m "Encrypt <target> with git-crypt" -- .gitattributes <path>...
+```
+
+- **Check three things**: the worktree reads as plaintext locally / after the push, the remote blob is ciphertext (on GitHub, `gh api repos/<owner>/<repo>/contents/<path>?ref=<branch> -H 'Accept: application/vnd.github.raw' | head -c 9` gives `\0GITCRYPT`) / the content equals the commit before the switch (`cmp <(git show HEAD~1:<path>) <path>`). The readability check (`scripts/check-gitcrypt-readable.py`) covers the local worktree and the committed blobs.
+- **Versions in commits before the switch stay in plaintext.** Removing them needs a history rewrite ([`sensitive-repo-patterns.md`](sensitive-repo-patterns.md), Pattern 2-5). The switch alone only protects future versions.
+- **Other machines' clones get ciphertext in those files on the next pull.** Run `git-crypt unlock <key>` there (with no uncommitted changes). A pull does not unlock (the git-crypt step of `setup.sh` does); until then that machine's readability check reports LOCKED.
+- Writing the targets as name patterns (`sessions/*/*.json` etc.) also encrypts files placed later under the same kind of name. Scripts and the explaining README can stay in plaintext (encrypted, the steps are unreadable to anyone without the key).
+
 ## Setting Up on Another Machine
 
 1. Transfer the key file securely (e.g., encrypted backup, direct copy via SSH)
@@ -108,8 +160,21 @@ git-crypt unlock ~/.secrets/git-crypt.key
 **The key file is the only way to decrypt your data.** If you lose it and don't have a backup, encrypted files on GitHub are unrecoverable.
 
 Recommended practices:
-- Store an encrypted backup in a separate location (cloud storage, USB drive, etc.)
-- Use a strong passphrase for the backup encryption
+- **Keep the backup off the machine.** Another folder on the same disk is not a backup, because it is lost together with the machine. Use a place you can open from another device with a separate login (cloud storage, a password manager) or a USB drive.
+- **In cloud storage, keep only an encrypted backup.** A plaintext key there lets anyone who can open that storage decrypt the repo. Encrypt it with a passphrase, the same way as the shared-repo backups that `setup.sh` restores:
+  ```bash
+  /usr/bin/openssl enc -aes-256-cbc -pbkdf2 -salt -in ~/.secrets/<repo>.key -out <cloud folder>/<repo>.key.enc
+  ```
+  Keep the passphrase outside that storage (a password manager, for example). Put the backup's file name (not its path) on the first line of `.claude/git-crypt-backup` in the repo, and keep that file in plaintext (`.claude/git-crypt-backup !filter !diff` in `.gitattributes`). On a new machine, `setup.sh` (Step 5b-pre) then finds the backup in the cloud folder, asks for the passphrase, and places the key at `~/.secrets/<repo>.key`.
+- **Keep the plain text form only in a password manager**, which encrypts what it stores: `base64 -i ~/.secrets/<repo>.key | pbcopy` on macOS (`base64 -w0 ~/.secrets/<repo>.key` on Linux). Clear the clipboard afterwards with `pbcopy < /dev/null`.
+- **Check that the backup restores before relying on it.** These round trips print nothing secret. For the encrypted backup:
+  ```bash
+  /usr/bin/openssl enc -aes-256-cbc -d -pbkdf2 -in <backup>.key.enc | cmp - ~/.secrets/<repo>.key && echo match
+  ```
+  For the text form: `base64 -D -i <backup file> | cmp - ~/.secrets/<repo>.key && echo match` (on Linux, `base64 -d <backup file>`). Making a backup and being able to open it are separate claims ([`secret-handoff.md#backup-round-trip`](../conventions/secret-handoff.md#backup-round-trip)).
+- **Restore**: run `setup.sh` (it uses `.claude/git-crypt-backup`). By hand, decrypt with `/usr/bin/openssl enc -aes-256-cbc -d -pbkdf2 -in <backup>.key.enc -out ~/.secrets/<repo>.key`, then run `chmod 600 ~/.secrets/<repo>.key` only if openssl succeeded. If it failed, delete the output file before retrying, because a failed decryption leaves garbage that looks like a key. For the text form, use `base64 -D -i <backup file> -o ~/.secrets/<repo>.key`.
+- **Record where the backup is (the location, never the value) somewhere readable without the key**, such as the repo's plaintext `CLAUDE.md`. A note inside the encrypted part cannot be read at the moment you need it ([`secret-handoff.md#do-not-store-inside-the-lock`](../conventions/secret-handoff.md#do-not-store-inside-the-lock)).
+- **If a plaintext copy ever reached cloud storage, delete it from the service's deleted-files area too.** Cloud services keep deleted files restorable for a while.
 - Test restoration periodically
 
 ## Troubleshooting
@@ -138,3 +203,18 @@ Step 5b only runs when both conditions are met:
 - `~/.secrets/git-crypt.key` exists
 
 If either is missing, the step is silently skipped.
+
+### <a id="blame-reads-ciphertext"></a>`git blame` reads ciphertext on an encrypted file (finding when a line was added)
+
+On a git-crypt encrypted file, `git blame -L <n>,<n>` splits the encrypted blob into lines, so line numbers and content do not match the plaintext (it stops with `file … has only N lines`, or prints garbled lines). Adding `--textconv` does not help (observed).
+
+Find when a line was added or last changed with the pickaxe instead:
+
+```bash
+git log -S'<a distinctive part of the line>' --format='%h %ad' --date=short -- <file> 2>/dev/null
+```
+
+- The textconv (git-crypt's diff driver, which decrypts) is on by default, so the plaintext string is searchable. With `--no-textconv` git searches the ciphertext and returns nothing; do not read that as "the text is not in the history" (observed).
+- Plaintext versions from before encryption print `git-crypt: Warning: file not encrypted` to stderr for each version and bury the result; add `2>/dev/null`.
+- `-S` lists, newest first, the commits where the number of occurrences changed; the last line is the commit that introduced the text. Moves that keep the count are invisible.
+- Same root cause as `git show <rev>:<path>` returning ciphertext.

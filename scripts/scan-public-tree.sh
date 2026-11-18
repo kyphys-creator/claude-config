@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+# scan-public-tree.sh — 公開 repo の現在の tree 全体を pre-commit gate の全 Tier に通す
+#
+# 正本: claude-config/scripts/scan-public-tree.sh
+# 規律: conventions/confidential-repo-boundary.md#gate-installed-after-history
+#
+# Why: pre-commit gate は **staged 差分 (= これから足す行) しか見ない**。 gate を入れる前から
+#   履歴のある repo では、 既に commit 済の全 file が一度も検査されないまま公開される。
+#   「gate を入れた」 は「検査した」 ではない — 設置と同じ turn に tree 全体を 1 回通すまでが
+#   1 単位。 実測: gate を新設した repo を初回 push した直後にこの走査をかけると、 Tier C
+#   (非公開 repo 名への参照) が既存の設計メモに残っていた。 gate 単体は素通りしていた。
+#
+# 機構: tracked file を temp dir へ `git archive` で展開 → `git init` + `git add -A -f` →
+#   public-precommit-runner.sh を temp repo で実行する。 HEAD の無い fresh repo なので
+#   **全 file が「追加行」 として見え**、 gate の全 Tier (A 構造 / B literal / C 非公開 repo 名 /
+#   D 未公開文書の逐語・機密 / E 活動の事実) がそのまま tree 全体に当たる。
+#   本物の index も working tree も remote も触らない (= 読むだけ)。
+#   ⚠️ 見るのは **commit 済の tree** (`git archive HEAD`) — 直したあと commit する前に走らせても
+#   finding は消えない。 「直した → commit → 走査」 の順で。
+#   ⚠️ 確認のために `CLAUDE_STATE_DIR` を temp に逃がした run は **本番の台帳に記録されない**
+#   (= 進捗として数えられない)。 決着させた repo は本番の台帳で 1 回通す。
+#
+# ⚠️ 射程: **現在の tree だけ**。 過去の commit の中身と commit message は見ない
+#   (= 履歴は go-forward な操作では消えない、 conventions/confidential-repo-boundary.md §6)。
+#   commit message の棚卸しは check-unpublished-quote.py --replay が別に持つ。
+#
+# usage:
+#   scan-public-tree.sh [--repo DIR]          1 repo (既定 = cwd の repo)
+#   scan-public-tree.sh --all [--root DIR]    marker つき repo を全部 (既定 root = claude-config の親)
+#   --max N                                   この 1 回で新しく走査する repo 数の上限 (既定 = 無制限)
+#   --force                                   台帳を無視して再走査
+#   --quiet                                   finding 無しの行を出さない
+#
+# ⚠️ 1 repo あたり数分かかる (= Tier D が未公開文書の索引を毎回作り直す)。 定期検査から呼ぶときは
+#   `--max 2` のように区切る: 台帳が進捗を持つので、 何回かに分けて全体が埋まる。
+#   ⚠️ **未記録の repo を先に回す** — finding ありは走査済にしない設計なので、 素直に並べると
+#   予算を毎回そいつらが食い潰し、 一度も見ていない repo に永久に到達しない。
+#
+# 受理: repo の `.claude/public-tree-accept.txt` (1 行 1 substring、 `#` 以降は理由)。
+#   既に公開されていて「見た上で残す」 と決めた Tier A の token を、 この棚卸しでだけ落とす。
+#   **gate 本体には効かない** (= 新しい書き込みは今までどおり止まる)。 件数と file 名を出す
+#   Tier B/C は受理できない — 実名や非公開 repo 名を「受理」 で寝かせないため、 直すしかない。
+#   `generated: <glob>  # 生成元` 行 = 外部の公開データを機械が変換した file を棚卸しから外す (データ形式の
+#   file だけ・外した数を毎回表示。 判定の正本 = lib/public_tree_accept.py)。 姓の短い term が地名等に当たる
+#   Tier B は受理でなく個人層の compound_allow で消す (lib/sensitive-terms.sh)。 公刊済みの書誌は runner が外す
+#
+# 台帳 (machine-local): $CLAUDE_STATE_DIR (既定 ~/.claude/state)/public-tree-scan.tsv
+#   repo<TAB>HEAD sha<TAB>走査日<TAB>finding 件数[<TAB>ctl|ctl-df]   (ctl = 照合器の対照が通った回、 ctl-df = さらに漏洩の段
+#   Tier D〜F まで回り、 未公開文書の逐語の検査 (D-1) がこの機械で armed だった回 = 走査済に数えるのはこの印の 0 だけ。
+#   読むのは repo ごとの最新の行)
+#   **HEAD が進んでも再走査しない** — 新しい行は gate 本体が見る前提。 ただし gate を通らない commit (GitHub の画面での編集・
+#   他の人の PR の merge・hook の無い機械) はこの前提の外 = 台帳を持たない CI での実行が定期の網になる
+#   (conventions/confidential-repo-boundary.md#ledger-skips-bypassed-commits)。
+#   gate の Tier を足した / 検出語の源を変えた ときだけ --force で回し直す。
+#
+# exit: 0 = finding 無し (or 対象外) / 1 = finding あり、 または照合器の対照が落ちて走査しなかった / 2 = usage error
+
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+RUNNER="$SELF_DIR/public-precommit-runner.sh"
+DEFAULT_ROOT="$(cd "$SELF_DIR/../.." && pwd)"   # = claude-config を含む base dir
+STATE_DIR="${CLAUDE_STATE_DIR:-$HOME/.claude/state}"
+LEDGER="$STATE_DIR/public-tree-scan.tsv"
+
+MODE="one"
+REPO_ARG=""
+ROOT="$DEFAULT_ROOT"
+FORCE=0
+QUIET=0
+MAXN=0          # 0 = 無制限
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)    MODE="all" ;;
+    --repo)   shift; REPO_ARG="${1:-}" ;;
+    --root)   shift; ROOT="${1:-}" ;;
+    --max)    shift; MAXN="${1:-0}" ;;
+    --force)  FORCE=1 ;;
+    --quiet)  QUIET=1 ;;
+    -h|--help) awk '/^set -uo pipefail/ { exit } { print }' "$0"; exit 0 ;;   # header 全体 (行数を焼かない)
+    *) echo "scan-public-tree.sh: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -x "$RUNNER" ] || { echo "scan-public-tree.sh: runner not executable: $RUNNER" >&2; exit 2; }
+
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+
+record() {
+  # $1 = repo path, $2 = sha, $3 = findings count, $4 = "df" (この回は漏洩の段 Tier D〜F まで回った)
+  # 5 列目 `ctl` = この回は照合器の対照が通った (= 0 を信用してよい回)、 `ctl-df` = さらに Tier D〜F まで回った回
+  # (2026-11-09: 受理済みの A〜C の当たりがある repo では D〜F が走らないまま `ctl` の 0 が付いていた = 実測)。
+  # 対照を使わない呼び出し (CLAUDE_PERSONAL_LAYER=none) は 4 列のまま
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  if [ "$CONTROL_STATE" = "ok" ]; then
+    local mark="ctl"
+    [ "${4:-}" = "df" ] && d1_armed && mark="ctl-df"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$(date +%Y-%m-%d)" "$3" "$mark" >> "$LEDGER"
+  else
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date +%Y-%m-%d)" "$3" >> "$LEDGER"
+  fi
+}
+
+# 未公開文書の逐語の検査 (Tier D-1) がこの機械で動くか (2026-11-09)。 runner は源の宣言が無い・源が読めない機械では
+# D-1 を黙って通す (fail-open) ので、 runner の「D-F を通った」 だけでは D-1 を見たことにならない。 1 回の実行で 1 度だけ
+# engine の --check-wiring (カナリアが止まるか) を回し、 ARMED のときだけ 0 に印 ctl-df を付ける (それ以外は ctl =
+# 走査済に数えない = armed になった後の回で回し直す)
+D1_STATE=""
+d1_armed() {
+  if [ -z "$D1_STATE" ]; then
+    D1_STATE="no"
+    local layer="" eng="$SELF_DIR/check-unpublished-quote.py" w=""
+    if [ -f "$SELF_DIR/lib/find-personal-layer.sh" ]; then
+      # shellcheck source=/dev/null
+      . "$SELF_DIR/lib/find-personal-layer.sh"
+      layer="$(find_personal_layer 2>/dev/null)"
+    fi
+    if [ -n "$layer" ] && [ -f "$layer/unpublished-sources.txt" ] && [ -f "$eng" ]; then
+      w="$(python3 "$eng" --check-wiring --config "$layer/unpublished-sources.txt" 2>/dev/null || true)"
+      grep -q '^ARMED \[unpublished-quote\]' <<< "$w" && D1_STATE="yes"
+    fi
+  fi
+  [ "$D1_STATE" = "yes" ]
+}
+
+# 最新の行が finding あり (件数が 0 でない) か。 --all の順序づけに使う
+latest_is_finding() {
+  [ -f "$LEDGER" ] || return 1
+  awk -F'\t' -v r="$1" '$1 == r { last = $4 } END { exit (last != "" && last != "0") ? 0 : 1 }' "$LEDGER"
+}
+
+# 台帳に **何らかの** 記録があるか (= finding ありも含む)。 --all の順序づけに使う:
+# finding ありの repo は走査済にしない設計なので、 素直に並べると予算 (--max) を毎回
+# そいつらが食い潰し、 **一度も見ていない repo に永久に到達しない**。 未記録を先に回す。
+has_record() {
+  [ -f "$LEDGER" ] || return 1
+  awk -F'\t' -v r="$1" '$1 == r { found = 1 } END { exit found ? 0 : 1 }' "$LEDGER"
+}
+
+# ----------------------------------------------------------------------
+# 照合器の対照 (positive control、 2026-11-05)。 tree の棚卸しは tree 全体を 1 回の「追加行」 として runner に
+# 渡すので、 入力が数百 KB になる。 非公開 repo 名の照合 (Tier C) が pipefail の下で `printf | grep -q` を
+# 使っていた間、 入力が pipe の容量を超えると grep -q の早い終了で printf が SIGPIPE になり、 一致が黙って
+# 消えた = 公開 repo の tree に非公開 repo の path が在るのに「0 finding」 と台帳に記録した (実測)。
+# 走査する repo が出た時点で、 架空の非公開 repo 名を先頭に置いた大きな tree を偽の個人層で runner に通し、
+# Tier C がそれを拾うかを 1 回確かめる。 拾えなければ走査せずに止める (= 信用できない 0 を台帳に書かない)。
+# 台帳には対照が通った回の印 (5 列目 `ctl`) を残し、 印の無い 0 (= 対照を入れる前の記録) は走査済に数えない =
+# 照合器が直った後の回で、 印の無い repo が順に走査し直される (人が --force を覚えておかなくてよい)。
+# 個人層を切った呼び出し (CLAUDE_PERSONAL_LAYER=none) は Tier C を使わないので確かめない。
+# 規律 = conventions/shell-env.md#pipefail-grep-q-sigpipe / conventions/confidential-repo-boundary.md#scan-zero-needs-control
+# ----------------------------------------------------------------------
+CONTROL_STATE=""   # "" = 未実施 / ok / blind / skip
+control_check() {
+  [ -n "$CONTROL_STATE" ] && return 0
+  if [ "${CLAUDE_PERSONAL_LAYER:-}" = "none" ]; then CONTROL_STATE="skip"; return 0; fi
+  local c out
+  c="$(mktemp -d)" || { CONTROL_STATE="skip"; return 0; }
+  mkdir -p "$c/layer" "$c/repo"
+  : > "$c/layer/.claude-personal-layer"
+  printf '# scan control layer\n' > "$c/layer/CLAUDE.md"
+  printf '| repo | desc | visibility |\n|---|---|---|\n| `scanctl-canary/` | control | private |\n' > "$c/layer/repos.md"
+  {
+    printf 'see scanctl-canary for this\n'
+    awk 'BEGIN { for (i = 1; i <= 6000; i++) printf "line %d: filler text for the scan control\n", i }'
+  } > "$c/repo/control.txt"
+  ( cd "$c/repo" && git init -q 2>/dev/null && git add -A -f 2>/dev/null )
+  out="$(cd "$c/repo" && CLAUDE_PERSONAL_LAYER="$c/layer" env -u CLAUDE_CONFIG_AGENT_SESSION -u CLAUDE_CODE_SESSION_ID -u CODEX_SESSION_ID -u CODEX_THREAD_ID "$RUNNER" 2>&1)"
+  rm -rf "$c"
+  if grep -q '\[tier-c\]' <<< "$out"; then
+    CONTROL_STATE="ok"
+  else
+    CONTROL_STATE="blind"
+    printf '%s\n' "🔴 [scan-public-tree] 照合器の対照が落ちた: 先頭に架空の非公開 repo 名を置いた大きな tree で Tier C が何も拾わない"
+    printf '%s\n' "    = 大きな tree の「0 finding」 は信用できない。 この回は走査せずに止める (台帳は変えない。 直した後の回で走査される)"
+    printf '%s\n' "    → 原因の候補 = 照合器が \`printf | grep -q\` を pipefail の下で使っている (conventions/shell-env.md#pipefail-grep-q-sigpipe)"
+  fi
+}
+
+already_scanned() {
+  [ "$FORCE" -eq 1 ] && return 1
+  [ -f "$LEDGER" ] || return 1
+  # **その repo の最新の記録が finding 0 のときだけ走査済**。 finding ありの記録で skip すると、
+  # 直さなかった repo が静かに対象から外れる (= 検出器が自分の finding を隠す)。
+  # ⚠️ 「どこかの行が 0」 で見ない (2026-11-05 まで): 台帳は追記なので、 古い 0 の後に --force で finding を
+  # 記録しても、 次の回は古い 0 で skip していた。
+  # 対照を使う呼び出しでは、 対照が通り、 かつ漏洩の段 Tier D〜F まで回った回の 0 (5 列目 `ctl-df`) だけを数える
+  # (= control_check の説明。 `ctl` だけの 0 は D〜F を見ていないことがある = 回し直す)
+  local need_ctl=1
+  [ "${CLAUDE_PERSONAL_LAYER:-}" = "none" ] && need_ctl=0
+  awk -F'\t' -v r="$1" -v need="$need_ctl" '
+    $1 == r { last = $4; ctl = $5 }
+    END { exit (last == "0" && (need == 0 || ctl == "ctl-df")) ? 0 : 1 }' "$LEDGER"
+}
+
+# ----------------------------------------------------------------------
+# レビュー済みとして受理した finding を落とす。
+#
+# 対象 = repo の `.claude/public-tree-accept.txt` (1 行 1 substring、 `#` 以降は理由)。
+# **gate 本体 (= これから足す行) には効かない** — 効くのはこの棚卸しだけ。 既に公開されていて
+# 「見た上で残すと決めた」 ものを毎回再提示しないための口で、 新しい書き込みは今までどおり止まる。
+#
+# 落とせるのは token を並べる Tier (A) の行だけ。 件数と file 名を出す Tier (B/C) の行は
+# 受理できない (= 直すしかない)。 意図的: 実名や非公開 repo 名を「受理」 で寝かせない。
+# ----------------------------------------------------------------------
+# 受理一覧が「隠し場所」 になっていないかを確かめる。
+#
+# 受理してよいのは **既にこの tree の他の場所に在る文字列** だけ (= 見た上で残すと決めた finding)。
+# tree に無い文字列が並んでいたら、 それは受理ではなく **新しい開示** で、 しかも受理一覧は
+# gate の対象外なので黙って通る。 gate を外した代償をここで払い戻す。
+validate_accept() {
+  local repo="$1" accept term
+  accept="$repo/.claude/public-tree-accept.txt"
+  [ -f "$accept" ] || return 0
+  while IFS= read -r term; do
+    term="${term%%#*}"
+    term="$(printf '%s' "$term" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -z "$term" ] && continue
+    case "$term" in generated:*) continue ;; esac   # 生成データの宣言 (= token ではない、 lib/public_tree_accept.py が検査)
+    # tracked file だけを見る (= 公開されるのはそこだけ)。 受理一覧それ自身は除く
+    if ! git -C "$repo" grep -qF -e "$term" -- ':!.claude/public-tree-accept.txt' 2>/dev/null; then
+      printf '%s\n' "$term"
+    fi
+  done < "$accept"
+}
+
+filter_accepted() {
+  local accept="$1"
+  [ -f "$accept" ] || { cat; return 0; }
+  local sed_args=() term
+  while IFS= read -r term; do
+    term="${term%%#*}"
+    term="$(printf '%s' "$term" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -z "$term" ] && continue
+    case "$term" in generated:*) continue ;; esac
+    sed_args+=(-e "s|$(printf '%s' "$term" | sed 's/[][\.*^$/&|]/\\&/g')||g")
+  done < "$accept"
+  [ "${#sed_args[@]}" -eq 0 ] && { cat; return 0; }
+  # 受理 substring を消し、 tag だけ残った Tier A 行を落とす
+  sed "${sed_args[@]}" | sed -E '/^\[tier-a\/[a-z0-9_]+\][[:space:]]*$/d'   # ⚠️ 数字を含む tag (ipv4) があるので [a-z_] では足りない
+}
+
+# ----------------------------------------------------------------------
+# 1 repo を走査。 0 = clean / 1 = finding / 2 = 対象外 (commit 無し等) / 3 = 台帳で skip / 4 = 照合器の対照が落ちて走査しなかった
+# ----------------------------------------------------------------------
+scan_one() {
+  local repo="$1" name sha tmp out rc
+  name="$(basename "$repo")"
+
+  sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || {
+    say "[scan-public-tree] $name: 対象外 (commit がまだ無い)"
+    return 2
+  }
+
+  # ⚠️ 受理一覧の検証は **skip より前**。 台帳で走査済になった repo に後から受理 entry を
+  # 足すと、 gate は受理一覧を除外していて見ず、 走査は skip して見ない = 誰も見ない窓ができる。
+  # git grep なので tree を展開せずに済み、 skip 側でも払える
+  local accept_bad
+  accept_bad="$(validate_accept "$repo")"
+  if [ -n "$accept_bad" ]; then
+    printf '%s\n' "🔴 [scan-public-tree] $name: 受理一覧に tree のどこにも無い文字列がある (= 受理でなく新しい開示)"
+    printf '%s\n' "$accept_bad" | sed 's/^/    /'
+    printf '%s\n' "    → 受理一覧に書けるのは、 既に tree に在る finding だけ。 消すか、 本文側を直す"
+    record "$repo" "$sha" 1
+    return 1
+  fi
+
+  # 生成データの宣言 (`generated: <glob>  # 生成元`) も skip より前に検査する (理由は上と同じ)。
+  # 外せるのはデータ形式の file だけ = 判定と理由の正本は lib/public_tree_accept.py
+  local gen_list="" gen_err="" gen_rc=0
+  if [ -f "$repo/.claude/public-tree-accept.txt" ] && grep -q '^[[:space:]]*generated:' "$repo/.claude/public-tree-accept.txt"; then
+    gen_err="$(mktemp)"
+    gen_list="$(python3 "$SELF_DIR/lib/public_tree_accept.py" --generated "$repo" 2>"$gen_err")" || gen_rc=$?
+    if [ "$gen_rc" -ne 0 ]; then
+      printf '%s\n' "🔴 [scan-public-tree] $name: 受理一覧の generated: 宣言が無効"
+      sed 's/^/    /' "$gen_err"
+      [ -s "$gen_err" ] || printf '%s\n' "    (python3 か lib/public_tree_accept.py を実行できない)"
+      rm -f "$gen_err"
+      record "$repo" "$sha" 1
+      return 1
+    fi
+    rm -f "$gen_err"
+  fi
+
+  if already_scanned "$repo"; then
+    say "[scan-public-tree] $name: skip (台帳に走査済。 回し直すなら --force)"
+    return 3
+  fi
+
+  # 走査する repo が出た時点で対照を 1 回 (= 全部 skip の回は払わない)。 落ちたら走査しない
+  control_check
+  if [ "$CONTROL_STATE" = "blind" ]; then
+    printf '%s\n' "⚠️ [scan-public-tree] $name: 未走査 (照合器の対照が落ちている。 台帳は変えない)"
+    return 4
+  fi
+
+  tmp="$(mktemp -d)" || return 2
+  # tracked file だけを展開 (= untracked / 未 commit の変更は gate 本体の担当)
+  if ! git -C "$repo" archive HEAD 2>/dev/null | tar -x -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    say "[scan-public-tree] $name: 対象外 (git archive に失敗)"
+    return 2
+  fi
+  # repo-local の chain hook は走査では動かさない (= 副作用を持ちうる)
+  rm -f "$tmp/.claude/pre-commit-extra.sh"
+  # 生成データとして宣言した file を外す (= 数を毎回表示する。 黙って外さない)
+  if [ -n "$gen_list" ]; then
+    local gen_n=0 gf
+    while IFS= read -r gf; do
+      [ -n "$gf" ] || continue
+      rm -f "$tmp/$gf" && gen_n=$((gen_n + 1))
+    done <<< "$gen_list"
+    say "[scan-public-tree] $name: generated: 宣言の $gen_n file を走査から外した (受理一覧に生成元つきで宣言)"
+  fi
+
+  (
+    cd "$tmp" || exit 2
+    git init -q 2>/dev/null
+    # 仮の remote (network に出ない local の値)。 作業リポの機密の検査 (Tier D-2 = check-confidential-leak.py) は
+    # remote のある repo でだけ動くので、 remote の無い一時 repo では棚卸しのたびに黙って素通りしていた
+    # (2026-11-09 まで、 実測 = カナリアは remote ありで止まり、 無しで通る)
+    git remote add origin "$tmp" 2>/dev/null
+    # -f = .gitignore を無視。 実 repo で tracked な file が ignore 対象のことがある
+    git add -A -f 2>/dev/null
+  )
+
+  # CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS=1 = 漏洩の段 (Tier A-F) を全部通ったら runner が 1 行出す (出す版の runner のとき)。
+  # 漏洩以外の段 (SESSION の形・壊れた text など) が止めた tree を「漏洩の段は通った」 と「届かなかった」 に分けるため。
+  # agent の session の env は外す (replay-public-gate.sh と同じ): 原稿の主張と権限規約の gate は「今の session に著者の
+  # 承認があるか」 を見るので、 tree 全体が追加に見える棚卸しを agent の commit として通すと規則の文書で必ず止まり、
+  # 漏洩の段に届かない (2026-11-05 まで、 この形は「0」 と記録されていた = agent の session から回した棚卸しは盲目だった)
+  out="$(cd "$tmp" && CLAUDE_PUBLIC_GATE_REPORT_LEAK_PASS=1 env -u CLAUDE_CONFIG_AGENT_SESSION -u CLAUDE_CODE_SESSION_ID -u CODEX_SESSION_ID -u CODEX_THREAD_ID "$RUNNER" 2>&1)"
+  rc=$?
+  rm -rf "$tmp"
+
+  if [ "$rc" -eq 0 ]; then
+    say "[scan-public-tree] $name: 0 finding"
+    record "$repo" "$sha" 0 df
+    return 0
+  fi
+  # 識別子でない漏洩の段 (Tier D〜G) が止めた行。 各段の見出しは `🚫 [...]` や字下げの `file:行` で、 下の
+  # Tier A-C の見出しの拾い方 (`^\[`) には掛からないので、 別に拾って finding として名指す
+  local dg
+  dg="$(grep -E 'commit rejected by Tier [D-G]|\[(unpublished-quote|confidential-leak|value-index)\]|\[activity-facts\] the staged change contains|(prose run|quoted span|japanese run) of [0-9]' <<< "$out" || true)"
+
+  # finding 行だけを取り出して受理 filter をかける (= 全 Tier の見出しを拾う)
+  local hits
+  # ⚠️ `[tier-b/skip]` 等の **skip 通知**は finding ではない (= 検査しなかった、 という報告)。
+  # 拾うと「対象外」 が「違反」 に化ける
+  hits="$(printf '%s\n' "$out" \
+    | grep -E '^\[(tier-|unpublished-quote|activity-facts|confidential-leak)' \
+    | grep -v '/skip\]' \
+    | filter_accepted "$repo/.claude/public-tree-accept.txt" \
+    | sed '/^[[:space:]]*$/d')"
+
+  if [ -z "$hits" ]; then
+    # `commit rejected:` (= Tier A/B/C の汎用見出し) は上で filter 済の詳細に対応するので
+    # ここでは見ない。 見るのは `commit rejected by ...` (= Tier D/E / link guard 等、
+    # 見出し行を持たない別経路) だけ
+    # ⚠️ `printf | grep -q` にしない (runner の出力は大きくなりうる。 pipefail の下では grep -q の早い終了で
+    # printf が SIGPIPE になり、 見出しが在っても偽になる = conventions/shell-env.md#pipefail-grep-q-sigpipe)
+    if grep -q 'commit rejected by Tier [D-G]' <<< "$out"; then
+      # 識別子でない漏洩の段が止めた (受理一覧は Tier A の token しか持てない = この段の finding は受理で消えない)
+      printf '%s\n' "🔴 [scan-public-tree] $name: finding あり (= 識別子でない漏洩の段 Tier D〜G、 既に公開されている中身)"
+      printf '%s\n' "$dg" | sed 's/^/    /'
+      printf '%s\n' "    → 本物なら本文を一般形に直す。 誤検知なら検出器の側を直す (conventions/confidential-repo-boundary.md#tree-finding-resolution)"
+      record "$repo" "$sha" 1
+      return 1
+    fi
+    if grep -q 'commit rejected by' <<< "$out"; then
+      # 受理 filter で消えたが、 見出しを持たない別の理由で落ちている = 黙って通さない
+      printf '%s\n' "⚠️ [scan-public-tree] $name: 受理済み以外の理由で runner が落ちた"
+      printf '%s\n' "$out" | sed 's/^/    /'
+      record "$repo" "$sha" 1
+      return 1
+    fi
+    if grep -q '\[public-precommit-runner\] commit rejected: potential leak detected' <<< "$out" \
+        && grep -q '\[public-precommit-runner\] tiers D-F passed after tier A-C hits' <<< "$out"; then
+      # Tier A-C の見出しが出て、 その行が全部受理済みで、 runner は A-C の後に D-G も回して通った (2026-11-09〜)
+      say "[scan-public-tree] $name: 0 finding (= 残りは .claude/public-tree-accept.txt の受理済みのみ。 Tier D-F も通った)"
+      record "$repo" "$sha" 0 df
+      return 0
+    fi
+    if grep -q '\[public-precommit-runner\] commit rejected: potential leak detected' <<< "$out" \
+        && ! grep -q '\[public-precommit-runner\] leak tiers passed' <<< "$out"; then
+      # Tier A-C の見出しが出て、 その行が全部受理済みだった形で、 runner が A-C の後に D-G を回さない版 (2026-11-09 より前)。
+      # この repo の D-F はこの回は走っていない = 0 と記録するが印は `ctl` だけ (走査済に数えない = 次の回に回し直す)
+      say "[scan-public-tree] $name: 0 finding (= 残りは .claude/public-tree-accept.txt の受理済みのみ。 ⚠️ Tier D-F はこの回走っていない = 走査済に数えない)"
+      record "$repo" "$sha" 0
+      return 0
+    fi
+    if ! grep -q '\[public-precommit-runner\] leak tiers passed' <<< "$out"; then
+      # runner は非 0 で終わったのに、 漏洩の段の見出しも「漏洩の段は通った」 の 1 行も無い = 漏洩以外の段
+      # (SESSION の形・壊れた text・履歴の増え方 など) が漏洩の段より前で止めた。 漏洩の段は走っていないので、
+      # 「0 finding」 と記録しない (2026-11-05 まで、 この形は 0 と記録されていた)
+      printf '%s\n' "⚠️ [scan-public-tree] $name: runner が漏洩の段に届く前に止まった (= 未走査、 0 ではない)"
+      printf '%s\n' "$out" | tail -n 15 | sed 's/^/    /'
+      printf '%s\n' "    → 止めた段を直して回し直す (runner が漏洩の段を先に回す版なら、 この形にはならない)"
+      record "$repo" "$sha" 1
+      return 1
+    fi
+    say "[scan-public-tree] $name: 0 finding (= 残りは受理済みのみ、 または runner は漏洩の段を通った後の段で止まった)"
+    record "$repo" "$sha" 0 df
+    return 0
+  fi
+
+  printf '%s\n' "🔴 [scan-public-tree] $name: finding あり (= 既に公開されている中身)"
+  printf '%s\n' "$hits" | sed 's/^/    /'
+  if grep -q 'commit rejected by Tier [D-G]' <<< "$out"; then
+    printf '%s\n' "    識別子でない漏洩の段 (Tier D〜G) の当たりも:"
+    printf '%s\n' "$dg" | sed 's/^/    /'
+  fi
+  printf '%s\n' "    → 直すか、 見た上で残すなら $name/.claude/public-tree-accept.txt に理由つきで 1 行"
+  printf '%s\n' "    → 履歴の書き換えをするかは人間の判断 (既定 = しない)"
+  record "$repo" "$sha" 1
+  return 1
+}
+
+# ----------------------------------------------------------------------
+RC=0
+if [ "$MODE" = "all" ]; then
+  [ -d "$ROOT" ] || { echo "scan-public-tree.sh: no such root: $ROOT" >&2; exit 2; }
+  found=0
+  scanned=0
+  # 未記録 → 最新の行が 0 (走査済なら予算を使わず skip、 印の古い 0 は回し直す) → 最新の行が finding の順に並べる
+  # (= 予算がある限り、 まだ見ていない repo と回し直す repo を先に。 finding の残る repo を前に置くと、 それが毎回
+  # 予算を使い切り、 後ろの repo に届かない = 2026-11-09 の照合で 17 本が 9 月から回し直されていなかった、 実測)
+  fresh=""; seen=""; found_hits=""
+  for d in "$ROOT"/*/; do
+    [ -f "${d}.claude/public-repo.marker" ] || continue
+    [ -d "${d}.git" ] || continue
+    found=$((found + 1))
+    if ! has_record "${d%/}"; then fresh="$fresh
+${d%/}"
+    elif latest_is_finding "${d%/}"; then found_hits="$found_hits
+${d%/}"
+    else seen="$seen
+${d%/}"; fi
+  done
+  for r in $(printf '%s\n%s\n%s\n' "$fresh" "$seen" "$found_hits" | sed '/^$/d'); do
+    scan_one "$r"
+    rc_one=$?
+    [ "$rc_one" -eq 1 ] && RC=1
+    if [ "$rc_one" -eq 4 ]; then
+      # 照合器の対照が落ちた = 残りの repo も信用できる走査にならない。 ここで止める (台帳は変えない)
+      RC=1
+      break
+    fi
+    # 新しく走査した repo だけ数える (= 台帳 skip 〔3〕 と対象外 〔2〕 は上限を消費しない)
+    if [ "$rc_one" -eq 0 ] || [ "$rc_one" -eq 1 ]; then
+      scanned=$((scanned + 1))
+      if [ "$MAXN" -gt 0 ] && [ "$scanned" -ge "$MAXN" ]; then
+        say "[scan-public-tree] --max $MAXN に達したので中断 (台帳が進捗を持つので続きは次回)"
+        break
+      fi
+    fi
+  done
+  say "[scan-public-tree] marker つき $found repo を対象に走査"
+else
+  if [ -n "$REPO_ARG" ]; then
+    REPO="$(git -C "$REPO_ARG" rev-parse --show-toplevel 2>/dev/null)"
+  else
+    REPO="$(git rev-parse --show-toplevel 2>/dev/null)"
+  fi
+  [ -n "${REPO:-}" ] || { echo "scan-public-tree.sh: not a git repo (--repo DIR で指定)" >&2; exit 2; }
+  scan_one "$REPO"
+  rc_one=$?
+  { [ "$rc_one" -eq 1 ] || [ "$rc_one" -eq 4 ]; } && RC=1
+fi
+
+exit "$RC"

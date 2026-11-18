@@ -1,13 +1,185 @@
+<!-- doc-meta
+when: MCP ツールを使うとき (アカウント確認・scope 判定を含む)
+category: harness-core
+summary: MCP 固有規約（MCP 使用時に参照）
+-->
 # MCP 規約
 
 MCP ツールを使うリポで適用。CLAUDE.md から参照: `~/Claude/claude-config/conventions/mcp.md`
 
+> **関連**: MCP 経由で取得した外部 content (Gmail 本文・Discord メッセージ・Calendar event の title/description・ticket 本文等) に adversarial な指示文が混入していた場合の取扱は [prompt-injection.md](prompt-injection.md) を参照。
+
 ## 共通（CONVENTIONS.md §5.7 の手順詳細）
 
-- **確認方法**: Gmail は `gmail_get_profile`、Calendar は `gcal_list_calendars` で接続先アカウントを確認
-- **複数 MCP がある場合**: セッションの deferred tools 一覧で同一サービスの MCP が何個あるか確認し、それぞれ `get_profile` を実行して UUID→アカウントの対応を把握する
-- **UUID→アカウント対応表をメモリに保持**: MEMORY.md に `reference_mcp_uuid_map.md` へのポインタがなければ、全 MCP で `get_profile` を実行して作成する。既にあれば deferred tools の UUID 一覧と照合し、差分があれば更新する
-- **アカウント一覧の正本**: 各 MCP 設定リポの CLAUDE.md を参照（メモリや各リポの CLAUDE.md にハードコードしない）
+- **確認方法** (⚠️ 2026-06-20 訂正 — 現行 setup に `get_profile` / `gmail_get_profile` という **MCP tool は存在しない**、 旧 built-in connector の名残。 実在 tool ベースで確認する):
+  - **gongrzhe standalone** (`mcp__gmail-<alias>__*`): **alias 名 = account** (1:1、 `~/.gmail-mcp/<alias>/`)。 runtime の identity tool は無いので alias 名が account の identity。
+  - **アプリ内蔵 connector の UUID** (`mcp__<UUID>__*`): identity tool 無し。 自分発 mail を `search_threads`→`get_thread` で読んで From を確認 / desktop Connectors UI / user 確認 のいずれか。
+  - **Calendar**: `list_calendars` の primary calendar id = 接続 account の email。
+  - (script レベルの API `users().getProfile` は reauth.sh が account 検証に使うが、 session から呼べる MCP tool ではない)
+- **複数 MCP がある場合**: セッションの deferred tools 一覧で同一サービスの MCP が何個あるか確認し、上記方法 (alias 名 / Calendar は list_calendars / アプリ内蔵 connector は自分宛 mail 読み) で UUID→アカウントの対応を把握する
+- **UUID→アカウント対応表は MCP 設定リポに保持**: 各 MCP 設定リポ (例: `gmail-mcp-config`) の CLAUDE.md または SESSION.md に UUID→アカウントの対応を記録する。memory には書かない (machine-local で cross-machine 不整合を招く。詳細: [docs/convention-design-principles.md §5](../docs/convention-design-principles.md#memory-positioning))。新規セッションで対応表が不明・古ければ、上記方法で UUID→account を照合し、差分を MCP 設定リポに追記する
+- **アカウント一覧の正本**: 各 MCP 設定リポの CLAUDE.md を参照（各プロジェクトリポの CLAUDE.md にはハードコードしない）
+- <a id="search-result-cap"></a>**検索の件数が上限 (`maxResults`) と同じなら、 結果は切れている**: Gmail の検索の結果は新しい順に並ぶ (実測) = 返った中で一番古い日付が、 見たい期間の始まりより前かを見る。 届いていなければ、 期間を割るか語を絞って引き直してから「この期間に無い」 と書く (実測: 上限ちょうどの件数が直近の数か月の無関係な便で埋まり、 見たかった前の期間が 1 件も返っていなかった)。 上の「0 件」 の扱いと同じく、 見た範囲を書く
+
+## <a id="claude-mcp-project-resolution"></a>`claude mcp` の project 解決ルール (注意)
+
+`claude mcp add` / `claude mcp remove` の default scope は **local** = 「対象 Claude Code project 内の MCP 登録」(`~/.claude.json` の `projects[<path>].mcpServers` 配下)。"対象 project" は **cwd が git repo の中ならその repo の root、 そうでなければ cwd そのもの** で決まる。 `.claude/` を持つ親の dir へは辿らない (実測: engine 2.1.309 の `claude mcp get`。 `~/Claude` (git でない、 `.claude/` あり) に登録した server は、 `.claude/` を持たない git repo `~/Claude/<repo>` からも、 その子 dir からも、 git でない子 dir `~/Claude/tmp` からも見えなかった)。
+この解決が効くのは `claude mcp` で登録・読み出す時。 desktop の session で Bash の cd により作業ディレクトリが登録の無い project に移っても、 session の開始時に繋いだ MCP は turn の切れ目を越えて繋がったままだった (実測: app 4.29.0 / engine 2.1.309、 別の session の message で始まる turn と本人の発言で始まる turn の両方)。 = 「MCP が消えた」 を cd のせいと決める前に、 server の process が落ちていないか (下の runbook) を見る。
+
+セットアップ用の bash スクリプト等が、**自分自身のリポ内**から `claude mcp` を呼ぶと、登録先が想定外の project に入る:
+
+- 期待: `~/Claude` project に gmail server を登録
+- 実態: スクリプトが `~/Claude/gmail-mcp-config/` 配下から走り、 その git repo の root (`gmail-mcp-config`) を project として resolve → 登録先が `gmail-mcp-config` project になる
+
+回避策:
+
+- スクリプト冒頭で target project に **明示的に `cd`** してから `claude mcp` を呼ぶ。target は引数 / 環境変数で受け取れるようにしておく (cwd 暗黙依存をなくす)
+- あるいは `--scope user` で全 project 共通の user-level 登録にする (per-project 登録にしたい場合は不向き)
+
+設置時 / 撤去時の冪等化 (`claude mcp remove "<name>" 2>/dev/null || true; claude mcp add ...`) は target project が正しいときに初めて意味を持つので、target 解決を先に固める。
+
+## <a id="mcp-recovery-runbook"></a>MCP 接続失敗時のセッション内復旧 (runbook)
+
+session 中に MCP server が `Failed to connect` / `disconnected` 状態になったときの対応手順。**Claude Code の設計上、stdio MCP server は session 起動時に bind されており、起動時に接続失敗するとそのセッション内で再接続する built-in 経路がない** (上流既知 bug、GitHub claude-code issues #20684, #33468 参照)。HTTP/SSE 系は exponential backoff で auto-retry するが、stdio は手動。以下、軽い順に試す:
+
+### <a id="runbook-status-check"></a>0. 状態確認
+
+```bash
+# 全 MCP の現状
+claude mcp list           # ✓ Connected / ✗ Failed to connect
+
+# 該当 server の詳細 (登録 args / env)
+claude mcp get <server-name>
+```
+
+`claude mcp list` の "Connected" は **session 起動時の bind 結果**で、その後 server が落ちても更新されない場合がある。実際のツール呼び出しが通るかどうかが真の動作確認。
+
+### <a id="runbook-handshake-check"></a>1. 該当 server を素手で立ち上げて handshake 通る確認
+
+stdio server の場合、生 stdio で `initialize` リクエストを投げて応答するか確認:
+
+```bash
+echo '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}' | \
+  env <NEEDED_ENV_VARS> node /path/to/server.mjs
+```
+
+応答に `"result":{"protocolVersion":...}` が返れば server 側は健全。問題は Claude Code の MCP daemon 側の cache。
+
+#### <a id="handshake-not-dependency-check"></a>handshake は「起動確認」 であって「依存検証」 ではない (= dependency bump 時の落とし穴)
+
+`initialize` handshake が PASS しても、それは **server の boot + protocol negotiation** を確認したに過ぎない。多くの MCP server は API client (`googleapis` 等) を **lazy に構築する** (= 初回 `tools/call` まで未構築)。したがって、ある dependency が **tool handler の中でしか使われない** 場合、handshake では一切 exercise されず、**handshake PASS は「その依存が動く」 証明にならない**。
+
+→ **major dependency bump (e.g. `googleapis` 171→173) を検証するなら、handshake では不十分。read-only な `tools/call` を投げて実 API round-trip まで確認する**:
+
+```bash
+# 1) initialize で result を受けたら 2) initialized 通知 → 3) read-only tool を call
+#    {"jsonrpc":"2.0","method":"notifications/initialized"}
+#    {"jsonrpc":"2.0","method":"tools/call","id":2,"params":{"name":"<read_only_tool>","arguments":{}}}
+```
+
+複数行 JSON を順に書く client は **`Write` で小さな node/python harness にして単純コマンドで起動**する (= inline の nested-quote JSON は tool call malformed を誘発、 [tool-call-robustness.md](tool-call-robustness.md) 参照)。staged verification 推奨: 1 dir だけ先に bump → bump 前と live 結果を比較 (同一なら回帰なし) → 全 dir 展開、で blast radius を最小化。
+
+**OAuth-backed server を live test する時の副作用**: 実 `tools/call` は token refresh を誘発し、**refresh 結果を書き戻す実装なら** credential file が drift する (= ephemeral な `access_token` / `expiry_date` のみ、durable な `refresh_token` は標準的 refresh では rotate されない。下の §実装時の注意 のとおり、そもそも ephemeral field を書き戻さない実装なら drift しない)。検証後は drift を `git checkout --` で破棄してよい (= 次回使用時に refresh_token から自動再 refresh)。git-crypt'd credential file の durable field が不変かを `git show <rev>:<path>` で diff 確認することは**できない** (= ciphertext が返る、[git-crypt-guide.ja.md トラブルシューティング](../docs/git-crypt-guide.ja.md) 参照) ので、OAuth refresh semantics に依拠する。
+
+### <a id="runbook-log-check"></a>2. log を確認
+
+```bash
+ls -t ~/Library/Caches/claude-cli-nodejs/-Users-odakin-Claude/mcp-logs-<server>/ | head -3
+cat ~/Library/Caches/claude-cli-nodejs/-Users-odakin-Claude/mcp-logs-<server>/$(ls -t ~/Library/Caches/claude-cli-nodejs/-Users-odakin-Claude/mcp-logs-<server>/ | head -1)
+```
+
+`Successfully connected` で終わっていれば session 起動時は OK だった = mid-session で落ちた。`timeout` / `stderr` で終わっていれば起動時失敗。
+
+### <a id="runbook-remove-readd"></a>3. remove + re-add で再登録 (transient 失敗のリトライ誘発)
+
+```bash
+cd ~/Claude  # ★ ~/Claude project scope 必須
+claude mcp remove <server-name> -s local
+claude mcp add <server-name> \
+  -e KEY1=VALUE1 -e KEY2=VALUE2 \
+  -- <command> <args...>
+```
+
+env vars と args は `claude mcp get` で取った内容を再投入。再登録後、**少し待ってから (10-30s)** ToolSearch で当該 MCP の tool schema を取得し直す:
+
+```
+ToolSearch select:mcp__<server>__<tool>
+```
+
+実際に tool を呼んでみる。MCP daemon が新登録を pick up していれば動く。
+
+### <a id="runbook-mcp-slash"></a>4. `/mcp` slash command (status 確認のみ、reconnect ボタンなし)
+
+Claude for Mac の Code タブで `/mcp` を打つと UI 一覧が出る。**stdio server の reconnect/restart アクションは無い** (上流バグ #33468 で feature request 中)。HTTP/SSE は auto-retry 進捗が見える。status 確認用途のみ。
+
+### <a id="runbook-resume"></a>5. `claude --resume` で session 再起動 (最終手段)
+
+ステップ 0-4 で復旧しなければ:
+
+```bash
+# 1. Claude for Mac を Cmd+Q または Code タブを閉じる
+# 2. 元の作業ディレクトリで:
+cd ~/Claude/<project>
+claude --resume
+```
+
+session の会話 / context / tool 許可は **保たれる**。MCP server だけ再起動から bind し直される。stdio server の起動時失敗が transient だったなら今度は通る。**ただし起動時失敗が決定論的 (env / 設定不備) なら何度試しても同じ** → 設定を直してから resume。
+
+### 6. それでも動かない場合の根本原因別 checklist
+
+- **環境変数の missing**: MCP server は Claude Code 起動時の minimal env を継承する。`$PATH` / `$NODE_OPTIONS` / カスタム credential path 等。`-e KEY=VALUE` で明示的に渡す
+  - <a id="npx-absolute-needs-path"></a>狭い PATH (無人の run・launchd) でも起動させるために command を `node` / `npx` の絶対 path にするとき、 **`npx` は絶対 path だけでは起動しない**: `npx` 自身が `#!/usr/bin/env node` で始まり、 PATH に node が無いと exec の段で落ちる (実測)。 `npx` の server には同じ bin の dir を先頭にした `PATH` を `env` にも渡す (`node` を直に起動する server は絶対 path だけで起動する)。 確かめ方 = `PATH=/usr/bin:/bin claude mcp list` で Connected
+- **working directory**: stdio server は Claude Code の cwd を継承。絶対パスで file を参照する設計が安全
+- **credential lock 競合**: OAuth token file を読む系の server が、別プロセス (Python script 等) と同時に lock を取りに行くと timeout。MCP 起動と batch script の同時実行を避ける
+- **cold-start タイムアウト**: googleapis 等の重い import で 2-3 sec かかる。MCP daemon の timeout (30s) には収まるが、複数 server 同時起動で IO 競合があると押し出される。重い server は esbuild 等で single-file bundle を試す
+
+### <a id="runbook-root-cause-checklist"></a>Chrome MCP (Claude in Chrome) の特殊事情
+
+Chrome MCP は `claude mcp` 配下ではなく **Claude.app の Chrome extension 経由** で別経路。`claude mcp list` には出ない。復旧 (上から順):
+
+<a id="extension-installed-check"></a>**-1. 拡張がその browser profile に入っているか (新しいマシン・新しい profile で最初に)**: `list_connected_browsers` が `[]` で、 そのマシンでまだ一度も繋いでいないなら、 下の手順より先に profile の拡張 dir を見る — `~/Library/Application Support/BraveSoftware/Brave-Browser/<Profile>/Extensions/fcoeoabgfenejglbffodgkkbkcdhcgfn` (Chrome は `~/Library/Application Support/Google/Chrome/<Profile>/Extensions/` の同じ id)。 無ければ Chrome Web Store からの install が先 (本人の操作)。 install した直後も `switch_browser` はすぐに「No other browsers available」 を返した (実測) = サイドパネルで session と同じ account に sign-in してから下の 1・2 へ。 待つ間の fallback = ログインせずに読めるものは内蔵 Browser pane、 ログインが必須のサイトは pane で本人がログイン ([`web-tools.md#booking-property-messaging`](web-tools.md#booking-property-messaging) が実例)
+
+0. ~~**account 一致 gate (2026-08-29)**~~ ⚠️ **2026-09-25 実測で否定**: 拡張の署名 ≠ session の実 account の組でも list / navigate / read が通った (両方向)。 `[]` の原因は署名でなく**中継への未登録** (下の 1〜4) を疑う。 署名が効くのはサイドパネルのチャットの account。 以下は経緯として残す: 接続は account-scoped の cloud relay 経由で、 **拡張の署名 account == session の実 account** が前提と考えていた。 desktop session の実 account は app ログイン側 (= harness の userEmail / `.claude.json` oauthAccount は CLI 土台を映す嘘になりうる、 同定手順と軸の整理 = [multi-account-machine-surface.md #failure-modes](multi-account-machine-surface.md#failure-modes))。 claude.ai サイトの login は無関係。 当時は「不一致のまま以下の手順を回しても直らない」 としていた
+1. 拡張サイドパネルを開き署名 account・警告有無を確認 → session 側から `switch_browser` → browser 側 popup の「Connect」 を 2 分以内に click (= 正規の再接続経路)。 broadcast が**待機なしで**「No other browsers available」 を返すのは 2 つの場合 = (a) relay にその account の拡張 instance がゼロ (パネルのチャットが正常でも automation bridge は未登録、 別経路) と (b) instance が 1 つだけで既にこの session の使用中 (2026-10-07 実測: 2 のトグルの直後も同じ文言が返り、 `list_connected_browsers` には `inUse: true` で 1 台出ていた)。 どちらかは `list_connected_browsers` が `[]` かで見分け、 2〜4 の後の「つながったか」 もそれで確かめる
+   - <a id="extension-signin-check"></a>**署名・サインアウトの確かめ方**: サイドパネルで読めなければ拡張の設定画面 `chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/options.html` をその browser profile の窓で開く。 右上に署名の account、 サインアウト中は中央に「ログイン」 ボタンだけが出る (実測: 再ログインしたつもりの拡張がサインアウトのままだった)。 ⚠️ 署名を拡張の保存データ (browser profile の `Local Extension Settings/<拡張 id>/`) から読もうとしない = auto mode が認証情報の探索として止める (実測)。 ⚠️ 拡張のログインは claude.ai の承認画面を通り、 その browser profile で claude.ai にログイン中の account を黙って使う = 承認の前に画面下の「<account> でログイン中」 を読み、 違えば同じ画面の「アカウントを切り替える」 で直してから承認する
+2. Chrome で `chrome://extensions/` → Claude 拡張のトグル OFF → ON で reload → 1 を再試行 (✅ **実測で有効** 2026-08-29: relay instance 0 → 1 に即復活し接続成立 = 「拡張 service worker が relay への接続を張っていない」 仮説と整合。 sign-in し直しだけでは登録されないケースがある。 2026-10-07 も同じく有効 = 移行アシスタントで来た browser profile の拡張は、 旧機と同じ deviceId を持ったまま中継に未登録だった)
+3. または Chrome を quit + 再起動 (✅ 同日別 session でも実測で有効 = cure 2 経路目)。 ⚠️ 2026-09-25 実測: 同じ機械で別 profile の拡張 instance (同じ deviceId) を消した直後は、 2 も 3 もサイドパネルの開放も効かず `[]` が続いた (4 以降の結果は本行に追記 → 別の機械で拡張を新規 install した直後も 1〜4 の全部で `[]` が続いた実測が 1 件ある = 4 でも直らないことがある。 **その先は 5 だけ** — 「別 account の session から見えるか」 の切り分けは空振りだった (実測: 拡張の署名と同じ account の session から引いても `[]`) = **account 軸はこの梯子に段を持たない**ので、 `[]` が続くときに session や拡張の account を替える手を試さない。 その実測では数週間後に中継に出ていた = 何が効いたか 〔拡張の自動更新・browser の起動し直し・server 側〕 は切り分けていない)
+4. 上記でダメなら Mac app (Claude.app) も quit + 再起動
+5. それでも空なら server-side の browser-discovery 障害でありうる (upstream 既知例 = claude-code#58968 = side panel 正常 + local 構成正常でも discovery が fail)。 深追いせず fallback (user 手動 / 内蔵 browser 等) + 時間を置いて再試行
+
+⚠️ **relay は排他制御をしない** (実測 2026-08-29): 同一 account の複数 session が同じ拡張へ**同時に**接続・操作できてしまう (双方の navigate が同一 browser に効く)。 同一実機の browser を触りうる session が複数生きている時は、 操作前に担当を 1 session に決める (= cross-session message で「担当中か」 を照会 → 非担当側は browser 操作を完全停止)。 排他は platform でなく運用で作る
+
+### Chrome MCP で 認証 SPA を scrape できないケース
+
+一部の Google SPA (= Classroom 等、 認証済 iframe 内に主要 content が描画される構成) は Chrome MCP context (= browser の Claude 拡張経由) で **完全に load しない**。 症状:
+
+- `navigate` → URL は変わるが body innerText は ~75 chars (= top nav + 「ページを読み込んでいます…」 banner のみ)
+- 数十秒待っても content frame の grid / button 群が render されない
+- `read_page` accessibility tree に `progressbar "読み込んでいます…"` が永続表示
+- `javascript_exec` で `document.querySelectorAll('iframe')` を probe すると `iframe.src` / `window.gapi` 等の sensitive accessor が **`[BLOCKED: Sensitive key]` / `[BLOCKED: Cookie/query string data]`** で blanked (= Chrome MCP の defensive feature、 cookie / OAuth state が embedded されている可能性のある属性は遮蔽)
+- `window.location.reload()` / 更新 button click でも改善せず
+
+### 対処 (= fallback path)
+
+1. **user の主 browser で開いてもらう**: 通常の browser window (= MCP context 外) で同じ URL を開き、 user に手動で paste / 必要なら screenshot 投稿してもらう。 Chrome MCP の通常 page navigation は依然動くので、 別 tab に「scrape できる方」 と「できない方」 が共存可
+2. **scrape できる類似 page を探す**: 該当 service に MCP / REST API があれば API ルートを優先 (= SPA の view が API で代替可能なら API 取得を選ぶ)
+
+### 一般化 (= 他の認証 SPA でも起こりうる)
+
+「Chrome MCP は scrape できる前提」 で workflow を組まない。 navigate 後に accessibility tree が `読み込んでいます` で凍る、 iframe internals が BLOCKED で取れない場合、 **その page を Chrome MCP で取れない**と判定して即 fallback (= user 手動 paste / API ルート)。 ループで waiting し続けて時間を溶かさない。
+
+### 過去事例
+
+- **2026-05-01**: classroom-cis (stdio) が session 中に disconnected。server.mjs 単独 stdio handshake は OK、log は `Successfully connected` で終わる (落ちた時刻のログなし)。`claude mcp remove + add` で再登録 → 数分後に ToolSearch + tool 呼び出し成功。Mac app は quit せず session 維持で復旧した sample。同時に gmail-* 4 server も system-reminder で disconnected と告知されたが、こちらは自動で再接続成功 (stdio でも `@gongrzhe` の MCP は graceful reconnect 機構を持つ模様)。Chrome MCP は別 incident で接続不可、Mac app 側の対応必要。
+- **2026-05-19**: Classroom UI (= 課題提出者一覧の「ファイルを開いていない」 ラベル展開 view) を Chrome MCP で scrape 試行。 上記症状 (body 75 chars / progressbar 永続 / iframe BLOCKED) を観察、 ~1 min waiting で reload + 更新 button click でも改善せず。 fallback で user 主 browser からの paste 経由に切替えて解決。 一般化ルール (= 上記「対処」) を本 convention に組み入れ。
+
+## <a id="remote-mcp-oauth-redirect-rejected"></a>remote MCP の OAuth が「Redirect URI must use HTTPS or a local loopback address」 で止まるとき
+
+- **現象** (実測): desktop app の MCP サーバー一覧から remote (HTTP) の MCP を「連携」 すると、 認可サーバーが `invalid_request` で拒否する。 desktop app が渡す戻り先 URL を、 HTTPS か loopback しか受け付けない認可サーバーが弾いている = user の操作ミスではない
+- **対処**: 同じマシンのターミナルで `claude mcp login <server 名>` を実行する。 名前は `claude mcp get` / `list` の表記 (plugin 由来なら `plugin:<plugin>:<server>`)。 CLI は `http://localhost:<port>/callback` を戻り先にするので通る。 ブラウザが開かなければ表示された URL を開く (headless は `--no-browser`)
+- **同意画面**: 依頼元 (client) と戻り先 (`localhost`) が起動したものと一致するかを見てから進む。 権限の template は最小 (読み取り) から始め、 書き込みは確認を挟める既存の CLI 経路に残す。 件数だけでは読み取り専用か分からないので、 グループを 1 つ開いて権限名を見る
+- **確認**: `claude mcp get <server 名>` が `✔ Connected`
+- ⚠️ 認証前から開いていた desktop session は `needs_auth` のまま (実測)。 その session の中では tool は増えないので、 新しい session を開いてから使う
 
 ## MCP 設定リポの役割
 
@@ -24,7 +196,92 @@ MCP 設定リポは private にすること（認証情報のパスやアカウ�
 
 ---
 
-## MCP で不十分な場合: API 直接アクセス
+## <a id="desktop-allowedtools-restriction"></a>Claude Code desktop session の `--allowedTools` 制限 (= 「登録済なのに使えない」 trap)
+
+Claude Code desktop app から起動した Claude Code session は `--allowedTools` で **限られた tool list (= 6 個程度: `mcp__computer-use` / `mcp__ccd_session__*` / `mcp__ccd_session_mgmt__*`)** しか渡してこない。 `~/.claude.json` の `mcpServers` に `gmail-personal` / `calendar-cis` 等が登録されていても、 そのまま自動 spawn されず session 内で見えない。
+
+= 「`~/.claude.json` 登録 ≠ session 内可用」 の構造ギャップ。 user が「Gmail MCP 設定してるはずなのに動かない」 と感じる典型 trap。
+
+### 切り分け 3 step
+
+1. **`ps -ef | grep -i "gmail\|mcp"`** で gmail-* MCP server process が走っているか確認。 0 件なら spawn されていない
+2. **当該 session の親 process command を `ps -p <pid> -o command`** で確認。 `--allowedTools` の中身を見て gmail-* が含まれているか
+3. **`~/.claude.json` の projects.<workdir>.mcpServers**  に登録があり、 spawn だけされてない (= allowedTools 由来) なら下記対処
+
+### 対処 3 経路
+
+| (a) | Claude Code desktop に Gmail connector を追加 | desktop UI → Connectors → Gmail → OAuth で新規 wire。 `mcp__<UUID>__*` 形式で見えるようになる (= アプリ内蔵 経路、 1 connector / 1 account) |
+| (b) | Terminal から Claude Code を直起動 | Claude Code desktop でなく `claude` コマンドを直接 launch → `~/.claude.json` 登録 MCP が allowedTools に含まれる起動になる (= 制限なし運用) |
+| (c) | 本 session 内で OAuth token 直叩き Python | `~/.gmail-mcp/<account>/credentials.json` (= access_token + refresh_token) + `oauth-keys.json` (= client_id + client_secret) を Python で読み、 `oauth2.googleapis.com/token` で refresh → Gmail API 直叩き。 MCP layer 経由しない (= 当 session 内即効性ある) |
+
+### harness 組み込み tool への波及 (= scheduled task 登録不可)
+
+⚠️ この `--allowedTools` subset は MCP server だけでなく **harness 組み込み tool** も削る: bridge session (= `CLAUDE_CODE_ENVIRONMENT_KIND=bridge`) では `create_scheduled_task` / `update_scheduled_task` が wire されず (= `ToolSearch "select:create_scheduled_task"` が空)、 fallback の `CronCreate` も `durable: true` を渡して **session-only 化** する (= 永続 local scheduled task を登録できない、 2026-06-23 実証)。 → 定期 task の登録は Terminal 直起動 session (= 上記対処 (b)) に移って行う。 詳細は [`scheduled-tasks.md` registrable-session-types](scheduled-tasks.md#registrable-session-types)。
+
+### 教訓 (= sweep skipping 防止)
+
+「MCP 経由で取れた = 該当 account 全部見えた」 と判断するな。 **2026-06-20 layer-3 RCA**: 単一 Gmail account のみ wired の状態で人名 query 0 件を「Gmail で 0 件で確定」 と universalize、 4 回繰り返してから user の繰返 push で別 account に該当 thread が存在することが判明。 真因 = MCP tool metadata が wire account を expose しない構造ギャップ。 「該当 account が全部 session に bind されているか」 を**最初に**確認するのが正しい sweep の入口。 〔起票 commit (= 2026-06-20 prior version) は **incident 固有名・thread 内容を本節に literal で焼き込んでいた** = 自身が public layer 1 安全規則 §「2026-06-16 拡張」 を踏んだ leak。 該当 literal は 2026-06-20 cold-eyes session でこの commit で sanitize、 git history 側は不可逆〕
+
+詳細 (= 固有名・transcript 内容含む incident 記録) = owner の personal layer (= layer 3、 collaborator は access 不要) に記録。
+
+### 機械 enforcement (= 2026-06-20 RCA 後に追加、 soft guard を hard mechanism で強化)
+
+上記「教訓」 は文字どおり読まれない場合の保険として、 以下 3 hook を `claude-config/hooks/` に投入済 (= setup.sh で全 machine の `~/.claude/hooks/` に symlink + settings.json 登録、 起源 = owner の personal layer の設計 plan (2026-06-20、 collaborator access 不要)):
+
+| hook | phase | matcher | 役割 |
+|---|---|---|---|
+| [`mcp-search-scope-reminder-nudge.sh`](../hooks/mcp-search-scope-reminder-nudge.sh) | PreToolUse | `mcp__.*__(search_threads\|search_emails\|list_messages\|list_threads\|search_threads_by\|list_events)` | search 系 tool 呼び出し直前に scope universalization trap の reminder + fill-in template (= `Verified scope = ___ / NOT verified = ___`) を inject |
+| [`mcp-search-zero-result-nudge.sh`](../hooks/mcp-search-zero-result-nudge.sh) | PostToolUse | 同上 | 0 件結果 (= `No threads found` / `"messages": []` / `Found 0` / `resultSizeEstimate: 0` 等の明確 marker) を検出した直後に強 reminder + 「universal claim 禁止 list (= 「Gmail で 0 件」 「Mac Mail 全 sweep 0 件で確定」 等)」 を inject |
+| [`session-start-mcp-scope-nudge.sh`](../hooks/session-start-mcp-scope-nudge.sh) | SessionStart | (matcher なし) | session 起動時に `~/.gmail-mcp/` + `claude_desktop_config.json` から register 済 account を列挙、 「register 済 ≠ session-active subset」 caveat 込みで anchor として inject |
+
+3 hook とも `-nudge` suffix (= 非 block、 informational only)、 出力経路は `additionalContext` JSON + `~/.claude/surface/*.txt` の 2 段 defensive (= CLI session は前者、 Claude Code desktop session は後者、 [`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork) 「desktop は hook を実行はするが出力を honor しない」)。 配線は `claude-config/setup.sh install_hooks` で全自動、 各 hook 直下に `*.test.sh` (= logic test §A + 起票 transcript の retroactive selftest §B) 同梱。
+
+⚠️ 二次 trap 自覚: hook も「reminder を読み飛ばす Claude」 の前で必ず機能する保証はない (= 起票 session author confession)。 多層化 (= 3 hook 並走 + ToolSearch enumeration + user 側 wire 拡張 = アプリ内蔵 connector に personal Gmail 追加、 plan §blocker (4)) でリスク低減を狙う。 効果検証は live invoke (= 足した hook が同 session で発火するかは build 依存 = [`hook-authoring.md#new-hook-session-snapshot`](hook-authoring.md#new-hook-session-snapshot)、 足した直後に測り、 発火しなければ次 session で観察) が必要、 数回の Gmail-search session で「scope-template が実際に埋められるか」 を観察 → false negative 多発なら escalate (= `permissionDecision: ask` 化、 [`hook-authoring.md` reduction-procedure](hook-authoring.md#reduction-procedure))。 **2026-06-20 post-ship 観察 (n=1)**: 別 session で同 trap 構造 (= Claude Code (desktop) に write tool 不在) を踏みかけたが、 SessionStart capability anchor + 人読 manifest 経由で attempt 前に fallback (= `account-direct.py` Python wrapper) へ routing し完遂、 stuck-state 回避を 1 件で観察。 ⚠️ n=1 の一般化禁止 (= `work-discipline.md §A` 「一度の観察を一般法則化しない」 遵守)、 同型 case の複数 session 再現で仮説支持強化、 逆 case で escalation 検討。
+
+### MCP tool scope manifest (= 人読 reference、 hook の動的 enumeration を補完)
+
+hook C は session 起動時に filesystem + desktop config から register 済 tool を動的に列挙するが、 hook 出力に出ない時 (= silent fail / desktop frontend で surface 経由) や hook が読まれない時のために、 **「どの tool prefix がどの scope に対応するか」 の人読 manifest** を以下に置く。 owner の personal layer の MCP-scope reflex (= 「MCP tool / 外部 search の null」 行) がこの節を pointer 参照する (= reflex の機械補強欄、 personal layer は collaborator access 不要)。
+
+⚠️ leak 規律: 本節は public layer 1 ゆえ **特定 account の email literal は書かない** (= 「odakin@<domain>」 等の literal は禁止、 alias 名と filesystem location までで止める。 詳細 = [`claude-config/CLAUDE.md §「安全規則 (公開リポ)」 + §「2026-06-16 拡張」`](../CLAUDE.md))。
+
+| tool prefix pattern | wire scope (= 何が見えるか) | account 推定の起点 |
+|---|---|---|
+| `mcp__gmail-<alias>__*` (= gongrzhe `@gongrzhe/server-gmail-autoauth-mcp`) | **1 account / 1 alias** (= alias と Gmail account の 1:1 対応、 「register 済 ≠ session-active」 は SessionStart hook で確認) | **alias 名 = account** (= `~/.gmail-mcp/<alias>/credentials.json`)。 ⚠️ gongrzhe server に `get_profile` MCP tool は無い (= account 検証は reauth.sh が API `getProfile` を script で叩く、 session の MCP tool ではない) |
+| `mcp__<UUID>__*` (= アプリ内蔵 connector、 UUID 形式) | **1 connector / 1 account**、 ただし **UUID から account を filesystem 由来で推定不可** (= Claude Code desktop app 内部の wiring) | identity MCP tool 無し。 account を知るには 自分発 mail を `search_threads`→`get_thread` で読んで From 確認 / desktop Connectors UI / user 確認 |
+| `mcp__calendar-<alias>__*` (= 個別 Google Calendar MCP) | 1 alias の Google account / 紐付く全 calendar (= 個人 + 共有) | `~/Library/Application Support/Claude/claude_desktop_config.json` の `mcpServers.<alias>` |
+| `mcp__filesystem__*` | desktop config で許可された path tree (= 全 file が見えるわけではない) | `claude_desktop_config.json` の filesystem entry の path 引数 |
+| `mcp__computer-use__*` | macOS GUI + user 承認した application のみ | `list_granted_applications` で session 中の許可 list を確認 |
+
+**capability profile (= read scope と write scope は別軸、 2026-06-20 write-tool RCA)**: 上記表は「どの account / data が見えるか」 の scope。 別軸として「その tool で何が**できるか**」 (= capability) があり、 特に **Gmail は connector type で send capability が分かれる**:
+
+| connector type | read | draft 作成 + label | send / delete / modify |
+|---|---|---|---|
+| アプリ内蔵 (`mcp__<UUID>__*`) | ✅ `search_threads` / `get_thread` | ✅ `create_draft` / `label_*` / `create_label` | ❌ **expose しない** (= `send_email` / `delete_email` / `modify_email` 不在) |
+| standalone gongrzhe (`mcp__gmail-<alias>__*`) | ✅ `search_emails` / `read_email` | ✅ `draft_email` | ✅ `send_email` / `delete_email` / `modify_email` / `batch_*` |
+
+⚠️ **tool 名に send verb が「無い」 = 「送信不能」 ではない**: アプリ内蔵 connector は **「read-only」 ではなく「send 不可」 が正確** (= draft / label は書ける、 send だけ出さない)。 capability は connector type で決まり、 同 account でも別 connector type が send を出すので、 アプリ内蔵 connector に `send_email` が無いのを見て「メール送信できない」 と即断しない。 send したい時 = (a) standalone `mcp__gmail-<alias>__send_email` の wire を ToolSearch で確認 → (b) なければ `account-direct.py` (= 上記「対処 3 経路」 (c) の Python wrapper) → (c) それも無理なら user に手動送信を依頼。 wire-*account* は UUID から推定不可だが、 **capability *TYPE* は name pattern (= UUID vs alias) で確実に判別できる** (= 静的推論可能、 これが account 軸との非対称性)。 起票 = 2026-06-20 write-tool RCA (= アプリ内蔵 connector のみの session で send_email 不在を観察、 詳細は owner の personal layer の設計 plan、 collaborator access 不要)。
+
+⚠️ **session-active subset の verify は manifest だけでは不能** = 上記は **machine 上 register 済の universe** であって、 session で実際 wire されている subset は別。 Claude Code desktop session は `--allowedTools` で大幅に subset される (= 上記 §「Claude Code desktop session の `--allowedTools` 制限」)。 session 内 verify = (a) ToolSearch で `mcp__` 接頭辞 query して deferred tool list を取得 / (b) wire account の確認は上記 §「MCP tool scope manifest」 表の「account 推定の起点」 列に従う (= gmail alias は alias 名、 アプリ内蔵 connector は自分宛 mail 読み、 Calendar は `list_calendars`)。 ⚠️ `get_profile` / `whoami` という MCP tool は現行 setup に**存在しない** (= 旧 built-in connector の名残、 §共通「確認方法」 参照)。
+
+**起票 incident** (2026-06-20、 詳細 = 個人層 plan): Claude Code desktop session で アプリ内蔵 connector (`mcp__<UUID>__*`) 1 個のみ wired、 他の複数 Gmail account (`mcp__gmail-<alias>__*` 群) は register 済だが session subset 外 → search で「該当無し」 を universalize → 4 回 push 後に Python wrapper (= account-direct.py、 上記「対処 3 経路」 (c)) で別 account に到達。 = **manifest を session 冒頭で「machine 上 register vs session-active」 の差分として読まないと、 同 trap が再演する** (= hook C が surface する役)。
+
+### scope manifest と reflex の関係 (= 重複防止の整理、 起票 plan = `2026-06-20-tool-scope-verification-reflex.md`)
+
+scope-related artifact 3 つの責務分離:
+
+| layer | artifact | 役割 |
+|---|---|---|
+| 機構 (hook) | 上記「機械 enforcement」 の 3 hook | 自動 inject + 0 件結果 trap |
+| 人読 reference (= 本節) | 「MCP tool scope manifest」 表 | tool prefix → scope の type system 的 documentation |
+| 個人層 discipline | owner の personal layer reflex (= 「MCP tool / 外部 search の null」 行、 collaborator access 不要) | reflex (= 0 件 → universalize 前の self-question) + 機構 + 本節への routing |
+
+= **同じ事実を 3 場所に書かない**: hook の reminder 内容 / 本節の manifest / inline reflex の文言、 それぞれ責務が異なる layer なので一見重複に見えても各 layer の観客 (= 機構 / 人読知識 / Claude reflex) に対する用途が違う。 drift 防止は inline reflex の機械補強欄が「mcp.md §機械 enforcement + §MCP tool scope manifest」 を pointer 参照することで吸収 (= manifest 変更時に inline は触らなくて良い)。
+
+**capability 軸 (= write/send tool 不在 trap、 2026-06-20 write-tool RCA) も同 3 layer pattern**: 機構 = `session-start-mcp-scope-nudge.sh §4b` の write/send capability block / 人読 = 上記「capability profile」 表 / inline reflex = owner の personal layer reflex (= 「MCP tool / 外部 search の null」 行) の capability-absence 句。 read scope の null 軸とは別 trap (= 「0 件 → universal absence」 でなく「verb 不在 → 操作不能」 の誤推論) だが、 上流 trait は同一 (= **tool 名は何が含まれ・何ができるかの hint であって guarantee ではない**)。 起票 = owner の personal layer の設計 plan (collaborator access 不要)。
+
+---
+
+## <a id="api-direct-access"></a>MCP で不十分な場合: API 直接アクセス
 
 MCP ツールは個別操作に最適だが、バッチ操作（一括削除・ラベル付け・統計取得等）には向かない。Gmail MCP の `modify_email` は1件ずつだが、Gmail API の `batchModify` は1回で最大1000件を処理できる。
 
@@ -38,6 +295,11 @@ MCP ツールは個別操作に最適だが、バッチ操作（一括削除・�
 | 一括操作（削除、ラベル付け等） | Python + API | `batchModify`/`batchDelete` で最大1000件/回 |
 | 統計・分析（件数、容量等） | Python + API | `messages.list` + 集計が柔軟 |
 | フィルター管理 | Python + API | MCP にフィルター API がない |
+| 確実な thread continuity (`In-Reply-To` 付きの返信送信) | Python + API | 多くの Gmail MCP 実装は `read_email` の戻り値に `Message-ID` ヘッダを含めないため、MCP 単独で `inReplyTo` パラメータを組み立てられない。`messages.get(format='full')` で全 headers 取得 → `Message-ID` 抽出 → 送信側に渡す経路が必要 (個別実装ごとの実機検証は MCP 設定リポの DESIGN.md に記録) |
+| `to` パラメータが array で詰まる場合 | Python + API | 2026-05 `@gongrzhe/server-gmail-autoauth-mcp` v1.1.11 の send_email で、 schema は `to: array` だが harness が JSON array を string と誤って serialize し `invalid_type: expected array, received string` を返す事例あり。 文字列 1 個でも array でも fail。 同一 MCP の他ツール (`search_emails` 等) は影響なし。 fallback として Python Gmail API 直接送信を使う (= `~/.gmail-mcp/{account}/credentials.json` + `gcp-oauth.keys.json` を read して `Credentials` 構築 → `service.users().messages().send`)。 詳細実装例: ある grant 申請 repo の specific 助成事業 dir 内の Python 送信 script (= MCP fallback として `service.users().messages().send` を直接呼ぶ pattern) |
+| Google Sheets / Drive 上のスプレッドシート読み | Python + API | MCP server がないため Python 直接が筋。 `mimeType` で分岐: `application/vnd.google-apps.spreadsheet` (Sheets native) → Sheets API、 `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (xlsx upload) → Drive API で `get_media` + `openpyxl` で parse。 詳細パターンは `conventions/google-api-direct-access.md` |
+| Google Calendar の bulk update (recurring 時限シフト等) | Python + API | MCP の `update_event` は 1 件ずつ。 expansion 後の instance を patch する系は API 直接が筋 |
+| <a id="mcp-tool-idle-hang"></a>何本も検索を重ねる調査 (MCP の tool が応答しないまま止まったとき) | Python + API | MCP の tool が応答も進捗も返さずに止まると、 harness は idle timeout まで turn ごと待つ (実測 = 検索 1 本で 1800 秒、 エラー文は `sent no response or progress for`)。 止まったら同じ server を呼び直さず、 同じ認証情報で API を直接叩く script に切り替える (同じ検索が数秒で返った = 実測)。 server 単位の timeout は MCP の設定の `timeout` (ms) で短くできる |
 
 ### スコープに注意
 
@@ -50,15 +312,88 @@ MCP サーバーが取得した OAuth トークンのスコープによって使
 
 ### 実装時の注意
 
-- Python スクリプトがトークンを refresh した場合、access_token だけでなく **refresh_token も書き戻す**。Google が refresh_token を回転させた場合に旧トークンだけがファイルに残ると、MCP サーバーも Python スクリプトも認証不能になる
+- Python スクリプトがトークンを refresh した場合、**書き戻すのは `refresh_token` が実際に変わったときだけにする**。回転したのに書き戻さないと、旧トークンだけがファイルに残って MCP サーバーも Python スクリプトも認証不能になる。一方 `access_token` / `expiry_date` は短時間で失効し `refresh_token` からいつでも再生成でき、しかも複数個が同時に有効なので、永続化しても情報は増えない (書き戻さなくても各プロセスが起動後の初回 API 呼び出しで自前に refresh する)。**credential file を VCS で追跡しているなら、この 2 field の書き戻しは conflict を生むだけ**で、暗号化していれば binary 扱いになり自動マージも効かない (= 中身を読めないまま ours/theirs を選ぶ羽目になる)。⚠️ 実際に回転するかは **token 応答に `refresh_token` が含まれるか**で確認できる。標準的な refresh では含まれない (= 上の live test 副作用の項と同じ理由で、durable field は不変)
 - MCP サーバーと Python スクリプトの同時実行は避ける（token refresh の競合リスク）
 
 各ユーザーの具体的な実装（認証情報のパス、スクリプト等）は MCP 設定リポの DESIGN.md に記録すること。
+
+## Google API で create された resource の UI 制約 (third-party tool 制限)
+
+Google API 経由で create された Calendar event / Classroom coursework / Drive file 等の resource は、 Google 側で「third-party tool 由来」 として永続フラグされる場合があり、 **UI 上の一部 toggle / 操作が disable される**ことがある。 これは API ルートで完全に同等な resource を作れないことを意味し、 「UI で create された state を完全再現したい」 use case では UI 経由でしか達成できない。
+
+### 観測された具体例
+
+- **Classroom courseWork**: API 経由で create されたものは `associatedWithDeveloper: true` が永続的に付与され、 UI で「サードパーティ製ツールからの提出は締め切ることができません」 message が表示されて 「期限後に提出を締め切る」 toggle がグレーアウト。 これは creation state (DRAFT / PUBLISHED) を問わず適用、 つまり「DRAFT で API create → UI で toggle flip + publish」 ワークフローでも回避不能 (= API ルート完全 close)。 「生徒はクラスメイトに返信できます」 toggle も同制限の対象と推定 (要 UI 検証、 Google が公開 schema に expose していない UI 専用 toggle 全般が同制限を受ける可能性)
+- **Calendar event**: API 経由で create された event は creator の application name が UI に表示される。 一部 advanced settings (recurring rule の細部、 visibility 等) で制限を受ける場合あり (Calendar API は比較的緩い)
+- **Drive file**: API 経由で upload された file は「<App name> から作成」 が表示される。 ファイル type 変換 / format 制限が一部働く
+
+### 検出と回避
+
+実装時に判別する手段:
+1. **Discovery doc** (`https://<service>.googleapis.com/$discovery/rest?version=v1`) を取得して resource schema 全 field を確認 → UI 上 toggle に対応する field が無ければ **API では set 不可**
+2. **Experimental に予想 field 名を投稿** → reject されれば確認 (rare に "silently ignored" もあるので read で echo back されるか確認も)
+3. **API で create した resource を UI で開いて toggle / 操作の有効性を確認** → グレーアウト されれば third-party tool 制限あり
+
+回避策:
+- UI 完全制御が必要な resource は **UI で create する**経路を残す (= 利用者個別の運用ルールは MCP 設定リポ側の CLAUDE.md / DESIGN.md に記録。 SESSION.md は現在地だけ)
+- API ルートは**制約を受けても困らない use case** で活用 (e.g., 期限後 late submission を accept する運用、 配点付き ASSIGNMENT、 内部試行 / DRAFT prototype、 batch 投稿)
+
+### 経緯 (本 section 追加の契機)
+
+2026-05-09 Classroom MCP の `classroom_create_coursework` ツール (= `courses.courseWork.create`
+を wrap、 SHORT_ANSWER_QUESTION 対応) を実運用に投入する dogfood 段階で、 **API ルートで
+「期限後に提出を締め切る」 toggle を ON にできない**ことが判明。 第一段では Discovery
+doc + 8 field name experimental 投稿で API field 不存在を確認、 第二段では DRAFT で
+create + UI で開く検証で associatedWithDeveloper 永続フラグによる UI grayout も確認
+→ API ルート完全 close。 詳細・メタ教訓は owner の private layer (= gmail-mcp 運用記録 + personal layer、 collaborator access 不要) に記録。
 
 ## Google Calendar MCP
 - 操作前にカレンダー一覧で対象カレンダーが正しいことを確認
 - 共有カレンダー命名: `{共同研究者名}{自分の名字}共同研究`
 - イベント作成時は日時・タイトル・参加者をユーザーに確認してから作成
+- <a id="calendar-identify-meeting-from-source"></a>**メールを起点に次回の会議を登録する場合**は、本文の付議先で対象を特定し、主催者の最新の開催案内で日時・会場・形式を照合する。依頼中の通称と候補の定例枠が一致しても、元のメールに別の付議先が出ていれば、そちらの開催案内を先に探す。
+- <a id="calendar-unintended-meet-link"></a>**対面や手元用の予定**を Codex の Google Calendar 接続ツールで作る際は `add_google_meet: false` を明示し、保存後に読み戻して会議リンクを確認する。実測では値が未指定の作成で Meet が付き、更新時に `false` を渡した後も既存のリンクは残った。
+  - 自分で作成した個人用の予定から意図しないリンクを外す場合は、対象のカレンダーとイベント ID を GET で照合してから、[Calendar API の `events.patch`](https://developers.google.com/workspace/calendar/api/v3/reference/events/patch) に `conferenceDataVersion=1` と本文 `{"conferenceData": null}` を渡す。自分だけの予定を通知を送らず訂正する場合の値は `sendUpdates=none`。再取得して `conferenceData` と `hangoutLink` が消え、日時・通知が保たれていることを確認する。
+
+## Gmail 本文の plain-text / HTML 二重表現 (= 読み「空」誤認 + 書き HTML entity)
+
+メール本文は **plain-text 表現と HTML 表現の 2 つ**を持ちうる (multipart/alternative)。**HTML-only のメール** (= text/plain パートを持たない。HTML メーラ + S/MIME 署名や一部の通知系で起きる) を素朴に扱うと**読み・書きの両方向で事故る**。両者は同じ「plain-text と HTML を取り違える」混同の表裏。
+
+### 読み側: 「text/plain が無い」 ≠ 「本文が空」
+
+- **text/plain だけを抽出する body extractor は、HTML-only メールに対して無音で空文字列を返す**。読み手はそれを「本文空」と誤読する (= 単一の表現〔text/plain〕の null を「本文不在」に飛躍させる失敗。安価な検証を先に回す原則の email-body 形態)。実際には HTML パートに実質的な本文が入っている。
+- 標準の `read_email` (= `@gongrzhe/server-gmail-autoauth-mcp`) は `body = text || html` で **HTML に fallback** し `[Note: This email is HTML-formatted. Plain text version not available.]` を付けるので「空」を出さない。**だが自作の直読 helper / Python snippet で `mimeType == "text/plain"` だけ拾う実装は空を返す** (= ここが事故源)。
+- **reflex**: メール本文が「空」に見えたら結論する前に、それが**表現の artifact でなく本当の空**かを 1 操作で verify する — (1) `format=full` で text/html パートを見る、または (2) 標準 `read_email` で読み直す。
+- body extractor を自作するなら **text/plain 不在時は text/html に fallback** し (de-tag + 「HTML-only」 marker)、空を返すのは plain も html も無い時だけにする (= 標準 MCP と同じ契約)。空文字列を「本文空」の意味で出さない。
+- <a id="gmail-body-crlf"></a>**text/plain は CRLF の改行で届く** — 行から値 (会議の passcode・受付番号・口座番号) を取り出すと末尾に `\r` が残り、 貼った先・比べた先で一致しない (実測: 取り出した passcode をクリップボードに入れて渡し、 Zoom に通らなかった。 `\r` は端末にも chat にも見えない)。 行末の `\r` は正規表現の行末 (`re.M` の `$`) の一致も黙って外す。 ∴ **本文を自分で decode する道具は、 decode の直後に `\r\n` → `\n` にそろえる** (表示・照合用の本文なので失うものが無い)。 本 repo の共有の取り出し口 [`scripts/lib/gmail_read.py`](../scripts/lib/gmail_read.py) と [`scripts/lib/mail_watch.py`](../scripts/lib/mail_watch.py) はそろえてある = 新しい道具は自前で decode せずこれを使う。 危ないのは本文の byte を shell の pipeline (`grep` → `pbcopy` など) に流す経路で、 MCP で読んだ本文から値を取るときは agent が値を打ち直すので `\r` は乗らない。 値を確かめるときは中身を出さず、 字の種類と長さだけを見る (例: 数字を `9` に置き換えて長さと並べる)。
+
+### 書き側: send_email の body は plain text — HTML entity を書かない
+
+- MCP / API の send は body を plain text として MIME に詰めるだけで HTML entity を**decode しない**。`<` を `&lt;`・`>` を `&gt;`・`&` を `&amp;` と (XML/JSON escape の reflex で) 書くと、**受信側に literal `&gt;` がそのまま表示**される。返信の引用行 `> 元本文` で特に起きやすい。
+- `<` `>` `&` は **literal で書く**。「XML/JSON 内だから escape が要る」と感じたら危険サイン (= 実際には plain text を渡している)。
+- **`inReplyTo` 等の header 系 param も同じ**: RFC Message-ID (= `<...>` で囲まれた message id 文字列) を entity (`&lt;...&gt;`) で渡すと In-Reply-To / References header が `<&lt;...&gt;>` に壊れる (実発生 2026-07)。 Gmail 同士は件名で thread されるため気づきにくいが RFC threading は壊れている。 literal の `<>` で渡す。
+
+### 機械化の射程 (= honest、effective な層だけに置く)
+
+- **読み側**は body extractor のコードで根治できる (= 自作 helper を text/html fallback にする)。これは tool が返す値そのものを直すので **hook 不要・どの frontend でも効く** (= Claude Code desktop でも有効)。最も leverage が高い。
+- **書き側は本質的に機械化が難しい**。PreToolUse hook で send body を scan する手はあるが、**Claude Code desktop では hook 出力が honor されないと観測されていた** ([`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork)。 ⚠️ 2026-09-11: 少なくとも一部は root 限定の `disableAllHooks` が原因 = [#disableallhooks-kill-switch](hook-authoring.md#disableallhooks-kill-switch))ため、まさに事故が起きる環境で効くと保証できない = 足しても「対策済」の false confidence にしかならない。送信が Bash script (= 直叩き wrapper) 経由なら script 内に entity の事前 scan を仕込めば**その経路では**機械的に止まる (frontend 非依存)。だが **MCP send 経路 (`mcp__gmail-*__send_email`) は介入できない**。∴ MCP-send-in-desktop の `&gt;` は **prose 規律 + human review が最後の floor**。欠陥自体は cosmetic (引用が崩れて見えるだけで趣旨は伝わる) なので、効かない機械層を積むより honest にそう書く。
+
+## Gmail send: 添付ファイルは明示 MIME が要る
+
+send (= MCP `send_email` / Gmail API `messages/send`) に file を添付するには、 plain-text body をセットするだけでは**付かない**。 multipart MIME を組んで file パートを足す要がある: stdlib なら `EmailMessage.set_content(body)` の後に `msg.add_attachment(data, maintype=…, subtype=…, filename=…)` (= MIME type は拡張子から `mimetypes.guess_type` で推定)、 それを `base64.urlsafe_b64encode(msg.as_bytes())` して `messages/send` の `raw` に渡す。
+
+- **body だけ受ける send helper / thin wrapper は body しか送らない** (= 添付フィールドを持たない)。 添付が要るなら API 直叩きで raw MIME を自前で組む経路に切り替える (= `send_email` MCP tool が添付 param を出すかは server / version 依存、 確実なのは raw MIME)。
+- **送信前に添付パスの存在を atomic に検証**する (= 1 つでも欠けたら batch 全体を abort)。 §書き側 の HTML-entity gate と同様、 部分送信してから気付く事故を防ぐ。
+
+## <a id="gmail-read-email-omits-cc"></a>Gmail MCP: read_email は Cc を出さない
+
+`@gongrzhe/server-gmail-autoauth-mcp` (v1.1.11) の `read_email` / `search_emails` が出すヘッダは Thread ID・Subject・From・To・Date だけで、 **Cc と Message-ID は出ない** (実測)。 出力に Cc 行が無いことは「Cc が空」 を意味しない。
+
+- Cc に誰が入っているかを**述べる・判断に使う・返信で引き継ぐ**前に、 原メッセージのヘッダを Gmail API で読む (`messages.get?format=metadata&metadataHeaders=To&metadataHeaders=Cc`、 または `format=raw` を `.eml` に保存して読む。 認証は [§API 直接アクセス](#api-direct-access))。
+- 典型の誤り = 「この返事は相手を Cc から外している」 と読み、 要らない転送を起案する (実測)。 書き側の同類 = 全員への返信で Cc を落とす。 本文の宛名の直下の「Cc: ○○様」 の行はヘッダの Cc ではない (書いた本人が実際に Cc に入れたかは分からない)。
+- 機械 = hook [`hooks/gmail-read-email-cc-nudge.sh`](../hooks/gmail-read-email-cc-nudge.sh) (PostToolUse) が、 read_email の出力のヘッダの段に Cc 行が無いとき、 ヘッダの読み方を 1 行添える (文の規則だけでは読む turn で当たらなかった、 実測)。
+- <a id="gmail-header-name-case"></a>**API でヘッダを読む自前の script も、 ヘッダ名を大文字小文字を区別せずに引く**。 ヘッダ名は大文字小文字を区別しない (RFC 5322) が、 Gmail API の `payload.headers` は送り手の書いた綴りのまま返し、 Outlook 系は `CC:` と書く。 `{h["name"]: h["value"]}` の dict を `.get("Cc")` で引くと空になり、 上と同じ「Cc が空」 の誤りが出る (実測)。 dict を作るときに名前を小文字に揃え、 引くときも小文字で引く。
+- **「新しいメールは来ていない」 と答えるときは、 確かめた時刻を添える** = 返信が続くスレッドでは答えを書いている間に偽になる。 規律と実例の正本 = [`multi-session-coordination.md#mailbox-absence-as-of`](multi-session-coordination.md#mailbox-absence-as-of)。
 
 ## Gmail MCP: read_email の大容量出力と chunked 処理
 

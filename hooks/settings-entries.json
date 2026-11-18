@@ -1,0 +1,696 @@
+{
+  "_comment": "層1 hook の settings.json 配線の唯一の list (event → entries)。 setup.sh / scripts/sync-hook-settings.sh / 各 machine の bootstrap が同じものを読む。 各 hook の説明は hooks/README.md (header 1 行目)、 event ごとの経緯は setup.sh の Step 2 comment。",
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/currentdate-anchor.py"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-provenance.py"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-mcp-scope-nudge.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-claude-account-change.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-windows-bootstrap.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-host-stamp.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/manuscript-claim-guard.py --liveness",
+          "timeout": 30
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-rewrite-follow.sh",
+          "timeout": 90
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-start-upstream-pr.sh",
+          "timeout": 30
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/owner-asks.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/first-prompt-stamp.py"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/codex-parent-worker-record-nudge.py",
+          "timeout": 5
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/owner-asks.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "Edit|Write",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/memory-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|Write|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-shape-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|Write|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/public-leak-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/memory-guard-bash.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|Write|MultiEdit|Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/google-url-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/expensive-tmp-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/zsh-word-split-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/long-bash-command-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/cd-git-write-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/workspace-root-git-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/shared-tree-stash-guard.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/foreign-hunk-commit-nudge.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/guard-cli-form-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/office-inplace-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/downloaded-file-import-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/escape-hatch-guard.py",
+          "timeout": 20
+        }
+      ]
+    },
+    {
+      "matcher": "Bash|Grep|Glob|Read|Edit|Write",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/protected-dir-access-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|Write|MultiEdit|Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/manuscript-claim-guard.py",
+          "timeout": 20
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__.*__(search_threads|search_emails|list_messages|list_threads|search_threads_by|list_events)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/mcp-search-scope-reminder-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__.*__(spawn_task|start_session)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/spawn-dedupe-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Agent|Task",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/delegation-record-clause.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/headless-record-clause-nudge.py",
+          "timeout": 5
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/cli-binary-read-nudge.py",
+          "timeout": 5
+        }
+      ]
+    },
+    {
+      "matcher": "AskUserQuestion|mcp__.*__wrap_up",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/decision-question-jargon-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Edit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/live-engine-edit-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "^(mcp__.*__(start_session|set_session_model|set_session_effort)|SendMessage|Agent|Task)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-launch-check.sh",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/workflow-launch-check.sh",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Bash|mcp__.*__(stop_session|archive_session)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/busy-worker-stop-check.sh",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/codex-headless-launch-check.sh",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "^SendMessage$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/worker-safety-stop-guard.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "^Workflow$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/workflow-fanout-check.sh",
+          "timeout": 30
+        }
+      ]
+    },
+    {
+      "matcher": "SendMessage|mcp__ccd_session_mgmt__send_message|Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/owner-window-notice.sh",
+          "timeout": 5
+        }
+      ]
+    },
+    {
+      "matcher": "SendMessage|Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*send_email|mcp__ccd_session_mgmt__.*|mcp__ccd_session__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/owner-asks.sh",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/git-state-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Read",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/pdf-read-fallback-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Read",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/stale-read-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|Write|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-commit-nudge.sh track"
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__.*__(search_threads|search_emails|list_messages|list_threads|search_threads_by|list_events)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/mcp-search-zero-result-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "^mcp__gmail.*__read_email$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/gmail-read-email-cc-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/bash-search-zero-result-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/chat-path-base-nudge.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash|Grep|Glob|Read|Edit|Write",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/protected-dir-access-guard.py"
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__.*__(spawn_task|start_session|dismiss_task)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/spawn-dedupe-guard.sh"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash|mcp__.*__archive_session",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/known-error-nudge.py"
+        }
+      ]
+    },
+    {
+      "matcher": "Bash|Read|Grep|mcp__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/value-index-output-nudge.py"
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__.*__(start_session|set_session_model|set_session_effort)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-launch-check.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostToolUseFailure": [
+    {
+      "matcher": "Bash|mcp__.*__archive_session",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/known-error-nudge.py"
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/session-commit-nudge.sh nudge"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/pasted-command-comment-guard.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/chat-file-ref-enforce.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/visible-html-comment-enforce.py"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/first-turn-stamp-check.py"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/manuscript-claim-guard.py --stop"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/turn-complete-sound-nudge.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/codex-parent-worker-record-nudge.py",
+          "timeout": 5
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/chat-math-render-guard.py",
+          "timeout": 20
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/decision-question-jargon-nudge.sh"
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/wrap-reply-knowledge-check.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/owner-asks.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/owner-asks.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SubagentStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/codex-parent-worker-record-nudge.py",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "SubagentStop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/codex-parent-worker-record-nudge.py",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}

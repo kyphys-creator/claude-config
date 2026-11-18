@@ -11,21 +11,27 @@
 - claude-config ([github.com/<owner>/claude-config](https://github.com/<owner>/claude-config)) を clone することを推奨（共通規約と Claude Code 流儀のため）
 - 自分の個人層（[personal-layer 規約](https://github.com/<owner>/claude-config/blob/main/docs/personal-layer.md)）があればそれが cascade で適用される
 - 個人層を持っていない場合も本リポは standalone で動作する
+- 手元の準備 (各自の token・道具・最初に読む節) は session 開始時に `tools/collaborator-check/collaborator-check.sh` が点検し、 欠けた物を直し方つきで出す (Claude Code の project hook。 hook を持たない agent は session 開始時に 1 回実行。 仕組み = [shared-repo.md#collaborator-check](https://github.com/<owner>/claude-config/blob/main/conventions/shared-repo.md#collaborator-check))
+- (Python で計算する repo なら) Python は `tools/py` から起動する (`tools/py script.py`)。 版の宣言 = `.python-version`、 依存 = `requirements.txt`。 venv は初回の実行で自動で作られ、 宣言の版の Python がこの機械に無ければ `tools/py` が入れ方を言って止まる (仕組みと環境ごとの挙動 = [python-env.md](https://github.com/<owner>/claude-config/blob/main/conventions/python-env.md))
+- Codex の `~/.codex` 設定は各 collaborator の layer 4 の選択であり、本リポはそれにも
+  その人の personal layer にも依存しない。project file から `~/.codex` や個人層の path を
+  参照しない
 
 ## (オプション) git-crypt
 
-`<encrypted-paths>` のみ暗号化する場合の例:
+git-crypt を使う場合、本 CLAUDE.md には **1-2 行のポインタ + 反パターン警告のみ** 書く (auto-load コスト抑制 + 同一テンプレ流用での collaborator UX 統一)。詳細手順は SETUP.md.template から生成した [`SETUP.md`](SETUP.md) に置く。
+
+例:
 
 ```
 **git-crypt 有効**（`<encrypted-paths>` のみ暗号化）。
-
-**復号**: `git-crypt unlock <your-key-path>`
-- 鍵の正本: <共有フォルダ>/<project-name>.key
-- 個人層の `shared-project-keys.md` にエントリを足すと Claude が自動で正しいパスを使う
-- なければ fallback: `~/.secrets/<project-name>.key`
+- 復号後の日常運用: `git-crypt unlock ~/.secrets/<project-name>.key`
+- **新マシン初回セットアップ → [SETUP.md](SETUP.md) を必ず読んでから進める**。`cd ~/Claude/claude-config && ./setup.sh` で全自動。⚠️ **手動 `openssl enc -d ...` から始めない** (path 誤りで bad-decrypt 残骸事故が過去あり、SETUP.md §反パターン警告 参照)
 ```
 
-詳細: [claude-config/conventions/shared-repo.md](https://github.com/<owner>/claude-config/blob/main/conventions/shared-repo.md) の「共有 git-crypt 鍵パターン」セクション。
+SETUP.md (= `templates/shared-project/SETUP.md.template` を埋めて生成したもの) は cold reference の役割で、5 段の復号失敗アンチパターン全てに対する防御 (反パターン警告 + Step 0 事前確認 + Step 2 事後確認 + 推奨経路最優先) を組み込んでいる。
+
+詳細: [`docs/git-crypt-guide.ja.md`](https://github.com/<owner>/claude-config/blob/main/docs/git-crypt-guide.ja.md) §共有リポでの自動復元、および [`conventions/shared-repo.md`](https://github.com/<owner>/claude-config/blob/main/conventions/shared-repo.md) の「共有 git-crypt 鍵パターン」セクション。
 
 ## 責務
 
@@ -39,8 +45,9 @@
 
 ```
 <project-name>/
+├── AGENTS.md            # Codex が自動発見する薄い入口 → CLAUDE.md / SESSION.md
 ├── CLAUDE.md            # このファイル
-├── README.md            # 公開向け説明（最小限）
+├── README.md            # 公開向け説明（最小限。public 化 / CLAUDE.md を読まない読者がいるなら build/quickstart の写しもここ、正本は CLAUDE.md: CONVENTIONS §README の流儀）
 ├── SESSION.md           # 現在の作業状態
 ├── DESIGN.md            # 設計判断と理由
 ├── TODO.yaml            # タスクの正本（あれば）
@@ -50,6 +57,10 @@
 ## 共通規約参照
 
 共有リポの一般ルール: [claude-config/conventions/shared-repo.md](https://github.com/<owner>/claude-config/blob/main/conventions/shared-repo.md)
+
+数式を含む返事を書く前に、[チャットの数式表示の正本](https://github.com/<owner>/claude-config/blob/main/conventions/chat-math-rendering.md#by-surface)を読み、Codex app・Claude の Code タブ・端末など、読む画面の既定を適用する。
+
+Claude の desktop app の Code タブで読む返事では、 数式を LaTeX で書く (上の正本の表の既定。 区切り・使えるコマンドは同じ正本の [#code-tab-katex](https://github.com/<owner>/claude-config/blob/main/conventions/chat-math-rendering.md#code-tab-katex))。 書き方は同じ正本の [既定の 3 行](https://github.com/<owner>/claude-config/blob/main/conventions/chat-math-rendering.md#code-tab-default-form) = `\` を含む式は直前に半角空白を置いた ` \( … \)`、 添字と上付きは必ず `{}` で包む、 数・区間は地の文。 ターミナルで読む返事は Unicode。
 
 ## 公開前 audit
 

@@ -1,0 +1,59 @@
+<!-- doc-meta
+when: mail を YAML の台帳に記録する道具を入れる・使うとき + 既存の台帳に「読んだ位置」 の印を機械で足すとき + 未記録の返事を見張る検出器と記録の道具が同じ id を別々に読んでいると気づいたとき
+category: mail
+summary: mail の記録は thread 1 つに entry 1 つ、 id は道具 (scripts/record-reply.py) だけが書き、 読んだ位置の印 recorded_upto と索引 messages[] で「どこまで記録したか」 を明示する。 台帳の形 (索引の名前は相手 = 自分発は宛先、 下書きは message でない)・手順 (dry-run → --apply、 --check、 --migrate は message として記録した id だけ、 --relabel で索引を今の規則に引き直す)・失敗の向き (再 parse で戻す / 引けない thread を未記録に倒さない / cache は移行専用)・shim の作り方。
+-->
+# mail の記録台帳 — thread 単位の entry と、 読んだ位置の印
+
+原理は [`email-surface-pattern.md#single-writer-thread-cursor`](email-surface-pattern.md#single-writer-thread-cursor) (書き手を道具 1 つにする)。 本 doc はその道具の**台帳の形・手順・失敗の向き・導入**の正本。 実装 = [`scripts/record-reply.py`](../scripts/record-reply.py) (engine)、 kernel = [`scripts/lib/recorded_ids.py`](../scripts/lib/recorded_ids.py) (記録済み id の書式) / [`scripts/lib/todo_thread_links.py`](../scripts/lib/todo_thread_links.py) (項目 → thread の link) / [`scripts/lib/gmail_read.py`](../scripts/lib/gmail_read.py) (Gmail の読み)。 個人の台帳の場所・account・自分の address は下の層の shim が渡す (engine に個人の値は無い)。
+
+## <a id="schema"></a>1. 台帳の形
+
+台帳 = `<root>/<ledger>/inbox/<YYYY-MM>.yaml` (mail の entry の列) と `<root>/<ledger>/todo/<id>.yaml` (1 entry 1 file。 旧 `<root>/<ledger>/TODO.yaml` が残っていればそれも読む、 読み方 = `scripts/lib/todo_ledger.py`) (項目の列)。 複数の台帳を 1 つの道具が読む (= 「1 つの台帳だけ grep して未記録と誤る」 を design-out)。
+
+entry (`record-reply.py --schema` が出す 1 例が正本。 既存の house style の**部分集合** = 既存の読み手が今のまま読める):
+
+| field | 意味 | 誰が書くか |
+|---|---|---|
+| `id` | `<記録した最初の message の日付>-<相手 / 用件>-<received \| sent>` | 道具 (中央の語は `--slug`) |
+| `subject` / `from` / `to` / `cc` / `account` / `received` or `sent` | 最初に記録した message の素性 | 道具 |
+| `threadId` / `messageId` | thread と最初の message (互換のため残す) | 道具 |
+| `recorded_upto` | `"messageId:<hex> (<YYYY-MM-DD HH:MM>)"` = **読んだ位置の印**。 索引の最新と一致 | 道具だけ |
+| `messages` | 1 通 1 行 `"mid:<hex> <日時> ← <差出人>"` / `"mid:<hex> <日時> → <宛先>"` = **機械が書く索引**。 名前は常に**相手** (← 相手発 = 差出人 / → 自分発 = 宛先。 自分を除いた最初の宛先 + ` +N`、 To が自分だけなら Cc → Bcc)。 本文・snippet は書かない。 下書き (Gmail の DRAFT) は message ではない = 載せない | 道具だけ |
+| `category` | message の素性 (received / sent)。 案件の状態は項目側 | 道具 (既存 entry は触らない) |
+| `related_todo` | 結ぶ項目の id (裸) | 道具 (無ければ足す) |
+| `summary` | 3 行まで。 事実の正本 (金額・日付・決定) は書かず pointer だけ。 新規 entry を `--summary` 無しで作ると印 `(summary not written)` が入る = 道具がそう知らせる。 印だけの要約は後から同じ道具の `--summary` で埋まる (中身のある要約は道具が変えない = 手で直す) | 人 / agent (道具に渡す) |
+
+印と索引の値は harvester の契約の中の書式 (`messageId:` / `mid:` 接頭辞) で書く = 読み手を変えない。 道具の出力の形は harvester の fixture に載せて固定する。
+
+<a id="non-mail-records"></a>mail でない message (チャットの記録など、 道具が引けない id) は `messages` / `recorded_upto` に書かない。 id を残すなら別の field 名 (例 `discord_messages`) に書く。 索引の形を手で真似て `messages` だけを書いた entry は、 `--check` が「片方だけ」 と出す (実測 = チャットの記録と、 道具の home entry とは別に手で索引を書いた mail の記録)。
+
+項目側 (TODO): `status_context` = 現在地の 1 欄 (道具が `"<日付> <相手> の返事 (<件名>) → 次: <一手>"` の形で**上書き**、 template は shim が渡す。 template は記録した最新の message の向きと「返事か」 で 4 つから選ぶ = 相手発の返事 `--ctx-reply` / 相手発で返事でない `--ctx-new-in` / 自分発の返信 `--ctx-sent` / 自分発で返信でない `--ctx-new-out`。 「返事か」 = 件名の先頭が転送 (`Fwd:` / `Fw:` / `転送:`、 ML の `[tag]` の後も) でなく、 thread のそれより前に反対側の message が在るか。 新規の送信・追送・転送を「返信」 と書かない。 較正 = 台帳の全索引行を Gmail の header と突き合わせた実測で、 In-Reply-To は送信の道具が付けない / 道具に渡した直前の自分の mail を指すので使えず、 参加者 〔宛先が前に書いたか〕 は ML 宛ての返信を外す)、 `updated` = 今日、 `--status` があれば `status` (enum は shim が渡す)、 `email_ref` が無ければ `"threadId:<id>"` の 1 行。 notes には決定・事実・根拠だけを書き、 日付つきの進捗行を足さない (= 台帳が log になって肥大しない。 履歴は版管理)。
+
+## <a id="procedure"></a>2. 手順
+
+1. **dry-run** (既定): `record-reply.py <項目 id | threadId | messageId | entry id>` → thread の全 message を「この entry に在る / 他所で記録済み / 未記録」 に分けて出し、 未記録の本文 (引用行を除く) と書く予定の差分を見せる。 項目 → thread は 3 経路 (cross_ref の inbox 参照 / email_ref / related_todo の逆引き) を読み、 `--closed-status <閉じた status>` を渡せば 4 つめ = 引き継ぎ (その項目へ現在地で「続きは <id> へ」 と渡して閉じた項目の thread) も読む。 子の項目を文で閉じた後に同じ thread へ返事が来ると、 子に結ばれていた thread はどの開いた項目にも結ばれず、 親を target にしても辿れなかった (実測) = 見張り (未記録の返事の検出器) と同じ辺を記録の道具も辿る ([`../docs/convention-design-principles.md#prose-handover-is-not-an-edge`](../docs/convention-design-principles.md#prose-handover-is-not-an-edge))。
+2. **--apply**: 台帳の月 file の home entry (結ぶ項目に link する最新の entry) に足す or 新規に作る (`--slug` か `--id`)、 結ぶ項目の現在地を `--next` で上書き。 書くのはこの 2 file だけ。 案件の正本・calendar・mail の label / 既読は書かない。
+   - ⚠️ `--next` は現在地の欄を丸ごと置き換える = **台帳を pull した後の dry-run が出す「今の現在地」 を読んでから組む**。 pull の前に見た現在地から組むと、 並列の session がその間に足した手順を消す (実測)。 消したら、 その場で新旧を合わせた 1 欄に書き直す
+   - <a id="context-replaces-key"></a>**読んだ印を機械で求める** (`--require-replaces on`、 shim が渡す): 現在地のある項目を書く `--apply` は、 dry-run が見せる「上書きの鍵 = `--replaces <8 桁>`」 を要る。 鍵が無い・読んだ後に現在地が変わった = 書かずに exit 1 で、 ✗ の 1 行に今の現在地を全文出す。 上の ⚠️ の文だけでは止まらなかった (実測 = 別件の返事を記録した session が、 以前の記憶から `--next` を書いて dry-run を飛ばし、 出力も ✓ / ✗ の行だけに絞った。 先に別の session が記録した「相手の問い = こちらの番」 が消え、 項目は「相手の返事待ち」 に見え続けた)。 自分が今立てた項目だけを書く無人の呼び手は、 自分の書いた現在地から鍵を作って渡す (一般形 = [`../docs/convention-design-principles.md#overwrite-needs-read-token`](../docs/convention-design-principles.md#overwrite-needs-read-token))。 **同じ欄を書く別の道具にも同じ印を入れる**: [`../scripts/yaml-set-top-keys.py`](../scripts/yaml-set-top-keys.py) は、 台帳の repo の `.gitattributes` に `todo/*.yaml yaml-set-guard=status_context` と宣言すると、 その欄を旧い値を含まない値で置き換える `--set` (と `--set-literal` / `--drop`) に `--replaces status_context=<8 桁>` を求める (鍵の式は本道具と同じ = どちらの dry-run の鍵も通る。 実測 = 本道具に印を入れた後、 同じ形の上書きが `yaml-set-top-keys.py --set` の経路で起きた)。 気づく面 = [`../scripts/todo-changed-since-touch.py`](../scripts/todo-changed-since-touch.py) (PreToolUse hook の engine): 項目に触る瞬間に、 その session が最後に触った後に入った別の書き手の commit と、 結ばれた thread に届いた相手の message を 1 回出す
+3. **--check**: 全 entry の印と索引の整合 (印の id が索引にある / 印 = 索引の最新 / 日付順 / round-trip)。 `印 ≠ 最新` は loud に出る側の失敗 (silent な抑制ではない)。
+4. **--migrate <ledger>** (既存分): 印と索引を**追記**する。 索引に書くのは entry が **message として**記録した id (top-level messageId ∪ 全 string の `messageId:` / `mid:`) と一致する message だけ。 threadId と同値の root message は載せない (threadId は thread の記録であって root を読んだ記録ではない。 載せると message 専用の読み手の集合が変わる = 実測)。 散文は 1 字も変えず、 threadId / related_todo も足さない。 `--remigrate` は印のある entry の規則に外れる root の行だけ外す。 移行の前後で読み手の出力が変わらないことを実データで確かめてから commit する。
+5. **--relabel <ledger>** (索引の書き方を変えたとき): 既存の索引の向きと相手を今の規則で Gmail から引き直す。 id と日時は元の行のまま、 下書きを記録していた行は外して印が指していれば残る最新の行へ戻す。 Gmail に無い id の行・並列 session が書いた直後の行はそのまま。 索引と印以外の field は変えない (再 parse で検証)。 冪等、 cache を使わない (下書きが後で送られたことを隠すため)。 索引の名前は id から毎回引き直せる = 規則を変えたらもう一度流せばよい。
+
+## <a id="failure-modes"></a>3. 失敗の向き
+
+- **書いた後に再 parse して検証、 外れたら元の text に戻す** (entry 数 / 対象 entry の field / round-trip = 書いた id が harvester で拾われる)。 exit 3 = 検査不能・故障、 exit 1 = 違反 (enum 外・id 未定・項目が無い) と分ける ([`#failure-exit-equals-violation-exit`](../docs/convention-design-principles.md#failure-exit-equals-violation-exit))。
+- **項目を手で作ってから記録するときは、 項目に `email_ref` を書かない** (道具が `"threadId:<id>"` で書く)。 記録済みの集計は台帳と項目の両方から ID を拾うので、 先に項目へ messageId を書くとその message は「他所で記録済み」 に入るが、 `--apply` では home entry の作成・更新と索引への反映の対象になる (実測)。
+- **引けない thread は「未記録」 に倒さない** (auth / 404 / 一時失敗は「引けなかった」 と出す)。 項目の `email_ref` が返信の messageId だと threads.get は 404 になる = messages.get で本当の thread を引き直す。
+- **ID の読み手は正規化済みの文字列を受け取る**。`email_ref` から thread と message の候補を読むときは [`recorded_ids.py`](../scripts/lib/recorded_ids.py) の `harvest_text`、thread だけなら `harvest_thread_ids` を使う。正規表現を直接 `findall()` した返り値を Gmail や逆引きの key に渡さない (一般則 = [`multipath-key-normalization`](data-pipeline-automation.md#multipath-key-normalization))。
+- <a id="drafts-are-not-messages"></a>**下書きは message ではない**: threads.get は未送信の下書きも thread の message として返す。 除かないと、 記録の道具は下書きを「自分が送った」 と書き、 返事を見張る検出器は「最後は自分発 = 返事済み」 と読んで相手の未返信の mail を隠す (実測 = 下書きのまま止まった返信が記録済みになっていた)。 除くのは読む部品 1 か所 (`lib/gmail_read.normalize_messages`、 既定) = 同じ部品を使う検出器にも効く。 下書きかを見たい呼び手 (`--relabel`) だけ `include_drafts=True`。
+- <a id="thread-field-only-ids"></a>**`threadId` 欄に文を書かない** — 読み手は欄の文字列から hex を全部拾うので、 「<id> とは別」 のような否定の文に書いた id も、 その thread の entry として結ばれる (実測: 別の案件の相手の問いが、 無関係な項目の「こちらの返事待ち」 に出続けた)。 注記は行末の YAML comment に書く (comment は読み手に届かない)。
+- <a id="handover-pulls-long-thread"></a>**閉じた項目の現在地に別の項目の id を書くと、 渡し先と読まれて子の thread が全部そちらに付く** — 判定は文の語を見ないので、 別件・次の回・来年度の項目を参考に名指しただけの id でも渡る。 用件をまたいで使う長い thread が付くと、 その thread の最後の問いが渡し先の「こちらの返事待ち」 に、 別の用件の通知が渡し先の新着に出る (実測)。 **閉じた項目の現在地には続きの項目の id だけを書き、 関連は `cross_ref` に書く**。 渡ってしまった後で id を外すときは、 記録の道具がその引き継ぎを辿って thread の entry に書き足した結び (`related_todo`) も外す = 残すと逆引きで渡り続ける (実測)。 渡り先が本当の続きで、 問いに別の経路で答え済みなら、 渡し先の項目に `waiting_party: false` と理由を書く (新しい返事は未記録の見張りが別に拾う)。
+- **cache は移行の一括読み専用**。 通常の記録は毎回 Gmail を引く (古い cache が並列 session の新着を隠す)。 移行でも entry が知っている id が cache の thread に無ければ引き直す。
+- **並列 session と同じ file を触る**: 書く直前に file を読み直し、 commit は path 指定 (`git commit -- <path>`)。 ⚠️ 相手が path 指定で commit しても、 作業ツリーにあった自分の差分ごと入る ([`multi-session-coordination.md#staging-window-race`](multi-session-coordination.md#staging-window-race)) = 移行のような大きな差分は短い窓で書いて即 commit する。
+- <a id="ledger-rebase-conflict"></a>**台帳の rebase 衝突は upstream 側を取って記録の道具を回し直す** — 暗号化した台帳は conflict marker が読めず、 手で混ぜられない。 `git checkout --ours <台帳>` (rebase の中の ours は upstream 側、 theirs が自分の commit) → 記録の道具を、 項目の現在地を二重に書かない形で回し直す → `git add` → `git rebase --continue`。 push の前に自分の commit の diff を読み、 自分の行だけかを確かめる。 道具が毎回 Gmail から引き直す作りなら、 回し直しで記録は失われない (実測)。
+- **label を書く側の展開範囲は狭く保つ**: 記録済み id の読み手 (検出器) は全 string を読んでよいが、 mail に label を書く同期 script は id を持つ field だけを読む。 散文の引用まで thread 展開すると open 項目が引いた thread が全部「処理中」 になる (実測)。
+
+## <a id="adoption"></a>4. 導入 (shim の作り方)
+
+下の層に同名の shim を置き、 個人の値を option で渡して engine を `os.execv` する (= [`check-script-layering.py`](../scripts/check-script-layering.py) が shim と認める形)。 渡すもの: `--root` / `--ledger` (複数) / `--accounts` (試す順、 先頭 = 既定) / `--creds-dir` / `--owner-token` (自分発の判定) / `--status-enum` / `--category-in` `--category-out` / `--ctx-reply` `--ctx-sent` `--ctx-new-in` `--ctx-new-out` (現在地の template、 §1) / `--tz` / `--cache-dir` / `--month-header`。 shim の `--selftest` は配線の canary (台帳 dir の存在 / enum の parity / 層1 の file) を見てから engine の selftest を回す。 読み手の検出器は `lib/recorded_ids.py` を import し、 その一覧と delegation 検査を shim 側の selftest に持たせる ([`email-surface-pattern.md#recorded-id-notation`](email-surface-pattern.md#recorded-id-notation))。

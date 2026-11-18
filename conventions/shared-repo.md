@@ -1,23 +1,83 @@
+<!-- doc-meta
+when: 共同編集者がいるリポで作業するとき + 所有者だけの repo を共有リポに切り替えるとき (#convert-owner-repo-to-shared) + 招待した相手の手元の準備 (個人の token・道具・最初に読む節) を repo に点検させるとき (#collaborator-check) + 共有リポが別の repo (道具の engine など) を隣に clone してある前提で使うとき (#sibling-repo-auto-clone) + branch が default に入ったかを判定する・依頼書や記録に「未 merge」 と書く前 (#rebased-branch-not-ancestor) + 共有リポで計算・検算を Python で回すとき (版・venv・入口 tools/py の正本 = python-env.md、 本 file は招待した相手の手元の点検 #collaborator-check-python だけ) + 共著者が主筆の file の既存部分 (計算・文・記号) を直すとき (#primary-author-consent) + 利用者が user 単位でも入れている hook を共有リポの project の hook に写して配るとき (#project-copy-of-user-hook)
+category: infra
+summary: 共有リポ固有規約
+-->
 # 共有リポ規約 — Shared Project Layer
 
 共同編集者がいるリポで適用。CLAUDE.md から参照: `~/Claude/claude-config/conventions/shared-repo.md`
 
-このファイルは Claude Code 4 層モデルの **層 3（共有プロジェクト層）** の規約。詳しい層モデルは [`docs/personal-layer.md`](../docs/personal-layer.md) を参照。
+このファイルは Claude Code 4 層モデルの **layer 2（共有プロジェクト層）** の規約。詳しい層モデルは [`docs/personal-layer.md`](../docs/personal-layer.md) を参照。
 
 ## Git workflow（必須）
 
-### セッション開始時
+### <a id="session-start"></a>セッション開始時
 「作業開始」「スタート」等の合図があったら:
 1. `git status` で状態チェック
    - **未コミット変更あり** → 「前回の変更が未 commit です。先に commit & push しますか？」
    - **未 push コミットあり** → 「前回の commit が未 push です。先に push しますか？」
 2. `git pull` でリモートと同期（コンフリクト発生時はユーザーと解決）
-3. リマインダー表示: **「作業が終わったら commit & push を忘れずに！」**
+3. **他所からの open PR を確認**: `gh pr list --search "-author:@me"` で自分以外が著者の open PR を一覧。0 件なら次へ。1 件以上ならタイトル・著者・更新日を提示し、「先にレビューしますか？それとも今のタスクを進めますか？」とユーザーに判断を仰ぐ。レビュー先行を選ばれたら `gh pr view <num>` / `gh pr diff <num>` で内容を確認し、所見を提示する。
+   - **判断材料**: PR が触るファイルと今のタスクの重なり（競合可能性）、CI 失敗・reviewer unblock 待ちの緊急度
+4. リマインダー表示: **「作業が終わったら commit & push を忘れずに！」**
 
-### セッション終了時
+### <a id="session-end"></a>セッション終了時
 「おわり」「終了」「今日はここまで」等の合図、またはお礼・挨拶があったら:
 - `git status` を実行し、未コミット/未 push があればリマインドする
 - クリーンなら「変更なし。お疲れさまでした。」
+
+### Branching strategy
+
+共有リポでは **default branch (`main`) が共著者にとっての真実**。共著者は `git pull` で最新を取得できることを暗黙の前提とする (= 別 branch を checkout する前提を共著者に課さない)。
+
+#### 原則
+
+- **main 上で進める**: 通常の編集作業は `main` 直接 commit + push。WIP でも compile pass (LaTeX なら中間ファイル `.aux` `.bbl` 等を ignore し、最新 PDF を track して「現在の見え方」を pull で再現できる状態) を維持する
+- **feature branch は短命前提**: 同日中に main へ merge できる粒度のリファクタ・実験のみ。24 時間以上を見込む変更は branch しない (= main 上で commit を分けて進める)
+- **大改造で branch せざるを得ない場合**: 以下 3 点を**全部**やる
+  1. 共著者全員に branch 名 + checkout 手順を **out-of-band** で通知 (Discord / Slack / メール)
+  2. その branch の SESSION.md / README.md の冒頭に「⚠️ 共著者は `git checkout <branch>` してから pull」 マーカー
+  3. `main` の README / SESSION.md に「現在 `<branch>` で大改造中、main は古いまま」 と明記 (= main を見た共著者に状況が伝わる)
+
+#### Watchdog (session 開始時)
+
+セッション開始時の git fetch + ahead/behind 確認に加えて、**default branch との divergence** も確認する:
+
+```bash
+DEFAULT=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's,refs/remotes/origin/,,')
+[ -z "$DEFAULT" ] && DEFAULT=main
+AHEAD_FROM_DEFAULT=$(git rev-list --count "$DEFAULT..HEAD" 2>/dev/null)
+echo "default=$DEFAULT, ahead from default=$AHEAD_FROM_DEFAULT"
+```
+
+非 default branch で `AHEAD_FROM_DEFAULT >= 5` または最古 commit から **24 時間以上経過** していたら、**merge を最優先タスクに格上げ**する。Phase 進行・レビュー gate を branch 維持の justification に流用しない (レビューは main 上で進めればよい — 「merge 前に review 完了」 は branch 必須化の根拠にならない)。
+
+#### <a id="superseded-branch"></a>書き直して取り込んだ試行ブランチ
+
+大改造を別 branch で試し、 **中身を別の記法・構成で書き直して default に入れた**場合、 その試行
+branch は `git log` からは ahead に見えるが**マージしてはいけない** (= 同じ内容が二重に入る)。
+消すと commit が到達不能になるので履歴として残すなら、 **なぜ残っているか + default 側の現物が
+どこか**を repo の設計 doc に 1 行ずつ書く。 書かないと、 次に見た人 (や AI) が「マージ漏れ」 と読んで
+作業を二重化する — 上の watchdog は ahead を数えるだけで、 ahead の**理由**は見ないため。
+
+逆に **default に対して 0 ahead の branch と、 ahead の commit が全部同じ変更として default に入っている branch は消す**。
+commit (か同じ変更) は default の履歴に在るので何も失われず、 共著者から見える branch 一覧が「まだ生きているもの」 だけになる。
+
+<a id="rebased-branch-not-ancestor"></a>**「default の祖先でない」 は「default に入っていない」 ではない** — 別の session が branch を rebase して
+default に直線で入れると、 default には同じ変更が別の hash で入り、 元の remote の branch は ahead のまま残る。
+`git merge-base --is-ancestor` も ahead の数もこの branch を「未 merge」 と言うので、 それを依頼書や記録に書くと
+誤った前提で作業が回る (実測)。 「未 merge」 と書く前に `git cherry -v <default> <branch>` を 1 回打つ:
+行頭が `-` の commit は同じ変更 (patch-id が同じ) が default にあり、 `+` の commit だけが default に無い。
+全部 `-` なら取り込み済み = 上のとおり消す。 書き直して取り込んだ branch (上の段落) は変更が違うので `+` に出る =
+設計 doc の 1 行で見分ける。
+
+#### artifact 配信経路の依存
+
+PDF / 成果物を Dropbox 等で**別経路配信**している共有リポでは、**共著者側の sync が未セットアップだと git pull が唯一の経路**になる。この依存関係を CLAUDE.md / SESSION.md で明示し、未セットアップの共著者がいる間は `main` が最新であることを死守する責任が生じる (= branching policy の原則「main = collaborator's truth」 と直結)。共著者の sync 状況は CLAUDE.md / SESSION.md に明記しておくのが安全 (例: 「Windows side 未セットアップ」 等)。
+
+#### Pre-merge revert anchor
+
+長期 branch を main へ merge する前に、merge 直前の main 位置に tag (`main-pre-<branch>-merge` 等) を打って push する。FF merge は revert が `git reset --hard <tag>` で可能だが、tag 不在だと「pre-merge の main がどこだったか」 を後から特定するコストが高くなる。
 
 ## .gitignore
 
@@ -30,78 +90,365 @@
 ```
 LaTeX リポの場合は [conventions/latex.md](latex.md) の .gitignore セクションも参照。
 
+
+<a id="built-pdfs-not-in-git"></a>**build した PDF は commit しない** — 共同編集者の分も含めて毎回まるごと履歴に積まれる。 PDF は .gitignore に入れ、 相手の最新は各自の push で発火する共有フォルダへの写しで見る (仕組み = [`templates/shared-project/pdf-publish/`](../templates/shared-project/pdf-publish/)、 正本 = [`repo-history-growth.md#generated-binaries`](repo-history-growth.md#generated-binaries))。 既存の repo に入れるときは共同編集者の了解を取ってから (pull で手元の PDF が一度消える)。 <a id="pdf-publish-on-branch-push"></a>⚠️ **この写しは branch を選ばない** = main に取り込む前の branch を push しても、 変わった文書の PDF が共有フォルダへ写る (実測)。 取り込む前の branch の push は `PDF_PUBLISH=0 git push …` で写しを止める。
 ## パスの記述
 CLAUDE.md・SESSION.md 等でローカルパスを書くときは `~` 表記を使う（`/Users/<user>/` は共同編集者の環境で壊れる）。
 
+## <a id="agent-entrypoint"></a>AI agent の root entrypoint
+
+共有リポは root に tracked・非空の通常 file `AGENTS.md` を置く。これは Codex が task 開始時に自動発見する layer 2 entrypoint であり、`CLAUDE.md` と `SESSION.md` を作業前に読み、そこから task-relevant な正本へ辿るよう命じる**薄い dispatcher**である。規約本文・現在地・設計判断を `AGENTS.md` に複製しない。一般契約の正本は [`CONVENTIONS.md#agent-instruction-entrypoints`](../CONVENTIONS.md#agent-instruction-entrypoints)、Codex discovery の技術的正本は [`codex/PARITY.md#project-instruction-discovery`](../codex/PARITY.md#project-instruction-discovery)。
+
+shared repo の `AGENTS.md` は共同編集者全員が解決できる内容だけで自己完結させる。layer 3 file/path、所有者固有の絶対 path、machine-local config を書かない。`~/.codex/config.toml` の fallback 設定や所有者側 installer に依存させず、[`templates/shared-project/AGENTS.md.template`](../templates/shared-project/AGENTS.md.template) から通常 file として作る（symlink は Windows collaborator と archive/export で壊れうるため不可）。新しい collaborator を加える前と Codex-origin commit 前の audit は `scripts/audit-codex-integration.sh --repo <path>` で行う。
+
 ## 4 層モデルの依存ルール
 
-共有プロジェクト層（このリポ）は **層 1（共通規約 = claude-config）にのみ依存**できる。**層 2（個人層 = `<owner>-prefs/`）には依存禁止**。理由: 共同編集者は所有者の個人層を見られないため、依存すると collaborator 環境で動作が破綻する。
+claude-config の 4 層モデル (audience の広さ順に numbering、`public ⊃ collaborator set ⊃ owner ⊃ machine-local`):
 
-具体的には CLAUDE.md / DESIGN.md / README.md など共同編集者が触れるファイルに以下を **絶対に書かない**:
+| # | 層 | 例 | Audience | 依存可能先 |
+|---|---|---|---|---|
+| 1 | 共通規約 | claude-config | public / shared | — |
+| 2 | 共有プロジェクト層 (このリポ) | private repo with collaborators | collaborator set | **layer 1 のみ** |
+| 3 | 個人層 (secret 配置を含む) | `<owner>-prefs/` / 個人 secret repo / `~/.secrets/` | owner only | layers 1, 2 |
+| 4 | 揮発メモリ | `~/.claude/.../memory/` | local machine | any |
 
-- 所有者の他の private リポへの参照
-- 所有者の個人層内ファイルへのファイルパス参照
-- 所有者個人のメール文体・身元情報のインライン
-- 所有者個人のカレンダー ID・アカウント ID
+> [`docs/personal-layer.md`](../docs/personal-layer.md) §「What is the personal layer?」 が canonical、本表は reading mirror (= 後述の §機能 literal と reading mirror の区別 の慣例に従う)。新規列追加・layer 番号変更時は personal-layer.md 側を真正本として更新する。
+>
+> **「依存可能先」の読み方**: ここで列挙されているのは **rule 上参照してよい上限** (= audience containment で許される上限) であって、**実際にどこまで依存するか** は各リポの judgment call。例えば layer 3 (個人層) は rule 上 layer 1 + 2 に依存可能だが、現実には layer 1 (claude-config) のみ参照しているケースが普通 (= 自分のリポを personal layer から自分の collaborator リポに参照する必要は少ない)。「依存可能」 ≠ 「実依存」 なので混同しない。
+
+**Core rule**: each layer may only depend on layers whose audience contains its own (= 番号が小さい層を参照できる、大きい層は参照できない)。
+
+具体的に共有プロジェクト層 (= layer 2) は **layer 1 (共通規約) のみ依存可、layer 3 (個人層) と layer 4 (揮発メモリ) には依存禁止**。理由: 共同編集者は所有者の個人層も machine-local memory も見られないため、依存すると collaborator 環境で動作が破綻する。
+
+「**依存 (depend)**」 と「**名指し (mention)**」 の区別が canonical: [`docs/personal-layer.md` §「What \"depend\" means: structural dependency vs. mention」](../docs/personal-layer.md#what-depend-means-structural-dependency-vs-mention) 参照。 要約すると:
+
+- ❌ **依存** = collaborator が L3 にアクセスしないと本リポが standalone で成立しない (= 違反)
+- ✅ **名指し** = collaborator は本リポ範囲で完結、 boundary 明示付きで upstream の存在を informational に書く (= 許容)
+
+CLAUDE.md / DESIGN.md / README.md など共同編集者が触れるファイルに以下を **絶対に書かない (= 依存形)**:
+
+- **L3 内部 file path** (例: `<owner>-prefs/something.md`)。 repo 名単独 (例: `<owner>-prefs`) は名指しで OK だが、 `/` 以降の path は dependency 形に格上げされる (= 「name it, don't path into it」)
+- 所有者個人のメール文体・身元情報のインライン (= layer 3 のデータ)
+- 所有者個人のカレンダー ID・アカウント ID (= layer 3 のデータ)
+- 所有者個人の secret 配置の絶対パス (例: `~/.secrets/<owner-specific>-token`、所有者固有のクラウドストレージ path) — secret は layer 3 のサブセット
 - `/Users/<owner>/` のような絶対パス
+- 揮発メモリへの参照 (= layer 4、machine-local。collaborator は持っていない)
 
-これらは個人層（あれば cascade 経由で勝手に上書き）に置く。共有プロジェクト層は **standalone で成立する** こと。
+これらは layer 3 (個人層、cascade 経由で勝手に上書き) または layer 4 (memory) に置く。共有プロジェクト層は **standalone で成立する** こと (= 操作的定義は次節 「『standalone で成立』 の操作的定義」 参照)。
+
+#### L2 における「名指し」 の適用 (boundary 明示付き)
+
+L3 repo 名そのものを L2 doc に書くのは許容、 ただし以下を **同じ場所で併記** (= canonical 原則は personal-layer.md、 本節は L2 における具体化):
+
+1. **boundary 文を併記**: 「collaborator は本リポ範囲で完結 / 上記 upstream に直接アクセスする必要は無い」 等の文を `()` 内 or 同 bullet 内に書く
+2. **責務境界 / 取り込み手順 等 explanatory section に限る**: 通常の運用文書 (= setup 手順 / build 手順) 内に L3 名を書くと、 collaborator が必要だと誤読する。 explanatory 文脈に限定
+
+「**name it, don't path into it**」 の compact rule は personal-layer.md 側に書いてある通り。 内部 path (= `<owner>-prefs/<file>`) は名指し例外に入らず依存形扱い。
 
 ### 公開前の Audit
 
-共同編集者にリポを渡す前に、以下の grep を 0 件確認:
+共同編集者にリポを渡す前に、以下の grep を実施:
 
 ```bash
-# 所有者個人の他リポ参照
+# 所有者個人の他リポ参照 (= warning、 false-positive 可)
+#   hit したら boundary 文を併記しているか目視確認。 boundary 明示付きの
+#   名指しは許容 (= 上記 §「L2 における「名指し」 の適用 (boundary 明示付き)」 参照)
 grep -rn '<owner>-prefs\|<other-private-repo-1>\|<other-private-repo-2>' --exclude-dir=.git .
 
-# 所有者個人の絶対パス
+# 所有者個人の絶対パス (= 絶対 0 件)
 grep -rn "/Users/<owner>" --exclude-dir=.git .
 
-# 所有者個人のメール・カレンダー識別子
+# 所有者個人のメール・カレンダー識別子 (= 絶対 0 件)
 grep -rE '<owner-personal-calendar-id>|<owner-personal-email>' --exclude-dir=.git .
+
+# L3 file path 直接参照 (= 絶対 0 件、 boundary 文があっても NG)
+#   repo 名のみは OK、 path は NG。 例: "physics-research" は許容、
+#   "physics-research/papers/talks.yaml" は禁止
+grep -rE '<other-private-repo>/[a-z]' --exclude-dir=.git .
 ```
 
-`<owner>` 等は実際の所有者・リポ名に置き換える。所有者は自分の個人層に「公開禁止のキーワード一覧」を持っておくと監査が楽。
+`<owner>` 等は実際の所有者・リポ名に置き換える。所有者は自分の個人層に「公開禁止のキーワード一覧」を持っておくと監査が楽。 **2 種類の severity**: (a) repo 名 hit = warning (= boundary 文の有無を目視)、 (b) file path hit + 絶対 path hit + identifier hit = block (= 即修正)。
 
 > **Note**: 上記の手動 audit は hook 未導入の共同編集者向けの fallback。
 > 個人運用では `hooks/public-leak-guard.sh` (PreToolUse) と
 > `scripts/public-precommit-runner.sh` (pre-commit) で自動化済み。
 > 設計詳細は `DESIGN.md` §公開リポ leak 防止。
+>
+> **カバレッジ ギャップ**: 上の hook chain は **public** リポを対象とする (`.claude/public-repo.marker` の有無で判定)。**private shared** リポ (= collaborator あり、public marker なし) では fire しないため、layer-2 違反 (= owner literal) は session-end / push-time の手動 audit に依存する。private shared リポで新規 file に絶対パスを焼き付ける commit を書いた直後は、`grep -rn "/Users/<owner>"` を 4 軸 sweep の整合性軸に組み込むのが安全。
+>
+> <a id="private-shared-plaintext-gate"></a>**機密の重い private shared リポは、 平文の面の gate を repo 自身に持たせる** (共同編集者の機械に上の hook chain は無い)。 形: 追跡する hook の dir (`.githooks/`) を `core.hooksPath` で有効にする (clone ごとの同意 = repo の `setup.sh` で入れる。 自動では有効にしない) → hook が repo 内の検査 script を呼び、 終わったら元の `.git/hooks/<hook>` (所有者の機械では上の chain) を同じ引数で呼ぶ。 検査は 3 面: 平文 file の足した行 (値の形 + 暗号化側に置いた固有の語の一覧)・新しい path 名・commit message。 git-crypt の repo では、 **lock 中の commit を止める** (filter が無いと暗号化対象が平文のまま index に入る) と、 暗号化対象の staged blob が暗号文かを確かめる。 検査が走れない commit は入れない (fail-closed)。 効いているかは session 開始で `ARMED / NOT ARMED` の 1 行を出す ([`#collaborator-check`](#collaborator-check) と同じ配り方)
+
+## <a id="pii-data-minimization"></a>連絡先・PII を共有リポに書くかの判断基準（data minimization）
+
+collaborator 本人の連絡先（メールアドレス等）や PII を layer 2（private 共有リポ）に書いてよいか。default は「**書かない** = 所有者の個人層（layer 3）に SoT を置き、共有リポからは『所有者が別管理』と一般化して参照する」。これは [`personal-layer.md`](../docs/personal-layer.md) の配置ゲート「PII を含むか → 層 3」の **why** にあたる判断基準 3 つ:
+
+**基準 1 — 機能テスト（最重要）**: 置く前に「**この repo にこのデータの read-path はあるか**」を問う。連絡先の典型は、本人は自分の連絡先を知っており、所有者は個人層から引け、repo の script / doc がそれを読む処理は存在しない = **書いて得られる機能がゼロ**。機能ゼロのデータは、置いてもリスク（漏洩面・履歴永続）だけ増えて利益がない。データは必要とする audience が最も狭い層に置く（= data minimization）。逆に repo の機能が本当にそれを読むなら（例: CI の通知先）、機能を持つデータとして本人合意の上で置く判断はありうる。
+
+**基準 2 — git 履歴の不可逆性**: commit した文字列は履歴に永久に残る。private repo が将来 public 化される可能性（成果公開・OSS 化）に対し、PII が履歴にあると public 化は履歴 rewrite を要して高くつく。**最初から入れないのは、将来の visibility 選択肢を無料で保つ手段**。「PII を含みうるから private 固定」と判断している repo ほど、PII を入れない運用がその判断を将来変える余地を作る。
+
+**基準 3 — 本人の期待**: 他人の連絡先の置き場所は本人の期待に関わる。公開的な business アドレスでも、合意なしに置き場所（特に第三者や AI agent から見える場所）を増やさないのが無難な default。
+
+**判断基準にしないもの 2 つ**: (a) **collaborator への信頼度** — 基準 1–3 は collaborator を完全に信頼していても成立する（機能ゼロ・履歴永続・本人期待は信頼と独立）。信頼度を論拠にすると「信頼できるから書く」の per-case 例外が増殖する。(b) **「private だから安全」** — private は現在の visibility 状態であって履歴の性質（基準 2）を変えない。
+
+運用は**一律ルール**にする: repo の CLAUDE.md に「連絡先・PII は書かない」を例外なしで書き、基準 1 の機能テストを pass するデータが現れた時にだけ明示的に緩める（per-case の例外判断は erode する）。所有者側の連絡先 SoT（個人層）には出典・取得日を残す。
+
+## <a id="primary-author-consent"></a>共著者が主筆の file の既存部分を直すときは、 主筆の了解を先に取る
+
+- 共有の file (ノート・原稿の節) のうち、 主筆の共著者が書いた既存部分 (計算・文・記号) を直すときは、 依頼した著者 1 人の了解だけで共有の正本に入れない。 案は別 file か提案の形 (差分つき) で主筆に見せ、 主筆の了解を得てから当てる。
+- 追記 (新しい節・注) と明らかな誤記の修正は、 当てた後に、 入れたことを主筆に知らせる (了解を先に取るのは、 既存部分の計算・文・記号を変えるとき)。
+- 共著者が自分で組み直す・書くと言った部分は、 こちらの案を作る前に、 その人に聞く。 理由: 先に作ると、 共著者の文を切った案が共著者の書き直しより先に届き、 共著者はその案を退けて自分で書き直す (実測)。 返答書での形 = [`rebuttal-letter.md#coauthor-will-rebuild`](rebuttal-letter.md#coauthor-will-rebuild)。
+- 実例の側の手順 (誰が主筆か・了解の取り方) は各 repo の CLAUDE.md が持つ。
+- 理由: 主筆の書いた計算・文・記号を、 依頼した 1 人の了解だけで共有の正本に入れると、 主筆が知らないまま主張が変わる。 どの共同研究でも同じ壊れ方をする (実測)。
+
+## <a id="l2-style-digest"></a>執筆スタイル規約の層 2 instantiation（style digest pattern）
+
+所有者の執筆規約（文体・記法・構成の選好）は通常 layer 3（個人層）に正本を持つ。共有 paper repo（layer 2）では、共同編集者と**共同編集者側の AI assistant** がその規約に従って原稿を触る必要があるが、layer 2 → layer 3 参照は禁止（上記 Core rule = collaborator に解決不能な pointer を作らない）なので、「正本への参照を張る」という経路がそもそも存在しない。放置すると collaborator 側の編集で規約違反が構造的に再混入し、所有者側の再整形が無限ループする。
+
+この緊張の解: **採用 (adoption) が選好を project 規約に変える**。「所有者が one-sentence-per-line を好む」は layer 3 の fact だが、project がそれを採用した瞬間、「本 project の原稿は one-sentence-per-line で書く」は layer 2 の観客全員にとって true な fact になる。従って共有リポには **rule 本文そのものを自己完結の digest として置く**（= 参照でなく instantiation）。provenance（所有者の個人正本の存在）は boundary 文つきの名指しに留める（[`personal-layer.md` §depend vs mention](../docs/personal-layer.md#what-depend-means-structural-dependency-vs-mention)）。
+
+運用の要点 4 つ:
+
+1. **rule 本文の配置は CLAUDE.md**。Claude Code はこれを project instruction として読み、Codex は root `AGENTS.md` の mandatory read から同じ本文へ入る。`AGENTS.md` 側へ digest を複製しない。別の cold file に置いて任意 pointer だけで誘導する形は recall 依存で弱い。digest は rule 本文と適用法だけに絞って tight に保つ（project instruction のサイズは毎 session が払う税 = [`scheduled-tasks.md #headless-context-budget`](scheduled-tasks.md#headless-context-budget)）。
+2. **drift は生成で design-out**: 所有者側の単一配布 source から script で各共有リポの AUTO block（`<!-- AUTO-* BEGIN/END -->` marker 間の idempotent 置換）へ配布する。手動コピー × N repo は必ず drift する。marker 行に「自動生成・手編集禁止・恒久変更は所有者へ」を明記する（= [`personal-layer.md` §Owner automation acting on a shared project](../docs/personal-layer.md#owner-automation-shared-project) の announce 義務）。
+3. **layer-2-safe filter**: 配布内容に PII・機関名・layer 3 の file 名 / path・私的文脈（規約成立の経緯・発言引用・他 private repo 名）を含めない。rule 本文と適用法だけを出す。一次防御は配布 source 側の記述規律、機械 backstop は配布 script の leak gate と、「正本に § を足したら配布判断（export / skip）を必ず記録する」parity gate。
+4. **layer 1 に既にある一般則は public URL で引く**: claude-config は public なので、共有リポからは所有者マシンの local path でなく GitHub URL（`https://github.com/<owner>/claude-config/blob/main/...`）を併記すれば collaborator と collaborator 側 AI も読める。CLAUDE.md の「規約参照」節も dual-form（local path + public URL）にすると collaborator 環境で dead link にならない。 所有者の選好でなく、 どの原稿にも当てはまる一般則は、 まず layer 1 に正本を置き、 layer 3 の正本と digest の両方からその節を指す (digest には規則の名前と節への 1 行のリンクだけを置き、 本文を写さない)。 同じ規則の本文を layer 1・layer 3・layer 2 に重ねると、 直すたびに全部を揃える手間と食い違いが生まれる (実測)。
+
+なお、記法（notation）の project 固有 convention は各 repo の DESIGN.md 等が担う別問題で、本 pattern の対象は「project をまたいで所有者が一貫させたい執筆スタイル」の側。両者の役割分担（どちらが正本か）を digest 節の近くに 1 行明記しておくと衝突しない。
+
+配布器は source の公開範囲・必須項目と、選択された全 target の生成 marker を**書込み前に**検査する。エラーを数えて終了コードを失敗にするだけでは、途中で不正な本文を配布できてしまう。検査と書込みを分け、後段の target が不正でも先行 target を変更しないことを fixture で検査する。配布先を限定する場合は registry の既存 target を明示選択し、未知の名前を無視しない。部分同期の成功を digest 全体の一致と報告せず、残る差分と次の完全同期の入口を区別する。
+
+<a id="l2-digest-hand-edits"></a>**配布器は、 区画に手で足された行を消す前に止まる** (実測): 共有 repo の session が生成区画に直接行を足すと、 次の生成がそれを黙って消す。 書くと消える行のうち、 配布 source の履歴 (`git log -S`) に一度も現れない行は手で足された行なので、 配布器はその target を書かずに止まり、 行の一覧と「source に移してから作り直す」 を出す。 source から消した・言い直した行は履歴にあるので止まらない。 消すと決めたときだけ明示の flag で消す。 区画に置きたい規則は配布 source に足す ([closing-sweep.md#sot-and-refs](closing-sweep.md#sot-and-refs) の生成物の行)。
+
+<a id="l2-digest-first-deploy"></a>**初めて配る repo では、 生成してから承認を記録する** (実測): 規則の文書 (CLAUDE.md) の変更に承認を要する guard がある環境で、 空の marker を置いた候補を先に承認すると、 その後の生成で block の中身が変わり、 commit の検査が「承認した候補と違う」 で止まる。 順番は marker を置く → 配布器で生成する → 生成後の全文を候補にして承認を記録する → commit。 配布先の registry に足す変更も同じ commit の範囲に含める。
+
+<a id="l2-digest-guarded-line"></a>**配布 source の守られた行を直したら、 配り先の CLAUDE.md の commit も guard が止める** (実測): source の行が規則の正本を指す参照の行 (guard の守る区画) なら、 source を本人の答えで当てても、 その答えは source の file にしか効かない。 配布器が配り先の CLAUDE.md に書いた同じ行の変更は、 配り先の commit で別に承認を求められる。 本人に問う時点で、 source と配り先の CLAUDE.md を並べて、 1 つの答えで全部を当てられるようにする (配り先の一覧 = 配布器の `--check` が古いと出す target)。 agent の入口の文書は別の窓の答えでは当てない ([`agent-rule-ownership.md#owner-answer-in-another-window`](agent-rule-ownership.md#owner-answer-in-another-window) の 7) ので、 本人と話していない worker は配り先の分を当てずに依頼元へ返す。 止められた変更は配り先の作業ツリーに残さず、 自分が書いた分だけ戻す = 残すと、 その repo で別の窓が打つ commit に巻き込まれる ([`multi-session-coordination.md#staging-window-race`](multi-session-coordination.md#staging-window-race))。 戻した後も、 配布器を回し直せば同じ形が出る。
+
+### <a id="style-checker-mirror"></a>機械化できる style subset は layer 1 engine + layer 2 mirror にする
+
+American spelling のように複数 project で再利用できる検査アルゴリズムは layer 1 に正本を置く。project がその style を採用したという意味上の規則は layer 2 の CLAUDE.md digest が所有し、layer 1 script は選好そのものを全 project へ強制しない。標準 engine は [`scripts/check-american-spelling.py`](../scripts/check-american-spelling.py) で、curated word list、TeX comment / identifier masking、Python figure-string scan、`brit-ok` 例外、positive / negative / scope selftest を所有する。
+
+shared repo の hook と CI は owner の clone path や network に依存できないため、engine は project 内へ**生成 mirror**として配布する。mirror は canonical public URL を内包し、配布 registry が byte-for-byte staleness を検査する。project 固有 scope が標準 discovery で表せない場合だけ、小さな manifest / wrapper を layer 2 に置く。検査語彙や parser を project ごとに fork しない。target mirror はoffline実行のartifactであって判断の正本ではなく、source変更→registry全target check/write→各project commit/push の順で更新する。
+
+## macOS LaunchAgent / launchd plist の literal-path trap
+
+macOS の **LaunchAgent / LaunchDaemon plist は `~` も `$HOME` も自然展開しない** (= `ProgramArguments` / `WatchPaths` 等の path は literal でなければ launchd に loaded されない)。共有リポに plist をそのまま commit すると、所有者の絶対パス (`/Users/<owner>/…`) が file に焼き付き、上記 §「公開前の Audit」 の grep に hit する layer-2 違反になる。
+
+### 解法: template + setup.sh
+
+- `<label>.plist.template` … `__HOME__` placeholder で commit (= 絶対パスは入らない)
+- `setup.sh` … template から plist を生成・配置・登録 (冪等):
+  ```sh
+  TEMPLATE="$SCRIPT_DIR/<label>.plist.template"
+  DEST="$HOME/Library/LaunchAgents/<label>.plist"
+  launchctl bootout "gui/$(id -u)/<label>" 2>/dev/null || true
+  sed "s|__HOME__|${HOME}|g" "$TEMPLATE" > "$DEST"
+  launchctl bootstrap "gui/$(id -u)" "$DEST"
+  launchctl kickstart -k "gui/$(id -u)/<label>"
+  ```
+- `uninstall.sh` … 対称操作 (`launchctl bootout` + `rm $DEST`)
+
+label 名にも owner literal を入れない (例: `local.<owner>.foo` ではなく `local.foo`)。LaunchAgent は per-user domain (`gui/$(id -u)/`) でロードされるので、user 識別は domain 側が担う。
+
+### 同種 trap が起きる他の場面
+
+- launchd LaunchDaemon plist (system domain だが同じく path 展開なし)
+- Hammerspoon Lua 設定など、OS 固有の「読み手側で path 展開しない」 設定ファイル全般
+
+### 他 OS は ネイティブで展開する (= template 不要)
+
+- Linux systemd の `.service`: `%h` で `$HOME` 展開、`User=` 指定で per-user 切り替え
+- Windows Task Scheduler XML / PowerShell スクリプト: `$env:USERPROFILE` / `$HOME` を runtime 展開
+
+template 化 (sed substitution) が必要なのは macOS plist のみ (経験上)。
+
+## <a id="standalone-operational-definition"></a>「standalone で成立」 の操作的定義
+
+「standalone で成立」は **完全自己完結** ではなく、**標準 dev environment + 明示された外部依存** で動作する状態を指す。
+
+### 標準 dev environment
+
+claude-config が想定する標準 dev environment:
+
+- macOS or Linux + git + git-crypt + GitHub CLI
+- claude-config の `setup.sh` が走る (= 主要依存 tool が揃う)
+
+Windows は `cp` + post-merge hook で claude-config 自体は動くが、shell 系スクリプトの動作保証は別途 (各 shared リポで明示)。
+
+### 許容される外部依存と doc 明示義務
+
+shared 層が依存していい外部リソースと、その doc 明示義務:
+
+| 依存先 | 例 | 明示義務 |
+|---|---|---|
+| 第三者 SaaS | GitHub Actions / Discord API / Google Calendar | 落ちた時の制約と回避策を CLAUDE.md に明記 |
+| layer 3 (個人層 / secret) への interface | 環境変数名 / GitHub Actions secret 名 / generic な path 表現 (`~/.secrets/<service>-token`) | 具体 owner literal は layer 3 に隔離、shared 層には interface 名のみ |
+| OS 固有機能 | macOS only スクリプト (Hammerspoon, launchd 等) | リポの CLAUDE.md / README に「macOS 限定」明示 |
+| 帯域・Network 制約 | 組織 NW での外部 API ブロック | 制約と回避策 (例: GitHub Actions 経由) を明示 |
+
+### 判定基準
+
+**共同編集者が clone → setup.sh を走らせた時、何が動いて何が動かないかが doc から判断できる** ことが standalone 要件の本質:
+
+- ✅ 動く例: cron 駆動の自動 job (= GitHub Actions)、yaml/script 編集 + push、機能サマリの参照
+- ⚠️ 制約付きで動く例: secret 必要操作 (owner 依頼経路に従う、具体的には [`discord-bot.md` token-sharing-protocol](discord-bot.md#token-sharing-protocol) 参照)、macOS only スクリプト (他 OS では skip)
+- ❌ doc 不明示で動かない = layer 違反: 共同編集者がトラブルシュートで詰む状態
+
+### operational 完結性の文書化義務
+
+「standalone で成立」は **動作要件**であり、**operational 完結性 (= collaborator 単独で全操作可能) とは別**。secret 等を要する操作を意図的に owner-only にしている場合、共有層の CLAUDE.md に「< 該当操作 > は owner 依頼経路」と明記すれば、standalone 要件と矛盾しない (= 共同編集者が「自分は何ができないか」を doc から判別できる)。明記がないと collaborator が試行錯誤で行き止まりを発見する cost が発生する。
+
+## 機能 literal と reading mirror の区別
+
+共有層の literal は 2 種類あり、混同すると drift リスクが発生する:
+
+| 種類 | 例 | 性質 |
+|---|---|---|
+| **機能 literal** | workflow yaml の identifier dict / script の URL / 設定ファイルの key | 機械が読むので変更すると動作が壊れる = 真正本 |
+| **reading mirror** | CLAUDE.md / README.md の identifier テーブル | 人間 reading 用、機能上は不要だが doc としてあると便利 |
+
+### drift 対策
+
+reading mirror には **真正本ポインタ** を併記する:
+
+```markdown
+| Channel | ID |
+|---|---|
+| #foo | 1234 |
+
+> `discord-fetch.yml` の `channels` dict が canonical、本テーブルは reading mirror。
+> 新規追加・rename 時は yaml 側を真正本として更新する。
+```
+
+これで次に編集する人が「真正本 → mirror」の順で更新できる。mirror が drift しても致命傷にはならないが、grep で検出しにくいバグ源。
+
+### 多層 mirror
+
+同じ identifier が 機能 literal + shared mirror + personal mirror の 3 段に重複する場合 (例: Discord channel ID = workflow yaml + shared CLAUDE.md + personal layer の reference doc) は mirror を 1 段に絞ることを優先検討する。ただし「auto-load される doc に書いておけば Claude が即参照できる」便宜と weight する — 残す場合は各 mirror に真正本ポインタを忘れず付ける。
+
+## <a id="convert-owner-repo-to-shared"></a>所有者だけの repo を共有リポに切り替える
+
+招待は今の tree だけでなく**全履歴**を渡す。 切り替えの手順:
+
+1. **履歴ごと点検する** — tree と `git log -p` の両方で、 次の class を洗う: (a) 所有者が「共同編集者にも見せない」 と決めていた事項 (repo の規約に「転記しない」 と書いた物) (b) 第三者の連絡先 (c) 所有者の個人層・他の非公開 repo への path (d) 所有者の絶対 path・account 識別子。 見つけた class を所有者に並べ、 class ごとに渡すかを所有者が決める (agent は「private だから」「信頼できる相手だから」 で決めない = [§判断基準にしないもの](#pii-data-minimization))
+2. **分岐** — 渡さない物が履歴に 1 つでも残る → 共有用の repo を新しく作り、 渡す物だけを履歴 1 から入れる (今の repo は所有者だけの記録として残し、 共有側を名前で参照する = 正本は共有側に 1 つ)。 履歴の書き換えは最後の手段 (不可逆・他の clone の作り直し・文字列単位の除去は漏れやすい)。 所有者が全 class を渡すと決めた → 今の repo をそのまま共有する
+3. **運用文書だけを直す** — CLAUDE.md / SESSION.md / AGENTS.md / script にある、 所有者の個人層への path を、 repo 名の言及 + 「共同編集者は辿る必要がない」 の境界文に置き換える (上の §「L2 における「名指し」 の適用 (boundary 明示付き)」)。 所有者の secret の置き場所を前提にした script は、 各自の値を環境変数で渡す形にする。 記録の文書 (archive・送付記録・講演の計画) の path は書き換えない (= 記録を歪める)。 代わりに CLAUDE.md に、 記録に出てくる他 repo は辿る必要がない、 と 1 か所書く
+4. **「user」 が誰を指すかを書く** — 所有者だけの時代の文書の「user」 は所有者を指す。 共同編集者の agent は自分の相手を user と読むので、 CLAUDE.md に「記録の user = 所有者」 と 1 行書く
+5. **所有者側の検査を前後で回す** — 所有者の個人層に、 この repo の文書の見出しや token を読む検査があれば、 書き換えの前後で結果が変わらないことを確かめる (path を消すと検査の needle まで消えることがある)
+6. **相手の手元の準備を repo に載せる** = [§collaborator-check](#collaborator-check)
+7. **判断を記録する** (DESIGN.md: 何を渡すと決めたか・切り直さなかった理由) → **招待** (次節) → 所有者の repo 一覧の記載を更新
+
+## Collaborator の招待（GitHub）
+
+GitHub UI 経由でも可だが、`gh` CLI で 1 行で完結する:
+
+```bash
+# write 権限（一般的な共同編集者）
+gh api -X PUT repos/<owner>/<repo>/collaborators/<username> -f permission=push
+
+# read 権限のみ
+gh api -X PUT repos/<owner>/<repo>/collaborators/<username> -f permission=pull
+
+# admin (鍵管理者など)
+gh api -X PUT repos/<owner>/<repo>/collaborators/<username> -f permission=admin
+```
+
+実行後、対象ユーザーには GitHub から invite メールが届き、accept すると collaborator になる。状態確認:
+
+```bash
+# 受諾済みの collaborator 一覧
+gh api repos/<owner>/<repo>/collaborators
+
+# 未受諾の pending invitations
+gh api repos/<owner>/<repo>/invitations
+```
+
+`permission` の選択指針: 卒論・共同論文等の write 必要なケースは `push`。`maintain` は branch 保護や release 管理を任せる場合のみ。`admin` は鍵管理者か co-owner だけ。
+
+<a id="org-base-permission"></a>**org に置く private repo は、 招待した人の外にも見えることがある** — org の base permission (`default_repository_permission`) が `read` 以上だと、 その org の private repo は org の member 全員が読める (collaborator として招待していなくても)。 特定の人とだけ共有する repo (学生の応募の下書き・個人の書類) を org に作る前に `gh api orgs/<org> --jq .default_repository_permission` を見て、 `none` でなければ個人の account に作るか、 base permission を変えるかを決める (実測)。
+
+## <a id="collaborator-check"></a>招待した相手の手元の準備は repo が session 開始時に確かめる
+
+招待の後に、 相手の手元でしか済まない手順が残る (自分の token を発行して置く・道具を入れる・最初に読む節)。 招待の連絡に書いて伝えると、 相手が読み落とすか忘れた時点で止まり、 誰も気付かない ([`docs/convention-design-principles.md#human-memory-not-a-carrier`](../docs/convention-design-principles.md#human-memory-not-a-carrier))。 そこで**準備の点検を repo 自身に持たせる**:
+
+- **仕組み** — repo に project の SessionStart hook (`.claude/settings.json`)・点検 script の写し (`tools/collaborator-check/collaborator-check.sh`)・要る物の一覧 (`.collaborator-check.conf`) を置く。 相手がその repo で session を開くと、 欠けている物だけが直し方つきで agent に渡り、 agent が user に伝える。 揃えば何も出さない。 最初に読む節は clone ごとの初回だけ出す。 session は止めない (終了値 0)
+- <a id="sibling-repo-auto-clone"></a>**隣に要る repo は、 人に clone を頼まず repo が取りに行く** — 共有リポが別の repo (道具の engine・共通の規約) を「隣に clone してある」 前提で使うなら、 その前提は招待の連絡や README で頼まず、 conf の `repo <dir 名> <URL> [<環境変数>] -- <用途>` 行で満たす。 session 開始時に、 無ければ clone し (📥 で 1 回知らせる)、 あれば 20 時間に 1 回 fast-forward で最新にする (作業中の変更・分岐があれば触らない)。 URL は https:// か file:// (資格情報を使わない取得)。 所有者のマシンは `setup.sh` の Step 7 が自分の repo を全部 clone するので、 この行は共同編集者の手元のためにある。 共有の仕組みを作る道具は、 この行を入れる install の command を出す (例: 掲示板の `board.py init`)。 「❌ を出す」 で止めずにその場で clone する理由と、 この形の一般則 = [`../docs/convention-design-principles.md#self-provisioning-prerequisites`](../docs/convention-design-principles.md#self-provisioning-prerequisites)
+  - <a id="sibling-companion-same-dir"></a>**道具が別の repo を「道具自身の隣」 で探すなら、 2 つの置き場所を揃える** — 掲示板の engine は companion の claude-config を engine の隣 (同じ親 dir) で読み、 共有リポの隣は見ない。 repo 行の上書きの環境変数は check の置き場所だけを変えるので、 片方だけ別の場所に置くと、 check は ✅ を出しても道具は companion を見つけず、 無いときの代わりの動きで黙って進む。 そういう 2 つを repo 行に並べるときは、 用途と CLAUDE.md の案内に「別の場所に置くなら 2 つを同じ dir に」 と書く (実測)
+  - <a id="sibling-clone-verify-as-collaborator"></a>**repo 行を足したら、 共同編集者の手元と同じ条件で確かめる** — 所有者の機械には隣の checkout が既にあり、 git の全体設定が https を SSH に読み替えていることがある (`url.<ssh>.insteadOf https://…`) = そのまま回すと、 clone の経路も資格情報の要らない取得かどうかも確かめられない。 (1) 隣に無いときの clone は、 上書きの環境変数をまだ無い一時の path に向けて回す (所有者の checkout を退けない) (2) 資格情報の無い素の https で取れるかは `GIT_CONFIG_GLOBAL=/dev/null` を付けて回し、 clone した repo の `remote get-url origin` が https のままかを見る (3) 20 時間ごとの最新化は、 repo の写しと file:// の上流を一時 dir に作り、 上流に commit を足して印 (`.git/collaborator-check.pulled`) の時刻を戻して回す (実測)
+- <a id="collaborator-check-python"></a>**Python の版と venv は conf の `python` 行** — `python tools/py -- <用途>` が session 開始時に repo の Python の入口 (`tools/py`) の `--venv-check` を聞き、 宣言の版の Python がこの機械に無いときだけ ❌ を出す。 venv を作る・requirements に追従させるのは入口が初回の実行でやる = [`python-env.md`](python-env.md) (環境ごとの表 = [`#python-env-environments`](python-env.md#python-env-environments))
+- **配り方** — `python3 scripts/install-collaborator-check.py install <repo> --item '<conf の 1 行>' ...`。 写しが正本と同じか・hook が共有されるかは `check <repo>`。 書式と限界 = script の docstring。 **正本 = [`templates/shared-project/collaborator-check/`](../templates/shared-project/collaborator-check/)**、 repo の写しは repo 単体で動くために置く (共同編集者は claude-config を持たない = [§「standalone で成立」](#standalone-operational-definition))。 直すときは正本を直し、 同じ流れで写しを配り直す ([下](#template-copy-staleness))
+  - <a id="template-copy-staleness"></a>**正本を直したら、 写しの配り直しまでを 1 単位にする** — 写しは配り直すまで古いまま残り、 正本の直しは相手の手元に届かない。 写しを置く正本 (`templates/shared-project/` の collaborator-check・python-env・pdf-publish と、 project に写した利用者の hook = [#project-copy-of-user-hook](#project-copy-of-user-hook)) を変える commit では、 pre-commit (`.claude/pre-commit-extra.sh` の検査 6) が base (この checkout の親 dir、 `TEMPLATE_COPIES_BASE` で上書き) の全 repo を見て、 写しが正本と違う repo と配り直しの 1 行を出す (警告だけ、 commit は止めない)。 配り直したら、 その repo で写しの file だけを path 指定で commit + push する (作業中の他人の変更に触らない)。 判定 = [`scripts/check-template-copies.py`](../scripts/check-template-copies.py): 写しを持つ repo は登録せず、 conf・conf の `python` 行・`tools/pdf-publish/`・hook の写しの dir の有無から導く (台帳にすると、 足し忘れた repo が黙って外れる)。 見る hook は script の `HOOK_COPIES` が持ち (配る installer が無いため)、 pre-commit が見る正本の path は script の `--watched-paths` の一覧に揃える (hook の側に一覧を書き写さない) / 正本の過去の版と同じ写しは「古いだけ」 (repo の側の手直しが無い = そのまま配り直せる)、 どの版とも違う写しは「repo の側で手直しされた」 (配り直す前に中身を見る、 黙って上書きしない)。 別の機械で正本を直して pull で届いた分は、 同じ script を一覧・定期の点検から回して拾う。 配り直しは自動にしない (共同編集者の repo への push は外に出る変更)。 実測: 複数の repo の写しが正本の過去の版のまま残り、 正本の直しが相手の手元に届いていなかった
+    - <a id="template-copy-push-owner-ok"></a>**配り直しの push は、 push する窓で本人の許可を取ってから 1 repo 目から始める** — 別の session (依頼元・指揮役) が「push を進める」 と答えても、 その答えはその窓の自動の許可の判定を通らない (「共有の資源の変更」 として止まる。 止まった操作を別の窓に回すのは許可の迂回)。 判定が 1 repo 目を通しても、 2 repo 目以降と同じ扱いにする = 先に入った 1 本だけが本人の許可の無い push として残る (実測: 1 repo 目が通り、 2 repo 目で止まった)。 止まったら、 書き換えた写しを HEAD の版に戻してから (未 commit の写しを共有 repo に残すと、 別の session の commit に入る) repo ごとに push する中身を 1 行ずつ並べて本人に聞く
+- **hook を持たない agent** (Codex ほか) — repo の CLAUDE.md に「session 開始時に 1 回 `bash tools/collaborator-check/collaborator-check.sh`」 を書く (installer が文面を出す)
+- **個人の値の置き場所は所有者の配置を前提にしない** — 既定の path + 上書きの環境変数 (conf の `file <path> <ENV>`)。 script 側も同じ環境変数を読む。 その service を使わない人は環境変数に `none` を入れると出なくなる (満たせない ❌ を毎回出し続けると、 他の ❌ まで読まれなくなる)
+- <a id="collaborator-check-reserved-env"></a>**上書きの環境変数に Claude Code・SDK 自身の変数を使わない** (`CLAUDE_CONFIG_DIR`・`CLAUDECODE`・`CLAUDE_PROJECT_DIR`・`CLAUDE_ENV_FILE`・`CLAUDE_EFFORT`・`CLAUDE_PID`・`CLAUDE_CODE_*`・`CLAUDE_AGENT_SDK_*`・`ANTHROPIC_*`) — session がその変数に値を入れていることがあり (設定フォルダを固定した session の `CLAUDE_CONFIG_DIR`、 hook の中の `CLAUDE_PROJECT_DIR` など)、 check はその値をその行の置き場と取り違える (無ければそこへ clone もする)。 名前は `<REPO>_REPO_DIR` / `<NAME>_FILE` の形にする。 conf にそういう行があれば、 check はその行を読まずに ⚠️ と代わりの名前の例を出す (止める名前の一覧 = script の `RESERVED_ENV_NAMES`・`RESERVED_ENV_PREFIXES`。 実測)
+- ⚠️ 所有者の global の gitignore が `.claude/*` を落としていると、 hook の設定が共同編集者に届かない。 installer は repo の `.gitignore` に `!.claude/settings.json` を足し、 `check` が ignore されていないことを確かめる
+- `file` と `command` は存在まで確かめる (token が有効かは各 service の検査に任せる)
+
+## <a id="project-copy-of-user-hook"></a>利用者の手元にもある hook を project の hook として配るとき
+
+共同編集者の手元でも効かせたい hook (返事の検査など) を、 共有 repo の project の hook (`.claude/settings.json`) に写して配ることがある。 同じ hook を自分の user 単位の設定 (`~/.claude/settings.json`) にも入れている人 (所有者など) の手元では、 2 つは command の path が違う別の hook として登録される = 両方が走ると見て、 project の側で避ける (2 回鳴ることそのものは測っていない)。
+
+- **形** — project の command の頭で、 利用者の設定に同じ hook があれば何もしない: `grep -qs 'hooks/<file 名>' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" || python3 "$CLAUDE_PROJECT_DIR/tools/<名前>/<file 名>"`。 照合する文字列は、 利用者の設定の command に出る path の一部 (`hooks/<file 名>`) にし、 project の写しの path (`tools/<名前>/<file 名>`) には当たらない形にする。 `CLAUDE_CONFIG_DIR` で設定フォルダを替えている session は、 そのフォルダの設定を見る
+- **見ないもの** — managed settings と `settings.local.json`。 そこにだけ同じ hook がある手元では 2 回鳴る (害は同じ指摘が 2 つ並ぶこと)
+- **写すもの** — 部品を持たない 1 file の hook を、 repo の `tools/<名前>/` に写す (repo 単体で動く = [§「standalone で成立」](#standalone-operational-definition))。 repo の CLAUDE.md に、 何をする hook か・正本の path・配線の場所・どの画面で鳴らないかを書く。 写しの古さは [#template-copy-staleness](#template-copy-staleness) の網が見る = 写した hook を script の `HOOK_COPIES` に 1 行足す (足すまでは網が見ず、 正本を直しても写しは古いまま残る)
+- **確かめ方** — 設定に書いた command そのものを `sh -c` で回し、 偽の transcript と Stop の入力で、 鳴る形・黙る形・利用者の設定に同じ hook がある形 (`CLAUDE_CONFIG_DIR` を偽の設定フォルダに向ける)・本物の設定の形を試す (実測: この 4 つで、 写した hook が鳴るのは検査に当たる返事だけ、 所有者の手元では黙る、 と確かめた)
+- 共有 repo の設定の変更は、 守りの道具を持つ環境では本人の承認が要る変更になりやすい = 写しと配線を 1 つの候補にまとめて、 承認の後に一度に当てる ([`agent-rule-ownership.md`](agent-rule-ownership.md))
+
+## <a id="repo-python-env"></a>repo の Python の版・venv・固定した依存 → [`python-env.md`](python-env.md)
+
+計算や検算を Python で回す repo の版の宣言 (`.python-version`)・入口 `tools/py`・環境ごと (macOS・Linux・WSL・Windows・CI・Docker) に何を使い、 無いとき何を案内するかの正本は [`python-env.md`](python-env.md)。 共有リポでは、 招待した相手の手元の点検 (conf の `python` 行 = [上](#collaborator-check-python)) がその入口を使う。
 
 ## 共有 git-crypt 鍵パターン
 
-共有プロジェクトを git-crypt で暗号化したい場合、**個人鍵とは別の鍵**を作って共同編集者と共有する。
+共有プロジェクトを git-crypt で暗号化したい場合、**個人鍵とは別の鍵**を作って共同編集者と共有する。**鍵配布は openssl 暗号化 backup をクラウドストレージ (Dropbox 等) に置き、`.claude/git-crypt-backup` + `setup.sh` Step 5b-pre による全自動復元を canonical にする** (詳細: [`docs/git-crypt-guide.ja.md`](../docs/git-crypt-guide.ja.md) §共有リポでの自動復元)。
 
-### 鍵の生成と配布
+### 鍵の生成 + 配布 (initiator 側、初回のみ)
 
 1. リポで `git-crypt init` → 内部鍵生成
-2. `git-crypt export-key <somewhere>/<project-name>.key`
-3. 共同編集者全員がアクセスできる場所（チーム共有 Dropbox フォルダ等）に鍵をコピー
-4. 共同編集者は各自その場所から鍵を取得し、好きなローカルパスに保存
-5. `git-crypt unlock <local-path>` で復号
+2. `git-crypt export-key /tmp/<project-name>.key && chmod 600 /tmp/<project-name>.key`
+3. 鍵を openssl で暗号化してクラウドストレージ共有フォルダに配置:
+   ```bash
+   /usr/bin/openssl enc -aes-256-cbc -pbkdf2 -salt \
+     -in /tmp/<project-name>.key \
+     -out <shared-storage>/<project-name>.key.enc
+   shred -u /tmp/<project-name>.key   # 平文を即削除
+   ```
+4. 強いパスフレーズを共同編集者に **out-of-band で共有** (対面 / Signal 等。GitHub / クラウドストレージ / メール経由は禁止)
+5. リポに `.claude/git-crypt-backup` を作成、暗号化ファイル名 (= `<project-name>.key.enc`) を 1 行で記載 ← これが setup.sh の検索キー
+6. `~/.secrets/<project-name>.key` をローカルに配置して `git-crypt unlock` で動作確認
+
+- <a id="key-folder-audience"></a>**鍵を置く共有フォルダの参加者 = その repo の共同編集者と同じにする** — より広い集団と共有している既存のフォルダに置かず、 鍵だけのフォルダを新しく作って共同編集者を招待する (暗号化してあっても、 読める人を増やす理由が無い)。 「対面で渡せるから手渡し」 で代えない = 受け取った側の setup.sh の自動復元から外れ、 控えが人の手元に散る (実測)
+- 既存の repo を共有に切り替えるとき、 その repo が個人の鍵 (他の repo と使い回しの鍵) で暗号化されていたら、 先に専用の鍵へ付け替える ([`docs/git-crypt-guide.ja.md#rotate-key`](../docs/git-crypt-guide.ja.md#rotate-key))
+
+### 共同編集者向けの SETUP.md
+
+共同編集者が新マシンで onboarding するための walkthrough は、**`SETUP.md` (リポ root)** に置く。CLAUDE.md は毎セッション auto-load されるため full walkthrough を入れるとコスト増、cold reference として SETUP.md に分離する。
+
+- テンプレ: [`templates/shared-project/SETUP.md.template`](../templates/shared-project/SETUP.md.template) を copy → このリポ固有のパラメータ (encrypted backup ファイル名 / Dropbox path / local key path / passphrase 受領経路 / plaintext test file) を埋める
+- 配置: **必ずリポ root**。`docs/**` を git-crypt 暗号化対象にしている場合、`docs/SETUP.md` だと未 unlock の collaborator が読めない catch-22
+- CLAUDE.md 側の git-crypt セクションは **SETUP.md への 1-2 行ポインタ + 反パターン警告 (手動 openssl から始めない) のみ**。例:
+  ```markdown
+  **git-crypt 有効** (`<encrypted-paths>` のみ暗号化)。
+  - 復号後の日常運用: `git-crypt unlock ~/.secrets/<project-name>.key`
+  - **新マシン初回セットアップ → [SETUP.md](SETUP.md) を必ず読んでから進める**。`cd ~/Claude/claude-config && ./setup.sh` で全自動。⚠️ **手動 `openssl enc -d ...` から始めない** (path 誤りで bad-decrypt 残骸事故が過去あり、SETUP.md §反パターン警告 参照)
+  ```
+
+SETUP.md.template は復号失敗事故 (`docs/git-crypt-guide.ja.md` §共有リポでの自動復元 「共同編集者向け運用」項の手動経路 anti-pattern bullet 群) の 5 段アンチパターン全てに対する防御 (反パターン警告 + 推奨経路 setup.sh 最優先 + 手動 fallback の Step 0 事前確認 / Step 2 事後確認) を組み込んでいる。**項目を削らず内容だけ埋める**こと。
 
 ### 暗号化スコープ最小化を検討する
 
-`.gitattributes` を `private/** filter=git-crypt diff=git-crypt` 1 行に絞ると、機微な情報のみ `private/` に入れて他は平文で扱える。鍵管理コストと audit のしやすさが大きく改善される。詳細は [`docs/git-crypt-guide.md`](../docs/git-crypt-guide.md) 参照。
+`.gitattributes` を `private/** filter=git-crypt diff=git-crypt` 1 行に絞ると、機微な情報のみ `private/` に入れて他は平文で扱える。鍵管理コストと audit のしやすさが大きく改善される。**逆に `docs/**` を暗号化対象にすると、SETUP.md を `docs/` に置けない catch-22 になるため SETUP.md は必ず repo root** (上記 §共同編集者向けの SETUP.md 参照)。詳細は [`docs/git-crypt-guide.md`](../docs/git-crypt-guide.md) 参照。
 
-### 鍵のローカルパスは共同編集者ごとに異なる
+### 鍵のローカルパスは共同編集者ごとに異なる (補助的、レガシー)
 
-CLAUDE.md には**単一のコマンド例**を書きつつ、ユーザごとの実パスは個人層側の `shared-project-keys.md` で管理する仕組みにする:
+`setup.sh` Step 5b-pre が `.claude/git-crypt-backup` + クラウドストレージ find で鍵を自動配置するため **path 知識自体が不要** になっており、これが canonical recovery 経路。
 
-CLAUDE.md 側の記述例:
+ただし個人層 (e.g., `<your>-prefs/`) を持つユーザは補助的に `shared-project-keys.md` レジストリで「自分のマシンに何の鍵があるか」を管理してもよい。schema:
+
 ```markdown
-**復号**: `git-crypt unlock <your-key-path>`
-- 鍵の正本: <共有フォルダ>/<project>.key
-- パスは個人層の `shared-project-keys.md` に登録（Claude が自動で拾う）
-- 個人層を持たない場合は `~/.secrets/<project-name>.key` に置けば fallback
+| Project | Local key path | `.claude/git-crypt-backup` の中身 |
+|---|---|---|
+| <project-name> | ~/.secrets/<project-name>.key | <project-name>.key.enc |
 ```
 
-`shared-project-keys.md` の schema:
-```markdown
-| Project | Local key path |
-|---|---|
-| <project-name> | ~/.secrets/<project-name>.key |
-```
-
-これで Claude は共有プロジェクトに入った時に個人層の `shared-project-keys.md` を参照し、該当エントリのパスで自動 unlock できる。なくても fallback で動作する（**共有プロジェクト層は個人層に依存しない**ことが守られる）。
+このレジストリは Claude が「どの鍵が手元にあるか」を一覧把握する用途であり、unlock 自体は setup.sh が自動で行うため依存ではない (**共有プロジェクト層は個人層に依存しない** 4 層モデルが守られる)。個人層の placeholder (`<workplace_short>` 等) は path 解決には**使わない** (誤展開事故防止 — `docs/git-crypt-guide.ja.md` §共有リポでの自動復元 参照)。

@@ -1,0 +1,439 @@
+<!-- doc-meta
+when: Claude Code の permission prompt 削減・deny/ask/allow 設計を触るとき + tool call が拒否されて原因 (rule / hook / classifier) を切り分けるとき (#hook-masks-deny) + classifier に止められた操作を user に chat で承認してもらうとき・承認したのにまた止まったとき (#chat-approval-reaches-classifier) + 本人の口座番号などを、 本人が印刷して出す様式に印字するとき (#own-numbers-in-local-forms) + git の commit / push を別の dir から打つとき・allow に入れたのに止められたとき (#cd-with-git-goes-to-classifier) + worktree に入った session で Bash の command が拒否されたとき (#worktree-session-refuses-complex-command) + 確認 (ask) を返す hook・rule を足す・直すとき・本人が「中身も分からず押すだけ」 と言ったとき (#ask-only-owner-judgeable) + MCP の tool を止める hook に、 Claude が承知して通す口を持たせるとき (#ack-outside-tool-input)
+category: harness-core
+summary: Claude Code CLI の permission プロンプト削減 (= cwd 外 file 〔`~/Downloads` 等〕の Read/Edit/Write が毎回確認される症状を `additionalDirectories` で cwd 同様に無確認化、 bare tool allow は cwd 外を素通ししない observed〔docs 解釈と食い違い〕、 deny > ask > allow で機密は `deny` 優先、 setup.sh `configure_permissions` は `allow` のみ触る = additionalDirectories/deny は直書き永続、 settings 反映は安全側に次セッション〔allow 追加と disableAllHooks 除去は desktop 2.1.260 で同 session 即時を実測〕、 #chat-link-rendering-scope = chat 応答内の markdown link `[label](path)` を click した右パネルは session のフォルダ〔始めたフォルダ + app で session に足したフォルダ〕の中だけを開き、 additionalDirectories は数えない〔外は「このセッションのフォルダの外」 表示、 見せるなら open / scratchpad の写し〕〔#chat-link-resolution-base = 相対 path の基準は session を始めたフォルダで、 Bash で cd した先は app 5.11492.5 から、 そこで見つからないときの後の段だけ = harness の「Primary working directory」 通知どおり repo の中からの path を書くと、 その段が効かない版・環境では開けない、 inline code の dir/file.ext もリンクになる、 既定 = link は絶対 path・inline code は基準フォルダからの path、 表示文言で原因を見分ける表、 本体の fallback 〔git repo なら path の末尾一致・worktree・originCwd・shell が入ったフォルダ・session に足したフォルダ〕 と inline code のリンク化条件と押したときの有無の確かめ、 事前の知らせ chat-path-base-nudge.sh + 事後の Stop hook chat-file-ref-enforce.sh〕〔#rc-chat-panel-no-render = Remote Control 閲覧では scope 通過でも同一 error で render 不可 = file が worker host 側にのみ在る、 唯一 RC で完結する対処 = 内容を chat 本文に出させる、 observed n=1〕、 frontend 3 系統切り分け〔CLI settings.json / Claude Code デスクトップ Tool policy / macOS TCC〕、 §always-approve-tools = permission 設定で抑止できない always-prompt tool class〔`ccd_session_mgmt__search_session_transcripts` 等 cross-session tool は `allow` 登録でも承認チップが出る = 経路を外す以外に消せない、 token-handshake 返送への含意込み〕、 #ask-pattern-action-anchor = 高 stakes Bash gate の ask パターンは file 名 substring でなく不可逆 action の実行形〔`--send` 等の explicit flag〕に anchor〔ask > allow ゆえ allow で例外を彫れない = パターン絞りが唯一の手段・tool 側は fail-safe 既定・gate 対象 invocation は chain 禁止〕、 #desktop-permission-dialog-log = desktop の承認 dialog は app log に 1 件 2 行 〔Emitted / Received〕 で残る → scripts/permission-dialog-audit.py で tool 別集計と main / sub-agent 振り分け、 #monitor-needs-own-allow = Monitor は Bash の allow にも内容 ask rule にも掛からない独立 tool、 #agent-launch-no-prompt = Agent 起動は allow 済なら dialog 無し 〔「背景作業で聞かれる」 = Monitor / spawn chip / Workflow / 中身の ask gate〕、 #protected-settings-edit = Claude による .claude/settings*.json 等 protected path の編集は default mode では毎回 dialog 〔allow rule で消せない = 公式 docs、 auto は classifier 判定〕・Bash で迂回しない・「毎回」 と言われたら先に dialog 内訳を実測・desktop のモード選択はフォルダごとに defaultMode より優先、 #symlink-both-paths = symlink の path と実体 path の両方を登録、 #file-rule-tools = path rule を見るのは Read/Edit だけ 〔Write/Glob の rule は参照されない、 名指ししない間接読みは塞げない = sandbox〕、 #always-allow-persists-literal = 「常に許可」 は command 文字列を settings.local.json に保存 → secret を command に書かない 〔#always-allow-never-matches-again = 保存が literal ゆえ **per-call 一意な path を含む command では二度と一致しない** = tool 出力の spill file 〔`~/.claude/projects/…/tool-results/<乱数>.txt`〕 を sed で読む形が代表例、 押すほど死んだ allow 行が増えるだけ → Bash でなく Read tool + glob path rule で塞ぐ、 「押しても減らない」 と言われたら毎回変わる部分の有無をまず見る〕、 #long-command-falls-back-to-ask = 長すぎる Bash は auto の自動承認から外れて dialog になり pattern 化できないので「常に許可」 も出ない 〔実測 2,111 通過 / 4,272 dialog、 backstop = hooks/long-bash-command-guard.sh が閾値超を block して分割・file 経由へ誘導、 guard の自己参照は自分の source/test/doc だけ除外〕、 承認 dialog の原因切り分けは scripts/permission-dialog-audit.py --diagnose が hook / fixed / length / rule / rule_unique / unmatched に自動分類 〔⚠️ 件数を読むなら --no-run-hooks を使わない = 意図した hook gate が rule 系に落ちて水増しされる〕、 #hook-masks-deny = PreToolUse hook は permission 評価より先に走るので deny rule と両方当たると **hook の理由だけが返り deny は見えない** 〔「hook の理由が返った = permission を通った」 は誤読で 1 手目の観察が誤結論を支える・dialog log は deny も classifier 拒否も記録しないので「履歴に無い」 は証拠にならない・拒否されたら permissions.deny → hook → mode の順に読む〕、 #chat-approval-reaches-classifier = auto の classifier は会話を読み、 **user が chat で操作と対象を名指して承認すれば止めを外せる** 〔公式 docs、 動詞だけ・「ok」・選択肢の記号では外れない、 承認は 1 回の操作にだけ効く = 決まった形は本人が autoMode.allow へ、 止められたら平易に伝えて承認の一文を渡し、 承認の後に 1 回だけ打ち直す、 承認なしに形を変える・小分けにする・別の道具で狙うのは迂回、 承認で外れない止めは mode を default に / rule 追加 / user の手元で実行、 機密の deny は Claude の判断で外さず confidential-repo-boundary.md#work-on-a-copy-not-by-lowering-the-gate、 変数間接で literal match を外すのは回避なのでやらない〕)
+-->
+# Claude Code の permission プロンプトを減らす (additionalDirectories と working directory 境界)
+
+Claude Code CLI で「**ファイル操作のたびにアクセス権を聞かれて鬱陶しい**」を構造的に解消するための規約。とくに作業ルート (cwd) の外にあるファイル (GUI の置き場 `~/Downloads` / `~/Desktop` / `~/Documents` など) を弄らせるときに毎回確認が出る症状が対象。
+
+## 症状
+
+cwd 配下のファイルは確認なしで編集できるのに、cwd の**外**のファイルを Read / Edit / Write させると操作ごとに「Allow / Deny」を選ばされる。スプレッドシートやダウンロードした添付など、cwd 外に落ちているファイルを処理させると連続して聞かれる。
+
+## 核心: working directory 境界は tool allow とは別レイヤー
+
+- `permissions.allow` に **bare tool name** (`"Read"` / `"Edit"` / `"Write"` / `"Bash"`、パラメータ無し) を入れると「そのツールを使ってよいか」は許可される。
+- だが対象**ファイルパスが cwd の外**だと、それとは別の file-access 境界チェックが走り、確認が出る。
+- ⚠️ **docs と実挙動の食い違い**: 公式 docs ([permissions](https://code.claude.com/docs/en/permissions) の "Working directories") は「`additionalDirectories` 配下は cwd と同じ扱い」と書く一方、bare allow が cwd 外をどこまで素通しするかは曖昧。**実運用 (observed) では bare `"Read"` allow があっても cwd 外ファイルで確認が出て、path 別 allow (`Read(//abs/path/**)`) か `additionalDirectories` 登録が必要だった**。
+  → 教訓: 「bare allow を入れたから cwd 外も通る」と仮定しない。cwd 外は `additionalDirectories` で**明示登録**する。
+- 補足 (要検証): Bash tool 経由 (`cat`/`grep` 等) は cwd 外パスでも通りやすい一方、Read/Edit/Write tool は cwd 外で止まりやすい、という非対称が観察された。docs は両者を同 scope と説明しており食い違うため、機構は断定しない。実用上は「cwd 外を確実に無確認化したいなら additionalDirectories」で済む。
+
+## 対処: additionalDirectories
+
+`~/.claude/settings.json` の `permissions.additionalDirectories` に cwd 外の作業ディレクトリを**絶対パス**で登録すると、その配下は cwd と同じ扱いになり Read/Edit/Write が無確認になる。
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": ["/Users/<you>/Downloads", "/Users/<you>/Desktop"]
+  }
+}
+```
+
+- `/add-dir` コマンドは **runtime の動的追加** (その session 内のみ)。永続させたいなら settings.json の `additionalDirectories`。
+- <a id="symlink-both-paths"></a>macOS で `~/Dropbox` 等が **symlink** の場合は、 **symlink の path と実体 path の両方**を登録する (`ls -ld` で実体を確認)。 Claude は同じ file を symlink 経由でも実体 path でも指すので、 片方だけだと、 もう片方の形で開いた file が scope 外として毎回 dialog になる (2026-09-12 実測: `~/Dropbox` だけ登録していて、 `~/Library/CloudStorage/Dropbox/...` の形で開いた file の編集が dialog になった)。 allow / ask / deny の path rule も両方の形で書く (公式 docs: allow rule は symlink の path と実体の両方が一致したときだけ効く)。
+
+## 機密は deny で守る (deny > ask > allow)
+
+- rule の評価順は **deny → ask → allow**。最初に match した rule が勝つので、**deny が最強**。
+- `additionalDirectories` で広いディレクトリ (例: home の `Documents` や `Dropbox` 全体) を開けても、その中の機密サブフォルダは `permissions.deny` で個別 block できる。deny の方が優先されるので、「広く開けて一部だけ塞ぐ」が成立する。
+- <a id="file-rule-tools"></a>file の path rule を見るのは **`Read(path)` と `Edit(path)` だけ** (公式 docs `permissions`、 Claude Code v2.1.210 以降)。 `Write(...)` / `NotebookEdit(...)` / `Glob(...)` の path rule は受け付けられるが**参照されない** (起動時に警告が出る) — 書き込みは `Edit(...)` で、 Glob は `Read(...)` で塞ぐ。 `Read` / `Edit` の deny rule は、 Claude Code が Bash の中で認識する file コマンド (`cat` / `head` / `tail` / `sed`) と redirect 先 (`> file` / `< file`) にも効く。 ただし **file を名指ししない読み方** (その dir での `grep -r pattern .`、 script が中で file を開く) には効かない。 全 process を止める OS レベルの遮断は sandbox (公式 docs `sandboxing`)。 `Bash(*/abs/secret*)` のような内容 rule は、 path を直接書いたコマンドだけを捕まえる歯止め。 読むだけでも触らせない dir (上位 dir からの再帰検索を含む) は PreToolUse hook で塞ぐ = [`confidential-repo-boundary.md#protected-dir-access-guard`](confidential-repo-boundary.md#protected-dir-access-guard)。
+
+### <a id="hook-masks-deny"></a>PreToolUse hook は permission 評価より先に走る — hook の block が deny を隠す (実測)
+
+同じ command に `deny` rule と PreToolUse hook の両方が当たるとき、 tool result に返るのは **hook の理由だけ**で、 deny は評価に到達しないので見えない。
+
+- **罠**: 「hook の理由が返った = この path は permission を通った」 と読むと誤る。 hook の案内どおりに直して同じ command を打ち直すと、 今度は deny で落ちる (= 2 手かかるだけでなく、 **1 手目の観察が誤った結論を支える**。 hook を満たす作業 〔中間 file の生成など〕 を先に済ませてしまうと、 その作業ごと無駄になる)
+- **見分け方**: 同じ path を、 その hook の matcher に当たらない形の command で 1 回叩く (= hook を外して permission だけを見る)。 hook が無反応なら返るのは permission の判定そのもの
+- **dialog の log は証拠にならない**: [`--diagnose`](#desktop-permission-dialog-log) が読むのは **dialog として出たもの**だけ。 deny で落ちた call も、 `auto` の classifier が落とした call も残らない = **「履歴に出ない」 は「deny されていない」 の証拠ではない**。 確実なのは `permissions.deny` を直接読むこと
+- <a id="blocked-chain-ran-nothing"></a>**`&&` で繋いだ command を hook が止めると、 前段も走っていない** (実測): PreToolUse の判定は command 全体に対して実行の前に下るので、 止まった時点で鎖のどの段も実行されていない。 止めた理由が後段にあっても、 後段だけを打ち直すと前段 (`git add` など) が抜ける (実測 = 生成物の `git add` が抜けたまま commit・push し、 足りない生成物を 2 本目の commit で足した)。 止められた鎖は最初から打ち直すか、 打ち直す前に `git status` などで前段の効果が無いことを確かめる
+- **∴ 拒否されたときの順序**: ① settings の `deny` を読む ② hook を疑う ([#desktop-permission-dialog-log](#desktop-permission-dialog-log) の「mode を疑う前に hook を疑う」) ③ mode。 hook の理由文が返ってきても ① を飛ばさない
+
+### <a id="chat-approval-reaches-classifier"></a><a id="chat-consent-does-not-reach-classifier"></a>`auto` では chat の承認が classifier に届く — 操作と対象を名指した承認だけ (公式 docs + 実測)
+
+`auto` mode は allow 外の操作を classifier が判定し、 **dialog を出さずに** 拒否することがある (`denied by the Claude Code auto mode classifier`)。 classifier は会話を読んでいて、 user が chat で「その操作をしてよい」 と書けば承認として読み、 止めを外せる (公式 docs [`permission-modes`](https://code.claude.com/docs/en/permission-modes) の「Approvals you state in conversation」)。 効くかどうかは言い方で決まる:
+
+- **操作と、 危ない理由になっている具体を名指す**: 動詞だけでは外れない (公式 docs の例 = 「force-push してよい」 では外れず、 branch まで名指す)。 「ok」「進めて」 や、 Claude が出した選択肢の記号 (「B」) だけの返事も外れなかった (実測)。 問いの文に操作と対象の file を書き、 答えのボタンの語にも対象を入れる (「2 本の置き換えを承認」 の形) と、 ボタンを押した答えで外れた (実測)。 本人が同じ操作をここでやるよう求め直した後に単独の command で打ち直すと通った実測もある (command の形も変えたので、 どちらが効いたかは切り分けていない)
+- <a id="relayed-approval-does-not-reach"></a>**別の session が取り次いだ承認は届かない**: classifier が読むのはこの session の会話。 別の session からの message に本人の承認の言葉が引用されていても、 公開面への写しは止まった。 本人がこの session で操作と対象を名指して承認すると、 同じ操作が通った (実測)。 取り次ぎで来た依頼で止まったら、 依頼元に止まったことを返し、 本人にこの session で承認してもらう (取り次いだ session に同じ操作を打たせるのは下の 4 の迂回)。
+  規則の保護の承認の記録 (`agent-rule-guard.py` / `manuscript-claim-guard.py` の `approve`) も同じ: 依頼元の窓で本人が答えた発言を `--session <依頼元の session>` で記録しても、 worker の commit は止まる。 承認は session ごとの記録に入り、 commit の検査は commit した session の記録だけを見る (実測)。 worker の窓で本人に 1 行打ってもらう ([`agent-rule-ownership.md#approval`](agent-rule-ownership.md#approval) の末尾の段)
+- **1 回の操作にだけ効く**: 次の同種の操作はまた止まる。 決まった形を毎回承認するのをやめるなら、 本人が settings の `autoMode.allow` に足す (公式 docs [`auto-mode-config`](https://code.claude.com/docs/en/auto-mode-config))
+- **承認で外れない止めもある**: classifier の優先順位の上位の止めは、 下の (a)〜(c) で消す
+- <a id="classifier-blocks-send-dry-run"></a>**外部発信の CLI の dry-run (送信の flag を付けない実行) も、 送信と見なされて止まることがある** (実測): classifier は command の形 (宛先・本文の file・送信の script 名) から判定し、 flag が無いことでは外れない。 dry-run を通すために command の形を変えるのは迂回 = やらない。 本文の file の中身を chat に全文出し (承認してもらう文面と送る文面を同じ file から出す)、 宛先と件名を添えて、 操作と宛先を名指した送信の承認をもらってから本送信を 1 回打つ (この形で通った、 実測)。 止められた直後は、 読むだけの別の command も同じ理由で止まった (原因は切り分けていない) = 送信の後の記録などは承認の後にまとめて回す
+
+**止められたときの順序**:
+
+1. 何が拒否したのか (rule / hook / classifier) を確定させる ([上の順序](#hook-masks-deny))
+2. classifier なら、 何が止まったかを平易な言葉で user に伝え、 **そのまま言える承認の一文を渡す** (操作 + 対象。 例 = 「<repo> の PR #<番号> を rebase で merge してよい」)。 ボタンを押してもらう・terminal で打ってもらうを最初の案にしない (= user には「chat で頼んだのにやれない」 と見える)
+3. user がその操作を名指して承認したら、 同じ操作を 1 回だけ打ち直す (description に、 承認があったことを書く)。 それでも止まれば下の (a)〜(c)
+4. user の承認なしに、 形を変える・小分けにする・別の道具や別の session で同じ結果を狙うのは迂回 = やらない
+
+- **承認で外れないとき・毎回の承認を無くしたいときの消し方は 3 つ**: (a) user が mode を `default` に変える (= dialog が本人に届くようになる) (b) settings に rule を足す (`permissions.allow`、 または auto mode の `autoMode.allow`) (c) **その操作をやめ、 user の手元で実行してもらう**
+- <a id="hand-user-an-allow-rule"></a>**(b) を user に頼むときは、 入れる場所を先に書く** (実測): terminal で `claude` を起動 → `/permissions` → Allow → Add a new rule → rule の文字列 → 保存先は User settings (`~/.claude/settings.json`、 home で起動した CLI の Project settings は home 直下の `.claude/` に入る)。 rule の文字列 (`Bash(… :*)`) を shell 用の code block に入れない = 本人が terminal に貼って zsh が `unknown file attribute` で失敗する。 rule を足した後は、 sub-agent への委任として止められた同じ操作も通った (実測 1 回) = 「委任だから rule では通らない」 と決めつけない。 Claude が settings を直接書いて通すのは権限の自己拡張 = やらない (本人の手で)。 git に載せた宣言 file ([`multi-machine-state.md#gate-rules-reassert-every-session`](multi-machine-state.md#gate-rules-reassert-every-session)) を Claude が編集するのは通っても、 **その commit は classifier が止める** (実測 = 自分の allow を git に載せる操作) → commit と auto-apply の 1 command は本人の terminal に渡す (宣言の diff を見せて)。 guard の承認 CLI を allow に宣言する場合の形 = [`tool-call-robustness.md#classifier-blocks-guard-approval-cli`](tool-call-robustness.md#classifier-blocks-guard-approval-cli)
+- ⚠️ **機密を守るための `deny` なら (c) が既定**。 deny を外すのは boundary の設計判断そのものを変える行為なので、 「user が作業を望んでいる」 を根拠に Claude の判断で外さない (= 外す/戻すの往復中に別の call が素通りする窓も開く)。 対象 file だけを許可 scope に出してもらう形は [`confidential-repo-boundary.md#work-on-a-copy-not-by-lowering-the-gate`](confidential-repo-boundary.md#work-on-a-copy-not-by-lowering-the-gate)
+- <a id="hand-off-hash-pinned-apply"></a>**(c) で渡すのが agent の作った変更 (自分を縛る guard の修正など) なら、 手で写させず、 検査済みの候補を hash で固定した 1 本の command にする** (実測): ① 候補は scratch で検査する (本物の依存ごと写した環境で selftest、 新しい検査が変更前の実装では赤くなること、 hook 側の test、 公開 repo の漏洩検査) ② command は「元の版の hash」 と「候補の hash」 を両方照合し、 どちらかが違えば何も変えずに止まる (= 検査したものだけが入り、 並列 session の変更を巻き込まない) ③ 写した後に検査を回し、 通らなければ元に戻して止まる ④ `git commit -- <path>` で対象だけを commit する。 ⚠️ 本人が中身を読まずに貼るなら、 形は人の commit でも実質は agent の自己改変になる = 読む面を小さくして渡す (差分でなく、 変更が何を決めるかの表や 1 画面)。 読む余裕が無いなら「入れない」 を推す。 規則の文書の変更手順 = [`agent-rule-ownership.md#operation`](agent-rule-ownership.md#operation)
+- <a id="mode-switch-with-ruling"></a>**(a) で mode を切り替えてもらうときは、 切り替えの報告と同じ発言に裁定を書いてもらう** (実測): 保護された規則の文書の変更は、 承認の記録 (guard の `approve` / `apply`) が本人の**最新の**発言しか引けない。 「切り替えた」 だけの発言が最新になると、 その前の裁定はもう引けず 1 往復増える。 頼む文面に「切り替えたら、 どの項目を採るかを同じ発言で」 と書く。 引用は 12 文字以上 (短い「OK」 は別の文にも当たるので guard が断る) で、 迷ったら発言の全体を引く
+- <a id="pinned-apply-concurrent-commit"></a>**hash で固定した apply は、 並列 session の commit を検出して何も変えずに止まる** (実測): 候補を作った後に別 session が同じ file を commit すると、 元の hash が合わない。 そのときは新しい版に同じ patch を当て直し、 「前の版 → 前の候補」 と「今の版 → 今の候補」 の差分の行 (`diff … | grep '^[<>]'`) が一致することを確かめてから、 script の hash を新しい値にする (= 変更の中身は同じで、 相手の変更も残る)。 `patch` は offset で当たると `*.orig` を残し、 生成索引の検査がそれを source と読んで落ちる = `--no-backup-if-mismatch` を付ける。 承認の記録は file ごとに要る領域 (region) が違い、 推測で指定すると git の関門で止まる = guard の `apply` (領域を自分で判定する) を使う
+- <a id="classifier-deny-other-session"></a>⚠️ **止められた操作を別 session に回して通すのも迂回** (2026-09-23 追加、 実測) — classifier の判定は session ごとで、 同じ操作が並列 session では通ることがある。 並列 session への依頼に載せてよいのは、 **owner がその操作を明示に望んでいる時だけ**。 依頼文に「自分の session で止められた事実」 と「owner の発言」 を書く (= 受け手が同じ判断を持てるように)。 通ったら、 どの session が当てたかを owner に報告する (= 残すか戻すかは owner が決める)。 owner の明示の発言が無いなら (c) に戻す
+- <a id="classifier-deny-live-wiring"></a>⚠️ **止められた変更を、 次の session で自動に走る配線の中に書き込んだまま置くのも迂回** (実測) — hook や bootstrap の正本が作業 tree にあって `~/.claude/hooks` から symlink されていると、 commit 前の編集でも次の session 開始で動き、 止められた結果を本人の判断より先に出す。 止められたら、 その変更を作業 tree から外して差分の file に退避し (`git diff -- <paths> > <scratch>/x.patch` → `git checkout -- <paths>`)、 本人に選んでもらう: 承認の一文で打ち直す (上の順序) か、 本人が terminal で `git apply <patch>` と実行の command を貼る (= (c))。 本人が当てた後の commit と push は Claude が受け持つ (本人の操作の結果を記録するだけ)
+- 変数間接で literal match を外して通すのは**回避**であってやらない (= gate の意図を無効化する。 [§この gate の限界](#ask-pattern-action-anchor) は「敵対的回避への防御ではない」 と書いているが、 それは**書き手が守る前提**の上での話)
+
+### <a id="own-numbers-in-local-forms"></a>本人の口座番号などを手元の様式に印字する (実測)
+
+本人が印刷して署名・郵送する様式 (銀行・税務の届出など) に、 本人の口座番号などを script で印字する場面。
+
+- 手元で様式を作り、 本人が見て署名し郵送するのは、 支払いの様式に振込先の口座を印字するのと同じ行為なので、 口座番号は印字してよい。 本人・家族の公的な番号 (日本のマイナンバーを外国の様式の納税者番号の欄に書く、 など) も同じで、 印字してよい。 紙に刷る様式の欄への印字は、 画面の入力欄に番号を打ち込んで送る操作とは別の行為で、 agent が入力欄に番号を打ち込まない、 という決まりの対象ではない (実測 = 入力欄の決まりを紙の様式にまで広げて断る誤りが起きた)。 値は暗号化した置き場から script が読み、 tool の出力・会話の記録に出さない作りにする。
+- **手順**: ① `auto` mode では番号の入った file の書き出しと確認が止まる (`Credential Leakage` / `PII Data Handling`) ので、 印字する段に入る前に user に mode を `auto` 以外 (`default` や編集の承認) に替えてもらう (= [上の (a)](#chat-approval-reaches-classifier)) ② 生成と印刷用の raster 化を回す (Bash は 1 本ずつ承認が出る) ③ 確認は crop した画像を目で見る ④ spec は暗号化した場所に置く ⑤ 終わったら user に `auto` へ戻してもらう
+
+## 反映タイミング
+
+settings.json は session の途中の変更も **live で再読込される** (公式 docs `settings`: Claude Code が settings file を watch し、 `permissions` / `hooks` を含む変更を再起動なしに当てる。 実測: 宣言の auto-apply で `permissions.allow` に足した rule が、 同じ session で止められていた command をそのまま通した)。 書き換え後は次の実作業で「もう聞かれない」 ことを確認する (rule の形が command に当たっていない = 相対 path・複合 command は別の失敗)。
+
+**実測 (2026-09-11、 desktop 埋込 2.1.260)**: `permissions.allow` への追加 (例 `Monitor`) と `disableAllHooks` の除去は、 **同じ session の次の tool call から**有効になった (allow 追加直後の Monitor 呼び出しで dialog が出ず、 app log にも承認要求が記録されなかった)。 ∴ 少なくともこの 2 種は「次セッションから」 ではない。 他の key (deny / ask / additionalDirectories / defaultMode) は未測定なので、 安全側の既定は変えず、 変えたら次の実作業で 1 回確かめる。
+
+## このリポ (claude-config) の setup.sh との関係
+
+`setup.sh` の `configure_permissions()` は `permissions.allow` に安全ツール (Bash/Read/Edit/Write/Glob/Grep/WebFetch/WebSearch) の**不足分を足すだけ**で、`additionalDirectories` と `deny` には**一切触らない**。
+→ `~/.claude/settings.json` に直書きした `additionalDirectories` / `deny` は **setup 再走でも消えない** (永続)。バックアップを取ってから jq で書き換えるのが安全。
+
+## <a id="chat-link-rendering-scope"></a>chat 右パネルの markdown link は「session のフォルダ」 の中だけを開く — `additionalDirectories` は数えない
+
+Claude Code (desktop app / VS Code 拡張の chat panel) は、応答本文内の markdown link `[label](path/to/file.md)` を click すると右パネルで file を render する。 右パネルが開くのは **session のフォルダ**の中の file だけ = session を始めたフォルダ (worktree に入った session はその worktree も) と、 **app でその session に足したフォルダ** (`request_directory` の承認、 右パネルが出す「フォルダを追加して開く」 の提案、 フォルダへのアクセス確認で「この session で許可」 を選んだもの)。 **`settings.json` の `permissions.additionalDirectories` は数えない** = Read/Edit/Write tool の scope (cwd + `additionalDirectories`) より狭い。
+
+- 根拠 (desktop app 4.4212.0 / engine 2.1.309 の main process を [`claude-app-bundle-reading.md`](claude-app-bundle-reading.md) の手順で読んだ): 外かどうかの判定 (`judgeOutsideSessionFolders`) が使う根 `grantedRoots` は、 session の記録の作業フォルダ群 (`cwd` / `originCwd` / `worktreePath` / `harnessCwd`) と、 session の permission 更新のうち `addDirectories` の型のものだけから作られる。 判定は書いた path と symlink を解いた実体の両方で行う
+- 実測: `additionalDirectories` に登録済みのフォルダ (symlink の形と実体の形の両方) の file を、 `show_pane` (pane = file) が「session の作業フォルダか許可されたフォルダの中に解決できない」 と断り、 chat の link も下の文言で開かなかった。 session を始めたフォルダの file と scratchpad の file は解決を通った
+- ⚠️ 以前の本節は「Read/Edit/Write と同じ scope (= cwd + `additionalDirectories`)」 と書いていた (それに沿って `additionalDirectories` に足しても右パネルは開かない)
+
+**症状** (file 実在にも関わらず):
+
+> このファイルはこのセッションのフォルダの外にあります — ここでは開けませんが、ディスク上にはまだ存在している可能性があります。
+
+(現行の文言。 旧 build は「このファイルを読み取れませんでした — … 作業ディレクトリの外に存在する可能性」。 文言と原因の対応 = [#chat-link-resolution-base](#chat-link-resolution-base) の表。 **file が在るのに「見つかりませんでした」 なら、 まず相対 path の基準を疑い、 次に path が symlink をまたいで session のフォルダの外へ出ていないかを見る** = 判定は実体の path でも行う。)
+
+**診断**:
+
+0. **Remote Control 経由で見ていないか** (→ 下の「Remote Control 経由では scope 通過でも render 不可」)。RC なら 1-3 は無関係。
+1. session を始めたフォルダを確認 (session 起動時に選んだ folder)。
+2. click した link の href (相対 path なら 1 を基準に解決) の絶対 path と、 symlink を解いた実体を求める。
+3. それが 1 の中か、 app でこの session に足したフォルダの中か。 **`additionalDirectories` に在っても答えは「外」**。 一番安い確かめ方 = `show_pane` (pane = file) にその path を渡す (外なら「解決できない」 と返る。 窓が開いていない session でも判定は返る)。
+
+**対処 (その session で見せる)**:
+
+- 外部アプリに投げる: `open <path>` (PDF なら Preview) / `open -R <path>` で Finder に選んだ状態で出す。 OS 経由なので右パネルの範囲を通らない
+- session のフォルダか scratchpad に写して、 写しに link する (scratchpad の file は解決を通る = 実測。 写しは元を直しても追従しない)
+- 中身を本文に出す (どの画面でも読める)
+- session にそのフォルダを足す (`request_directory`、 path にそのフォルダ)。 **既定の手** = 足した後は、 そのフォルダの file が書いた path のままで開く (実測 app 5.11492.5: 同期フォルダへの symlink の repo の実体のフォルダを足すと、 中の PDF が symlink の path でも実体の path でも `show_pane` の解決を通った。 足す前は断った)。 足すのは file の実体のフォルダ = 外を指す symlink の実体 (symlink の repo・`dropbox-refs`)、 無ければ git の work tree の最上段。 本人に確認の画面が 1 回出ることがある。 ⚠️ auto mode では classifier に止められることがある (実測) = そのときは上の手で見せる
+- 右パネルの「フォルダを追加して開く」 の提案は、 提案するフォルダが symlink を経由すると出ない (コードを読んだだけ、 画面では未確認)
+
+⚠️ **診断反射の落とし穴**: error message は「削除または移動された可能性」 を並列で提示するため、**path form 誤り (相対 vs 絶対、typo、リネーム) を先に疑って retry する**引力が強い。file 実在・form 正しい状態で失敗が続いたら、次に触る仮説は **session のフォルダの外**であって別 form の retry ではない (= 単一情報源〔error message〕null からの結論飛躍防止)。 `settings.json` の `additionalDirectories` を見ても判定できない (右パネルは数えない) = 上の 3 の `show_pane` で確かめる。
+
+**frontend 差**: この rendering scope 挙動は **chat 右パネルを持つ frontend** (= desktop app、VS Code 拡張の chat panel) で発生する。CLI-only session には右パネル rendering 自体が無いので該当しない。scope 判定機構自体は harness 側で共通 (= Read/Edit/Write tool と同じ layer)。
+
+### <a id="chat-panel-media-playback"></a>音声・動画: 右パネルが鳴らすのは session のフォルダの中の 25 MB 以下だけ
+
+右パネルは音声・動画の link を再生器 (`<audio controls>` / `<video controls>`) で開く。 鳴るのは次を全部満たす file だけ (desktop app 4.4212.0 の本体を [`claude-app-bundle-reading.md`](claude-app-bundle-reading.md) の手順で読んだ。 25 MB の境目は画面では未確認):
+
+- **場所**: session のフォルダの中 (上の範囲と同じ。 main process の `readSessionPanelMediaAsDataUrl` が `resolveContainedSessionPath` で解決する)。 scratchpad の写しは解決を通る (`show_pane` で実測)
+- **拡張子**: 音声 = mp3・m4a・aac・wav・flac・opus・ogg・oga、 動画 = mp4・webm・mov・m4v・ogv
+- **大きさ**: 25 MB (26,214,400 bytes = `SESSION_PANEL_MEDIA_MAX_BYTES`) 以下。 file 全体を data URL にして画面へ渡すので、 超えると読まない。 配信用に仕上げた 1 回分の MP3 (30〜50 MB) は超える
+
+⚠️ **鳴らないときの文言は原因を言い当てない**: 再生器の枝の失敗は、 path を解決できなかったときも「このファイルはプレビュー用に読み込めませんでした。 ファイルが大きすぎてインラインプレビューできないか、 このブラウザで再生できない形式であるか、 削除または移動された可能性があります」 と出る (実測 = 解決できない相対 path の inline code を押してこの文言が出て、 大きさの問題と読み違えた)。 原因は app の log で見分ける: `~/Library/Logs/Claude/main.log` の `[SessionFileAccess] could not resolve "<path>"` = path の基準の取り違え ([#chat-link-resolution-base](#chat-link-resolution-base))。
+
+**聞いて・見てもらうとき** (場所やリンクを渡しても、 音を渡したことにはならない):
+
+- **相手がその Mac の前にいる** = その Mac で流す。 短い切り出し (十数秒まで) は `afplay <file>` で 1 本ずつ (何を流すかを先に告げる。 続けて流すループの止め方 = [`podcast-audio-finishing.md#bgm-level-listening`](podcast-audio-finishing.md#bgm-level-listening))、 それより長い file は `open <file>` (既定の再生アプリ。 アプリによっては開いた瞬間に鳴る = 相手が別の音を聞いている最中なら先に聞く)。 前景の `afplay` は鳴り終わるまで turn を返さないので、 その間に相手が話しかけるには turn を止めるしかない (実測: 数十秒〜1 分の書き出しを前景の `afplay` で流し、 2 回とも途中で止められた)。 `open` なら相手が再生アプリで止め・戻しができ、 turn も返る
+- **右パネルで聞かせたいとき**は、 上の 3 条件を満たす file (切り出し) を session のフォルダか scratchpad に置いて link する
+- **相手が別の端末にいる** = 同期フォルダの中の場所を文で書く (inline code にしない = 押せるのに開かない link になる)。 共有リンクを渡しただけで相手が聞けたことにはならない (実測)
+- **機械の網** = Stop hook `chat-file-ref` が、 聞いて・見てもらう文脈 (参照の前後の「聞」「聴」「試聴」「視聴」「listen」) で音声・動画の file を返事に書き、 その file が session のフォルダの外にあるか 25 MB を超えるとき、 `afplay` / `open` で流すよう差し戻す。 同じ turn にその file を `afplay` / `open` で流していれば差し戻さない (`open -R` は Finder で見せるだけなので流したことにならない)。 実装 = `scripts/lib/chat_file_refs.py` の `media_block`
+
+### <a id="rc-chat-panel-no-render"></a>Remote Control 経由では scope 通過でも render 不可
+
+**scope 診断 (上の 1-3) を全部通過しているのに拒否される**ケースがある: session を **Remote Control で別端末から閲覧している**とき。file は worker host のディスクにあり、**閲覧している端末側には存在しない**ため、右パネルは render できない。error message は scope 外のときと**同一文言** (「削除または移動された可能性があるか、作業ディレクトリの外に存在する可能性」) なので、**scope 問題だと誤誘導される** (= 「作業ディレクトリの外」はどちらの原因でも表示される)。 ⚠️ これは観測時の build の文言。 現行 build は RC 専用の文言 (「このファイルは、このリモートコントロールセッションを実行しているマシン上にあり…」) を持つ = 文言で見分けられる ([#chat-link-resolution-base](#chat-link-resolution-base) の表)。 文言は build で変わるので、 迷ったら [`claude-app-bundle-reading.md`](claude-app-bundle-reading.md) で今の版の出し分けを読む。
+
+- **見分け方**: scope 3 段が全部 ✅ なのに拒否 → 次に疑うのは「この画面は RC か」。session の worker host は冒頭の自己同定 stamp ([multi-account-machine-surface.md I7](multi-account-machine-surface.md)) か `hostname` 1 発で確認できる。
+- **対処**: worker host 側の画面で開く / `open <path>` を worker host で実行して OS アプリに出す (RC 画面には届かない) / **内容を chat 本文に出させる** (= text は bridge を通るので RC でも読める。唯一 RC 画面で完結する手)。
+- ⚠️ observed n=1 (2026-07-27、user 側の切り分けによる同定。scope 3 段通過 + file 実在 + RC 閲覧の組で再現、worker host 側での表示は未検証)。
+
+**Bash 経由との非対称**: 上記 §核心 / §対処 の Bash tool は cwd 外 path でも通りやすい観察と同型 (= Bash は permission 判定が緩い、Read/Edit/Write はそれより厳しく、 chat rendering はさらに狭い = `additionalDirectories` も数えない)。「Bash で `cat <path>` も Read tool も通ったのに chat link は落ちる」という非対称は、この範囲の差の現れ。
+
+### <a id="chat-link-resolution-base"></a>相対 path の基準は「session を始めたフォルダ」 — Bash で cd した先は、 そこで見つからないときの後の段だけ
+
+scope の中の file でも、 **相対 path の基準を取り違えると開けない**。 これが最も多い形 (実測: desktop の最終発話で校正すると約 8% の turn に開けない参照があり、 link を含むのは約 1%)。
+
+**解決の規則** (desktop app の bundle を読んで確認、 実測の画面と一致):
+
+| 書き方 | 解決 |
+|---|---|
+| 相対 path (`dir/file.md`、 `../x.md`) | session を始めたときに選んだフォルダに連結し、 `..` を畳む |
+| 絶対 path (`/…/file.md`) | そのまま (実測: 右パネルで開いた)。 ただし開くのは、 symlink を解いた実体が session のフォルダ (始めたフォルダと app で足したフォルダ) の中のときだけ。 中に見える path でも、 途中の symlink が外 (同期フォルダなど) を指すと開かない (実測 app 5.11492.5、 表示は「見つかりませんでした」 = 下の表の 1 行目) |
+| `~/…` | home に展開 |
+| 本文に素で書いた絶対 path / `~/…` (拡張子つき) | 自動でリンクになる |
+| `[x](<path>)` (CommonMark の山括弧で囲んだ href) | **開けない**: 山括弧ごと path になる (実測 = 「見つかりませんでした」 の path 欄に `<…>` が付いて出た)。 囲まずに書き、 空白は `%20`、 丸括弧は `%28` `%29` にする (href は `decodeURI` してから解釈される。 丸括弧を残すと markdown の link がそこで切れる)。 Stop hook (`scripts/lib/chat_file_refs.py` の reason = angle) が中身の実在する山括弧の href を拾い、 直した形を示す |
+| 濁点・半濁点を含む日本語の file 名 (Dropbox・macOS は濁点を分けた NFD で持つことがある) | 書いた字 (NFC) と disk 上の名前が正規化だけ違うと開けないことがある (実測 = 右パネルへの表示要求が「解決できない」、 link では未確認)。 ASCII の名前の写し (例 = repo の build 出力) に link するか、 SendUserFile で渡す。 Stop hook (同じ部品の reason = nfd、 山括弧と重なれば angle_nfd) が、 実在する file への参照で正規化だけ違う成分を拾い、 disk 上の綴りを示す (macOS の file system は正規化を問わず開くので `exists` では見分けられない = 成分ごとに `listdir` の名前と比べる)。 手で見分けるなら = `python3 -c "import os,unicodedata as u; print([u.is_normalized('NFC',n) for n in os.listdir('<dir>')])"` |
+| inline code の `dir/file.ext` | **形だけで**リンクになり (実測: 実在しない path も青く描かれた。 区切りの無い `file.md` と `dir/` はならない)、 相対 path と同じ基準で開く |
+
+連結した結果が、 そのフォルダか app で session に足したフォルダの中にあれば開く (settings の `additionalDirectories` は数えない = [§chat-link-rendering-scope](#chat-link-rendering-scope))。
+
+**本体が持つ fallback** (検収で main process の解決関数を読んで追記。 app 2.110.0 / engine 2.1.271。 コード上の確認で、 画面では未確認):
+
+- **基準フォルダが git repo のとき**: 連結した先に file が無いと、 本体は `git ls-files` (無ければ untracked) で **path の末尾一致**を探し、 1 件に決まればそれを開く (複数なら変更中の file に近いものを選ぶ)。 repo の直下で始めた session は、 subdirectory からの相対 path でも開くことがある。 **基準フォルダが git repo でない** (複数の repo を束ねた親フォルダで始めた) session にはこの救済が無く、 上の表どおりに失敗する
+- **worktree に入った session** (desktop の worktree、 EnterWorktree): 本体は worktree の path を先に試す。 「起動時から変わらない」 のは通常の `cd` に対してで、 worktree への出入りでは基準が動く
+- `..` で外に出る相対 path は、 session の元のフォルダ (originCwd) でも試す
+
+**app 5.11492.5 / engine 2.1.325 で足された段** (main process の解決関数 `resolveSessionFilePaths` を読んだ。 どちらも遠隔の停止スイッチの下にあり、 その account で効いているかは code からは分からない):
+
+- **session の shell が入ったフォルダ** (tool の呼び出しの `cwd` を新しい順に覚えたもの。 始めたフォルダの中のフォルダだけ) を、 始めたフォルダに連結して file が無かった相対 path の基準として試す。 実測 (画面で 1 例): git repo でない親フォルダで始めた session で、 Bash で repo に `cd` した後に、 repo の中からの相対 path を inline code に書くと開いた
+- **app で session に足したフォルダ**も、 同じく相対 path の基準として試す
+
+**inline code をリンクにする条件** (同じ検収で renderer の file 参照 parser から読めた。 画面実験の結論 「形だけで決まる」 と一致):
+
+- 形 = `segment/…/name.ext` に行番号の後置 (`:12` / `:12-20`) を許す。 使える文字は **文字・数字・`_` `.` `-` `(` `)` `[` `]` だけ** — 空白・`~`・`@`・`+`・`$`・`*` を含む inline code はリンクにならない (`~/x/y.md` の inline code も、 ならない)。 **絶対 path (`/…/name.ext`) の inline code はリンクになる**
+- **link の label の中の inline code は別のリンクにならない** (押すと href が開く)。 `` [`dir/file.md`](/絶対/path) `` は label が repo の中からの path でも開く
+- href の scheme 判定は `^[a-z][a-z0-9+-]+:` で、 直後が行番号だけなら scheme にしない = `SESSION.md:42` は file + 行番号として扱われる。 href は `decodeURI` してから解釈される
+- **押したときに先に有無を確かめる** (app 5.11492.5 の renderer の file 参照の component。 描くときは今も形だけで、 実在を見ない): main process に file の有無を問い、 無ければ pane を開かずに、 その参照をリンクでない表示に変えて下の表の「見つからないため、開けません」 を出す。 答えが一定時間で返らなければ開く側に倒す
+
+**罠**: Bash で `cd` すると、 harness は「Primary working directory: <repo> (was <root>)」 と通知し、 system prompt も「href は working directory からの相対」 と指示する。 **右パネルが最初に試す基準はこの通知に追従しない** (session の設定に持つフォルダで、 起動時から変わらない)。 app 5.11492.5 からは、 そこで見つからなければ shell が入ったフォルダでも試す (上の「足された段」) が、 遠隔の停止スイッチの下にあり、 画面で確かめたのは 1 例だけ、 始めたフォルダの外のフォルダは試さない。 本 repo の hook (下の「機械の検査」「事前の知らせ」) は始めたフォルダだけで判定する = app より厳しい側。 通知どおり repo の中からの path を書くと、 その段が効かない版・環境では、 自分では正しく書いたつもりで開けない link になる。 repo の中で作業を続けているほど滑りやすい。
+
+**書き方の既定**:
+- markdown link の href = **絶対 path** (表示文字列は file 名でよい)。 基準を覚えていなくても壊れない。 ただし実体が session のフォルダの外の file (symlink の先が同期フォルダの repo、 settings の追加フォルダにだけ在る file) には効かない = 先にそのフォルダを session に足してから link する ([§chat-link-rendering-scope](#chat-link-rendering-scope) の対処)
+- inline code に path を書くなら、 **session を始めたフォルダからの path** (repo 名から書く)。 repo の中からの path を inline code に書くと、 上の「足された段」 が効かない版・環境では押せるのに開けない link になる
+- 例示の path (`path/to/file.md` 等) も inline code に入れると押せるリンクになる (実在を見ないので必ず開けない)。 例示は fenced code block に入れるか backtick を付けない (fence の中はリンクにならない)
+- **右パネルはフォルダを開かない** (file だけ)。 「この中の file を見て」 と渡すときは中の file を 1 本ずつ link する。 フォルダごと渡すなら desktop の host tool (`reveal_path`) で Finder に出す
+
+**表示で原因を見分ける** (日本語 UI の文言):
+
+| 表示 | 原因 |
+|---|---|
+| 「このファイルが見つかりませんでした」 + 「削除または移動された可能性があります。」 | フォルダの中だが、 連結した path に file が無い = **基準の取り違え**を先に疑う。 **link の先がフォルダのときも同じ表示**になる (実測: 在るフォルダの絶対 path)。 **file が在るのに出るなら、 path が symlink をまたいで session のフォルダの外へ出ていないかを見る** (PDF の native の preview は、 実体が外のときもこの表示 = 実測 app 5.11492.5。 `~/Library/Logs/Claude/main.log` には `[SessionFileAccess] could not resolve` でなく `[CoworkFilePreview] resolve failed … file_access_invalid_path` が残る。 在る file を絶対 path で指したときは main process が警告を書かずに断る) |
+| 「このファイルは作業ディレクトリの外にあります」 | 連結した path が scope の外 = [§chat-link-rendering-scope](#chat-link-rendering-scope) |
+| 「このファイルはこのセッションのフォルダの外にあります」 + 「ここでは開けませんが、ディスク上にはまだ存在している可能性があります。」 | file が session のフォルダ (始めたフォルダ + app で足したフォルダ) の外。 `additionalDirectories` に在っても出る = [§chat-link-rendering-scope](#chat-link-rendering-scope) |
+| 「見つかりませんでした」 + 「…または作業ディレクトリの外にあります。」 | 上の 2 つのどちらか |
+| 「このファイルが見つからないため、開けません。Claude にファイルの作成を依頼するか、パスを確認してください。」 (参照がリンクでなくなる) | 押す前の有無の確かめで、 どの基準にも file が無かった (app 5.11492.5 から) = 基準の取り違えか、 まだ作っていない file |
+| 「このファイルは、このリモートコントロールセッションを実行しているマシン上にあり、ここからは読み込めませんでした。…」 | [#rc-chat-panel-no-render](#rc-chat-panel-no-render) |
+
+**機械の検査**: Stop hook [`hooks/chat-file-ref-enforce.sh`](../hooks/chat-file-ref-enforce.sh) が、 最終発話の link と inline code のうち「基準フォルダに連結すると無い ∧ transcript に出た cwd か基準フォルダ直下の dir か session の追加フォルダに連結すると在る」 ものを見つけ、 正しい path を添えて 1 回だけ書き直させる。 どこにも無い path (例示)・link の label の中の inline code・scratchpad の形の path は見ない。 **実在する file への参照は絶対 path も含めて実体の場所も見る** = 実体 (symlink を解いた先) が session のフォルダ (始めたフォルダ・app で足したフォルダ・desktop の worktree の元の repo) の実体の外なら、 書き直しを勧めずに、 その file の実体のフォルダ (外を指す symlink の実体、 無ければ git の work tree の最上段) を session に足すよう言い、 足せないときの見せ方を並べる (足したフォルダは次の environment snapshot に入るので、 足した後の turn では拾わない。 app の main process の `containToGrantedRoots` と同じ判定。 symlink の repo の file、 settings の追加フォルダにだけ在る file がこれに当たる)。 inline code の形は上の app の式を写し、 本体の git 末尾一致も第 1 段 (tracked → untracked で 1 件に決まる) まで写している (複数一致のときの本体の絞り込みは写さず、 開けない側に数える)。 加えて **意図と違う file が開く形** (基準フォルダに file が在るが、 直近の作業ディレクトリにも同じ相対 path の別の file が在る = 親フォルダと repo の両方に在る `CLAUDE.md` を repo の中で `[CLAUDE.md](CLAUDE.md)` と書いた) も拾う。 ⚠️ worktree の基準移動は写していない = worktree に入った session では、 本体が開ける参照を「開けない」 と言うことがある。 「app で足したフォルダ」 は transcript の environment snapshot の追加フォルダから settings の `additionalDirectories` (user の設定フォルダと、 始めたフォルダの `.claude/`) を引いた近似 (snapshot には両方が入る = 実測。 両方に在るフォルダは外に数える = 止めすぎの側)。 相対 path は始めたフォルダだけで判定する = app 5.11492.5 の「cd した先・足したフォルダでも探す」 段は写さず、 書き直させる文に「版で変わる」 と書く (その段は遠隔の停止スイッチの下にある。 書き直しの先の絶対 path は、 実体が中なら版に依らず開く)。
+
+**事前の知らせ**: PostToolUse(Bash) hook [`hooks/chat-path-base-nudge.sh`](../hooks/chat-path-base-nudge.sh) が、 作業ディレクトリが基準フォルダから離れた最初の tool call の後に「右パネルの基準は <基準フォルダ> のまま」 を 1 回だけ (session × 作業ディレクトリごと) 知らせる。 作業ディレクトリの実体が session のフォルダの外 (同期フォルダへの symlink の repo、 settings にだけ在る追加フォルダ) なら、 文を替えて「このままでは、 ここの file は絶対 path でも右パネルでは開かない。 link で見せる前に <実体のフォルダ> をこの session に 1 回足す」 と知らせる (実例: そのフォルダで「絶対 path で書く」 と知らされ、 書いた link が開かなかった)。 harness の「Primary working directory」 通知が入れる間違った前提を、 入った瞬間に打ち消すのが狙い (Stop hook は書いた後に全文を出し直させるので高い)。 効いたかは Stop hook の発火率の前後比較で見る (`calibrate <days>` の率)。 判定の部品 = [`scripts/lib/chat_file_refs.py`](../scripts/lib/chat_file_refs.py) (基準フォルダは transcript の最初の environment snapshot から取る)、 再校正 = `python3 scripts/lib/chat_file_refs.py calibrate <days> [--context]` (新しい session から順に出す。 `--context` で参照の前後の文も出す = 目で仕分けるとき。 出力は private)。
+
+## <a id="frontend-split"></a>frontend 切り分け (同じ症状でも 3 系統)
+
+「いちいちアクセス権を聞かれる」は別系統の原因がありうる。**対処の前にどのフロントエンドか切り分ける** (Claude は CLI / デスクトップアプリ / IDE 拡張の 3 経路で使われうる):
+
+1. **Claude Code CLI** — `~/.claude/settings.json` の permission (本ドキュメント)。
+2. **Claude デスクトップアプリ (local agent mode)** — アプリ内の**別設定系統**。settings.json をいじっても変わらない。減らすには: 承認ダイアログ `Allow Claude to use {toolName}?` で「常に許可」を選ぶ / 設定の `Tool policy`・`Lock the approval state for specific tools` で事前承認 / `Allowed workspace folders` に作業フォルダ登録 / (最終手段) `bypass permissions mode`。skill 本体は `~/Library/Application Support/Claude/local-agent-mode-sessions/.../skills/<name>/SKILL.md` に展開されるので、ここに skill があれば「デスクトップアプリ経由」のサイン。
+   - **設定 / UI 仕様の調べ方**: 設定キーは `~/Library/Application Support/Claude/config.json` / `claude_desktop_config.json` (例: `coworkUserFilesPath` = Claude Code (desktop) の作業ルート)。 UI ダイアログ文言は `strings /Applications/Claude.app/Contents/Resources/app.asar | grep -oE 'defaultMessage:"[^"]+"'` で抽出できる (= 上記の `Allow Claude to use {toolName}?` 等はこの方法で確認した)。
+   - ⚠️ **誤診注意**: `config.json` の `dxt:allowlistEnabled` は **組織レベルの desktop 拡張 (DXT / MCP) のインストール許可管理** (`is_desktop_extension_allowlist_enabled`) であって、 **ツール実行の承認プロンプトとは無関係**。 これを「毎回聞かれる原因」と単一手がかりで推測しないこと (= 実際に一度そう誤推測 → app.asar 精読で別物と判明し訂正した。 inline §3「単一情報源で結論に飛躍しない」の Claude Code (desktop) domain 事例)。
+   - ⚠️ **「settings.json をいじっても変わらない」 の例外 = `deny` (2026-06-13 実測)**: desktop でも `~/.claude/settings.json` の `permissions.deny` は **honor される** (= 無害な deny 対象コマンドを叩くと block された)。 desktop で効かないのは **hook 出力** (= [`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork)) と **`defaultMode: bypassPermissions` 下の ask** (= bypass は全 tool auto-approve なので ask が void)。 **だが `defaultMode: default` なら settings.json の `permissions.ask` は desktop でも効く** (= 2026-06-13 実証: send_email を ask にすると内容表示つき承認 dialog が出て拒否で送信ブロック。 下記「desktop で特定 tool に確認を課す」)。 ∴ desktop UI の「バイパス権限モードを許可」 トグルは lever ではなく、 **settings.json の `defaultMode` が実効モードを支配**する (= トグル OFF だけでは gate されない)。 ⚠️ **2026-09-11 注**: 「desktop で hook 出力が効かない」 の観測の少なくとも一部は、 作業 root の project-local に入っていた `disableAllHooks: true` が原因だった ([`hook-authoring.md#disableallhooks-kill-switch`](hook-authoring.md#disableallhooks-kill-switch))。 除去後の desktop では PreToolUse の ask / PostToolUse の additionalContext が効いた。
+3. **macOS TCC** (OS のフォルダアクセス許可、Desktop/Documents/Downloads 等の保護) — macOS システムダイアログで、Claude 側の設定では消えない。Claude.app が versioned path に置かれる影響で再 prompt される構造的症状は [`macos-claude-code-tcc-recurring-prompt.md`](macos-claude-code-tcc-recurring-prompt.md) 参照。
+
+## <a id="desktop-per-tool-gate"></a>desktop で特定 tool に確認を課す (= hook 不可な frontend での per-tool gate、 2026-06-13)
+
+PreToolUse hook (mail 誤送信 guard 等) は desktop で出力 honor されず inert と観測されていた (= §frontend 切り分け 2 / [`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork)。 ⚠️ 2026-09-11: その少なくとも一部は root 限定の `disableAllHooks` が原因 = [`hook-authoring.md#disableallhooks-kill-switch`](hook-authoring.md#disableallhooks-kill-switch)。 hook が効く surface でも、 本 recipe の declarative ask は hook と独立に効く第二の層として有効)。 desktop で「特定の高 stakes tool だけ実行前に人間が一拍」 を機械的に課す working recipe は **settings.json の permission のみ** (= hook 不要、 2026-06-13 実証):
+
+1. `permissions.defaultMode` を `bypassPermissions` → **`default`** か **`auto`** に (= bypass は ask を void するので外す)。 `auto` でも ask rule は dialog を強制する (公式 docs `permission-modes`)。 ただし auto に入ると bare `Bash` 等の広い allow は外れ、 allow 外の操作は classifier 判定になる。 `auto` は `~/.claude/settings.json` (user scope) に書かないと効かない (project の `.claude/settings*.json` では無視される)。
+2. `permissions.ask` に確認したい tool を列挙 (例: `mcp__gmail-personal__send_email` 等)。 → 呼出のたび **引数 (to/subject/body) を全表示する承認 dialog** が出て、 拒否で実行ブロック (= 内容確認つきの一拍)。
+3. `permissions.allow` に **日常 tool を server-level で列挙** (= `mcp__gmail-personal` 等の MCP server 名、 + bare `Bash`/`Read`/`Edit`/`Write` 等)。 default mode は allow リスト外を prompt するので、 これが無いと全 MCP が毎回確認になる。 precedence **deny > ask > allow** なので server-level allow があっても `ask` の特定 tool だけは確認が残る (= 「mail だけ確認・他は素通り」)。
+
+⚠️ 注意:
+- **machine-local** (`~/.claude/settings.json` は git 非同期 = §個人ごとの適用)。 別マシンで desktop 運用するなら各自設定。
+- desktop UI 「バイパス権限モードを許可」 は **OFF 維持** (ON だと session が bypass に入り ask が void)。
+- allow リスト外の稀な MCP tool は prompt が出る (= 「常に許可」 で都度解消 or allow に追加)。
+- hook の完全代替ではない (= draft 全文提示 + autonomy 禁則の文面までは再現せず「内容表示 + 人間承認」 まで)。 一次防御は CLAUDE.md の discipline (全 frontend で読まれる)、 本 recipe は機械の一拍を足す第二視点。
+- 一般原理 (= enforcement surface の frontend 生存性) は [`docs/convention-design-principles.md §8.15`](../docs/convention-design-principles.md#enforcement-surface-frontend-survival)。
+
+## <a id="ask-pattern-action-anchor"></a>ask パターンは「tool への言及」でなく「不可逆 action の実行形」に anchor する (2026-07-03)
+
+高 stakes 操作 (メール送信等) を `permissions.ask` の Bash パターンで gate するときの設計規約。
+
+**なぜ ask パターン自体を狭くするしかないか**: precedence は deny > ask > allow で、**ask は allow に勝つ**。つまり「広い ask を張って、無害ケースだけ allow で例外を彫る」は構造的に組めない。誤爆を消す手段は ask パターンの絞り込み**だけ**。
+
+**誤爆の失敗モード**: 対象 script の file 名 substring に match するパターン (例: `Bash(*send_mail.py*)`) は、不可逆 action だけでなく「file 名に言及するだけの無害コマンド」全部に発火する — syntax check (py_compile) / git add / grep / (実行前に必須とされる) dry-run。すると ① 承認ダイアログが「危険操作の合図」でなく「開発ノイズ」になり、② user が反射で承認する習慣がつき、③ 本物の dialog も反射承認される = **gate の信号価値が壊れて実質死ぬ** (実例 2026-07-03: syntax check + commit + push の chain に送信 gate が発火し続け、user が「いちいち聞かれてうざい」と flag)。
+
+**設計 3 点 set**:
+
+1. **tool 側を fail-safe 既定にする**: 不可逆 action に explicit flag (例: `--send`) を必須にし、flag 無しは常に dry-run。flag を忘れた時の事故方向が「実行されない」になる。
+2. **ask は action flag の実行形に anchor**: 例 `Bash(*send_mail.py*--send*)`。不可逆 invocation だけが ask を踏み、開発・記録・検証系コマンドは素通り。
+3. **gate 対象 invocation は chain しない**: ask の match は Bash command 文字列単位なので、`&&` chain の 1 成分が match すると **dialog は chain 全体を表示**する (= 承認対象がぼやける + 無関係な成分に確認が伝染)。逆も然りで、「commit + push を atomic に chain する」類の良規律と広い ask パターンは正面衝突する。gate を踏むコマンドは単体で打ち、dialog = action そのものにする。
+
+⚠️ **移行順序は「tool の fail-safe 化が先・ask の絞り込みが後」厳守**: 「絞った ask (flag anchor) + 旧 default-実行 tool」の組合せは、flag 無しの実行が ask に match せず**素通りで実行される** (= 唯一の危険な遷移順)。逆順 (旧 broad ask + 新 fail-safe tool) は誤爆が残るだけで安全。複数マシン運用では、tool が git 同期・settings.json が machine-local なため**マシンごとにこの順序ずれが起きうる** — 必ず tool 側の pull を確認してから ask を絞る。
+
+⚠️ **この gate の限界 (= 過信しない)**: ask の match は「typed command 文字列」への glob なので、変数間接 (`S=<path>; python3 $S --send`) や glob 表記で literal を外すと素通りする。敵対的回避への防御ではなく、**good-faith な呼び出しに機械の一拍を課す speed bump**。最終防御は呼び出し側の規律 (draft 提示 + user 明示承認) と、hook が生きている surface での hook 層。
+
+<a id="every-send-channel-same-anchor"></a>**外部発信の経路が複数あるなら、 全経路を同じ anchor に揃える (実測)**: 上の 3 点 set を 1 経路 (例: メール CLI) の宣言 ask と hook だけに入れると、 別の発信経路の guard (例: chat 投稿 CLI の hook = script 本文に API write があれば ask) は dry-run でも聞き続け、 **1 送信 2 回の dialog が経路を変えて再発する**。 苦情が出た経路だけを直すのは経路 1 本の修正で、 「どの発信経路でも 1 送信 = dialog 1 回」 という性質は閉じない。
+
+- **guard を足す・直すときの test の必須 case**: 正規 CLI の dry-run (flag 無し) = 無音 / 実送信 flag = ask / flag が展開で入りうる形 (`$` / backtick) = ask / **同名だが正規 path でない複製** = ask。 dry-run 無音の case を持たない guard は、 この性質を守っているか分からない
+- <a id="adhoc-send-script-outside-exemption"></a>**使い捨ての送信 script は例外の外に落ちる**: 一時 dir に書いた送信 script は「flag 無し = dry-run」 の約束を持たないので、 guard は script 名で match するしかなく、 dry-run も本送信も毎回聞く。 正規 CLI に要る機能 (例: 返信の threading) が無いと思い込んだ model がこれを書く。 対策は ask のまま案内するより **止めて、 正規 CLI の使い方を止めた理由の文に書く** 方が早い: ask の説明文は dialog にも tool 結果にも出ないことがあるが、 止めた理由が model に届けば最初の 1 回で正規経路に戻れる。 ⚠️ **止め方は exit 2 + stderr** にする — JSON の `permissionDecision: deny` だけで理由を載せないと tool 結果は「denied」 の一語しか返らず (実測)、 `permissionDecisionReason` に載せる形は build によって hook 出力ごと無視された記録がある ([hook-authoring.md#build-dependent-docs-drift](hook-authoring.md#build-dependent-docs-drift)) = 無視されると止まらずに実行される。 exit 2 は JSON の解釈に依らず止まり、 stderr が model に返る。 射程は一時 dir (`/tmp` / `/private/tmp` / `$TMPDIR`) の直接実行に限り、 repo 内の送信 script は従来どおり ask にする
+- **送信 CLI の中身は Read tool で読む**: Bash の `sed` / `grep` で送信 CLI の source を読むと、 その command に承認 dialog が出て「常に許可」 が押され、 allow に送信 CLI の名前入りの行が残る (実測)。 行自体は読むだけの literal で送信は許可しないが、 送信経路が allow に残っていないかを見る監査が警告し続け、 警告が読み飛ばされる原因になる
+- **効いているかの確かめ方**: [`permission-dialog-audit.py --diagnose`](#desktop-permission-dialog-log) で hook 由来の dialog を送信ごとに並べ、 **外部発信の hook ask 件数 = 実送信件数** になっているかを見る。 `--only-hooks <送信の guard の名>,… --show-command` で流し直す hook を送信の guard に絞り、 dialog が出た呼び出しの command の全文を各行に出す = 送信の flag の有無で 1 件ずつ実送信かを読める (使い捨ての分類 script を書かない)
+
+反映は session 起動時ロード (§反映タイミング) なので、パターン変更後も**既存 session には旧パターンが残る**。domain 実例 (メール送信の --send 化) は [`gmail-sending.md`](gmail-sending.md#permission-gate-anchor)。
+
+## <a id="ask-only-owner-judgeable"></a>確認 (ask) を出すのは、 本人が dialog の文字だけで決められる操作だけ
+
+hook の `ask` と settings の `ask` rule は、 本人が dialog に出る文字だけで「通す / 通さない」 を決められる操作にだけ使う。
+決められる = 外への発信で宛先と件名が見えるもの、 保護した dir を名指して中に入るもの、 費用の高い段 (model・effort) を使わせるもの、 初めて開くサイト、 本人の端末に出す command (= dialog の中身そのものが判断の材料になる)。
+それ以外 = 読むだけの操作・内部の書き込み・検出器の誤り・dialog の command から結果を読めない操作 (上位 dir からの走査が保護 dir に届くか、 など) を確認にすると、 本人は中身を読まずに押す。
+押すことが儀式になると、 本当に見るべき確認も同じ手つきで押される ([#ask-pattern-action-anchor](#ask-pattern-action-anchor) の「信号の値が壊れる」 の一般形)。 押した許可が「この session では以後通す」 の記録を開く hook では、 読まずに押すたびに関門が黙って開く (実測)。
+
+- **決められない操作は、 hook が止めて (exit 2 + stderr) 直し方を Claude に返す** = 本人に回さない。 Claude が形を直して打ち直せば同じ結果が得られる操作 (起点を絞る・除外を足す・平文で聞き直す) なら、 確認より止める方が早く、 本人の手間も無い。 止め方は exit 2 にする (JSON の deny だけでは理由が届かないことがある = [#adhoc-send-script-outside-exemption](#adhoc-send-script-outside-exemption))
+- <a id="ack-outside-tool-input"></a>**止めた操作を通す印が tool の入力に載らないときは、 止めた文に印を書く command を出す** — MCP の tool の入力は server の schema で決まり、 CLI の `--ack-…` のような承知の flag を足せない。 hook は exit 2 の理由に「承知を書く command」 を出し、 Claude がそれを打ってから同じ tool を打ち直すと、 hook がその記録を読んで通す。 記録の鍵は止めた操作そのもの (送信なら account・宛先の集合・thread を正規化して hash)、 置き場は machine-local の state の追記 file、 効くのは短い間だけ (30 分ほど) で、 古い行は数えない。 判定は CLI の flag の経路と同じ関数を使い (経路ごとに述語を書かない = [#every-send-channel-same-anchor](#every-send-channel-same-anchor))、 判定に要る照会が動かないときは止める側に倒す。 この印は Claude の承知 (並んだ項目を読んだ) であって本人の確認ではない = 外への発信なら、 印の後も本人の確認は残す (実測)
+- **検出器の誤りは検出語の構造で絞る** — 単純 command ごとに語に分けて読み、 道具がその片の先頭の語で、 対象がその片の引数のときだけ当てる。 引用符の中の文字・文の中の語・名前の部分一致では当てない ([`../docs/convention-design-principles.md#detector-fires-on-its-own-signal`](../docs/convention-design-principles.md#detector-fires-on-its-own-signal))。 名前で送信と見る guard は、 名前だけで決めず file の中身 (送信の口) を読む
+- **本人が言う前に数える** — [`scripts/permission-dialog-audit.py --judgeable`](../scripts/permission-dialog-audit.py) が、 dialog を「決められる (アプリ自身の確認・宣言した hook・送信の hook の本送信の形・宣言した tool) / 決められない / 今はもう出ない」 に分けて数え、 決められない確認を本人が開いた窓と別の session が起こした窓に分ける。 `--surface --since-days 7` を個人層の一覧 (dashboard) の段にすれば、 決められない確認が 1 件でも出た週に、 どの hook のどの形かが 1 行で出る。 dialog の log は確認を出したのがどの hook かを残さないので、 道具は今の hook に当時の入力を流して分ける = hook を直した直後は、 直す前の hook が出した確認が「hook 無反応 (設定側)」 に落ちて決められない側に数えられる。 道具はそれを避けるため、 hook の file の git の履歴から確認が出た時刻の版を写して流し、 当時の版が確認を出したものを「今はもう出ない」 に数える
+- **確認を出す hook・rule を足す・直すときの試験の必須 case** ([#every-send-channel-same-anchor](#every-send-channel-same-anchor) の送信の経路の case を、 確認を出す hook 全般に広げたもの): 本人が決められる形 = 確認 / 誤検出の形 (引用符の中・文の中・名前の部分一致・読むだけ) = 無音か止める / 守る側の境目 (除外に見えて中身を除かない書き方・前置きの語・変数や `$()` で渡した対象・別の interpreter の起動) = 確認か止める。 誤検出の形だけを fixture にすると、 狭めた述語が守る側の形を素通りさせても試験は通る
+- ⚠️ **確認を止める側に狭めた変更は、 前の版と並べて流す** — 前の版が確認を出していた形を新しい版にも流し、 無音になった形を 1 件ずつ読む (それが誤検出なら意図どおり、 守るべき形なら素通り)。 実測 = 文の中の語の誤検出を消す書き直しが、 除外の語の近くに書いた名指し・`find -L` などの前置きの option・`nice` などの前置きの command・変数や xargs で渡した起点を、 確認も停止も無しに通していた。 照合は書いた者でない目で、 前の版・今の版・候補の 3 つを同じ入力で並べる。 会話記録の最近の command を全部流して、 新しく止める・確認する形が増えていないかも数える
+- **確認を残す操作は、 呼ぶ直前の返事に 1 行で中身を書く** — 本当の送信は宛先と件名、 worker の段を上げる道具はどの worker を何に上げるか (と理由)。 本人は dialog の文字と返事の行を照らして決められる
+- ⚠️ 確認を減らす変更は、 本人の項目ごとの裁定を記録して当てる ([`agent-rule-ownership.md`](agent-rule-ownership.md))。 外部発信・不可逆の操作の確認 (本人が決められる側) は、 この節を理由に外さない
+
+## <a id="always-approve-tools"></a>permission 設定で抑止できない tool (= always-prompt class、 2026-06-28)
+
+一部の tool は **tool 側が「毎回明示承認を要求する」と宣言**しており、 settings.json の permission layer (`allow` / `defaultMode`) では**抑止できない**。 承認 dialog にこの一文が出る:
+
+> This tool requires explicit approval **regardless of permission mode.**
+
+**観測 (2026-06-28)**: `mcp__ccd_session_mgmt__search_session_transcripts` が、 `permissions.allow` に **明示登録済** (= `mcp__ccd_session_mgmt` も `mcp__ccd_session_mgmt__search_session_transcripts` も列挙済) かつ `defaultMode: default` の状態でも承認チップを出した。 ∴ この class は **deny > ask > allow の precedence の外**にある tool-level の always-ask で、 **`allow` に入れても素通りにならない**。
+
+- **settings.json では消せない**。 `bypassPermissions` でも出る想定 (= dialog の "regardless of permission mode" 文言どおり。 ただし bypass 下の実測は未取得ゆえ「想定」)。 precedence 最強の `deny` だけは**ブロック (= 実行自体を不可)** にはできるが silent-allow にはできない (= deny 挙動も未実測)。
+- **回避は「呼ばないこと」**: チップを踏みたくなければ、 その tool を経路から外す (= 抑止設定でなく経路設計で避ける)。
+- **該当が確認できている tool**: `ccd_session_mgmt__search_session_transcripts` (= 直接観測のみ)。 同 server の cross-session 系 (`send_message` / `archive_session` 等) も同機構で同挙動と**推定**されるが直接観測は search のみ。 ⚠️ 同じ server の session の段を変える道具 (`set_session_model` / `set_session_effort` / `set_session_permission_mode`) は always-prompt ではなく**条件つき** (下の [#set-session-level-gate](#set-session-level-gate)、 実測 = 確認が出たのはどれも worker を起こした側より上の段に上げる呼び出し)。 `list_sessions` も allow 済だが挙動は未観測 (= 過度に一般化しない、 inline §3「単一観測を universal に飛躍させない」)。
+
+- <a id="set-session-level-gate"></a>**session の model・effort・permission mode を変える道具 (`set_session_model` / `set_session_effort` / `set_session_permission_mode`) は条件つきで聞く** (道具の説明 + 実測): 自分が起こした session を自分の段以下にするなら聞かず、 自分より上の段に上げる・自分が起こしていない session を変えるとアプリが聞く。 `mcp__ccd_session_mgmt` を allow に入れていても出る。 xhigh の指揮役が worker を max に、 Opus の指揮役が worker を上の model に上げるたびに出る (= 設定では消えない。 消すなら上げたい段の session から起こす)。 ⚠️ dialog の log を hook に流し直すと、 その道具に掛かる今の hook の block が「fixed」 に見える = [`permission-dialog-audit.py`](../scripts/permission-dialog-audit.py) はこの道具を hook の前に `app` (アプリ自身の確認) に分ける
+
+**token-handshake 返送への含意** ([`multi-session-coordination.md §7`](multi-session-coordination.md#spawn-handoff-token-return)): 返送の **optional live-push** (`search_session_transcripts(<token>)` → `send_message`) はこの always-prompt class を必ず通るので、 **起票元へ返すたびにチップが出る** (= allow-list で消せない)。 チップを踏まずに結果を届けたいなら、 §7 の **required spine = "results inbox" marker** (= 子の完了 action で marker を 1 個落とし、 surfacing 機構が拾う) に寄せる。 marker 経路は cross-session tool を呼ばないのでチップが出ない。
+
+## <a id="desktop-permission-dialog-log"></a>desktop の承認 dialog は app log に残る — 体感でなく数える (2026-09-11)
+
+「いちいち聞かれる」 の対処は、 **どの tool の dialog が何件か**を数えてから決める (= allow に足すのか、 仕様で消せない class か、 gate として残すべきか)。 desktop app は dialog ごとに `~/Library/Logs/Claude/main*.log` へ次の 2 行を書く (同じ行が 2 回ずつ出ることがあるので request id で数える):
+
+```text
+<YYYY-MM-DD HH:MM:SS> [info] Emitted tool permission request <id> for <tool> in session <local_id>
+<YYYY-MM-DD HH:MM:SS> [info] Received permission response for <id>: once|always|deny (tool: <tool>)
+```
+
+- 時刻は local time。 Emitted → Received の差がそのまま user の応答待ち時間 (= 席を外していた間、 作業が止まっていた時間)。
+- **道具**: [`scripts/permission-dialog-audit.py`](../scripts/permission-dialog-audit.py) — tool 別件数・decision 内訳・待ち時間。 `--attribute` で transcript の tool_use と時刻突合して **main session / sub-agent / 不明**に振り分け、 Edit/Read/Write は path の上位 2 階層、 Bash は先頭語で束ねる (= どの folder の ask gate が鳴っているかが見える)。 log の無い環境 (CLI) は `--from-transcripts` で「通常すぐ返る tool が長く止まった」 箇所を候補として出す。
+- **mode を疑う前に hook を疑う**: PreToolUse hook が `permissionDecision: "ask"` を返すと、 `acceptEdits` / `auto` でも dialog が出る (= mode では消えない)。 dialog の出た tool call の入力をその hook に流し直せば、 どの hook のどの判定かが確定する。 **この切り分けは毎回同じ手順なので `--diagnose` が自動でやる**: `permission-dialog-audit.py --diagnose --latest 10` が transcript から当時の tool 入力を復元し、 matcher の当たる PreToolUse hook に流し直して、 **hook** (今も ask) / **fixed** (今は exit 2 で block = dialog は出ない) / **length** ([#long-command-falls-back-to-ask](#long-command-falls-back-to-ask)) / **rule** (hook 無反応 = allow・cwd scope・protected path 側) / **rule_unique** ([#always-allow-never-matches-again](#always-allow-never-matches-again) = 「常に許可」 が永久に効かない) / **unmatched** / **app** (アプリ自身の確認 = [#set-session-level-gate](#set-session-level-gate)・内蔵ブラウザのサイトなど。 hook を流し直す前に分ける) に分類し、 消し方を 1 行で出す。 `--judgeable` は同じ結果を、 本人が dialog の文字だけで決められるかで数える ([#ask-only-owner-judgeable](#ask-only-owner-judgeable))。 ⚠️ `--only-hooks` で流し直す hook を絞ると、 絞りの外の hook の確認は rule に入る (件数を比べるときは絞らない)。 ⚠️ hook を実際に実行するので、 副作用のある PreToolUse hook を書いているなら `--no-run-hooks`。 ⚠️ 出るのは「**今の**設定に当時の入力を流した結果」 = 過去の原因の再生ではない (hook を直した後は「もう出ない」 と読む)。 実例 (2026-09-12): 公開 repo への Write の dialog 5 件のうち 4 件は、 leak guard が test fixture の `@example.invalid` 等を email として拾った誤発火だった (commit 時の gate は RFC 2606 の例示 domain を通すのに、 編集時の hook だけ通さなかった) → 両 gate の allowlist を揃え、 一致を test で固定。
+- **実例 (2026-09-11)**: 6 週間分 約 280 件を数えたところ、 sub-agent の tool call 由来と Agent 起動そのものは **0 件**。 「背景作業を立ち上げるたびに聞かれる」 の正体は allow に入っていなかった `Monitor` (5 件、 うち 1 件は 40 分待ち) で、 残りの大半は意図して置いた ask gate (特定 folder への Edit/Read・メール送信) と browser 系の初回許可だった。
+
+## <a id="monitor-needs-own-allow"></a>Monitor は独立した tool — Bash の allow も ask も掛からない
+
+`Monitor` (背景で command を走らせて出力を監視する tool) はシェルを実行するが、 **permission rule は tool 名単位で照合される**ので:
+
+- bare `Bash` を allow していても Monitor は allow されない → 起動のたびに dialog が出る (背景作業のつもりで席を外すと、 そこで止まったまま待つ)。 使うなら `permissions.allow` に `"Monitor"` を足す。
+- 逆に Monitor を allow すると、 `Bash(*send_mail.py*--send*)` のような **Bash の内容 rule による ask gate は、 Monitor 経由の実行には掛からない** ([#ask-pattern-action-anchor](#ask-pattern-action-anchor) の gate が素通り)。 高 stakes の action を Bash の ask で守っているなら、 それを Monitor で実行しない規律にするか、 tool 側の gate (MCP tool への ask 等) に寄せる。 MCP tool への ask は tool 呼び出しそのものなので、 Monitor の allow とは無関係に残る。
+
+## <a id="agent-launch-no-prompt"></a>Agent (sub-agent) の起動は allow 済みなら dialog を出さない
+
+`Agent` / `Task` の起動そのものは、 allow に入っていれば承認を求めない (2026-09-11、 6 週間分の app log で起動由来の dialog 0 件)。 sub-agent の中の tool call も main と同じ permission 設定で判定され、 同期間に sub-agent 由来の dialog は 0 件だった。 「背景作業を始めると聞かれる」 ときに疑うのは:
+
+1. **Monitor** (上節) — allow に無ければ毎回 dialog
+2. **spawn_task の chip** — 別 session の起動は user のクリックが仕様 (自動で起動する設定は無い)
+3. **Workflow** — 起動時に確認が出る
+4. その背景作業が触る **ask gate** (特定 folder・送信系) — 起動でなく中身の tool call が鳴っている
+
+## <a id="protected-settings-edit"></a>Claude が `.claude/settings*.json` を編集すると毎回 dialog が出る (保護 file)
+
+Claude Code は `.claude/` (= `~/.claude/settings.json` / `<root>/.claude/settings.json` / `settings.local.json` を含む。 例外は `.claude/worktrees`) と `.git` / `.vscode` / `.idea` 等を **protected path** として扱う。 そこへの Edit / Write は **allow rule で事前承認できない** (公式 docs: この安全検査は settings の allow より先に走る = `Edit(.claude/**)` を allow に書いても結果は変わらない)。 mode ごとの挙動 (公式 docs `permission-modes#protected-paths`、 2026-09-11 確認):
+
+| mode | protected path への書込 |
+|---|---|
+| `default` / `acceptEdits` | 毎回 dialog |
+| `auto` | classifier が判定 (dialog は出ない) |
+| `dontAsk` | 拒否 |
+| `bypassPermissions` | 素通り |
+
+- CLI の dialog には「この session 中は settings の編集を許可」 の選択肢があるが、 **desktop の dialog は「拒否 / 一度だけ許可」 だけ**で、 Edit 1 回ごとに出る (2026-09-11、 desktop で観測)。
+- ∴ `default` mode のまま、 この dialog だけを消す設定は無い。 消すには mode を変えるしかない: `auto` は ask rule (送信 gate 等) を残したまま settings 編集を classifier 判定に回せるが、 他の操作も classifier 判定になる (= [`tool-call-robustness.md#classifier-session-block`](tool-call-robustness.md#classifier-session-block) のリスクを負う)。 `bypassPermissions` は ask gate ごと消えるので不可 ([§desktop で特定 tool に確認を課す](#desktop-per-tool-gate))。
+- `auto` mode では、 Claude による settings 編集は dialog でなく classifier 判定になる。 **自分の権限を広げる編集は block された** (`defaultMode` の変更 + `additionalDirectories` の追加 = 2026-09-11 / `permissions.allow` への path rule 追加 = 2026-09-12、 n=2)。 一方 **allow 行の削除 (= 権限の縮小) は同 session で通った** (2026-09-12 observed) ので、 block の境界は「settings file か否か」 ではなく **拡大か縮小か** (⚠️ ask rule を絞る編集は「確認が減る」 ので拡大側に入り block された、 実測。 他マシンへの伝播も含めた正規の経路 = [`multi-machine-state.md#gate-rules-reassert-every-session`](multi-machine-state.md#gate-rules-reassert-every-session))。 ∴ auto で運用するなら、 権限を広げる設定変更は user が手で行う (Claude が Bash で書き換えるのは block の迂回になるのでやらない。 変更内容を提示して user の terminal で実行してもらうのは「人間が 1 回見る」 を満たすので可)。
+- 「毎回聞かれる」 と言われたら、 対処を選ぶ前に `scripts/permission-dialog-audit.py --attribute` で dialog の内訳を測る。 体感の「毎回」 には、 意図して置いた ask gate や、 cwd / additionalDirectories 外の path への dialog が混ざっていることが多い (2026-09-11 実測: 40 日間の Edit / Write dialog 91 件のうち、 settings file 宛ては 4 件)。
+- desktop のモード選択は**フォルダごとに記憶**され、 そのフォルダでは `defaultMode` より優先される (公式 docs `permission-modes`、 Plan は例外)。 `defaultMode` を変えたのに効かないフォルダがあれば、 そこのモード選択を疑う。
+- 設定変更を頼まれたら、 **変更する file の数だけ dialog が出る**ことを先に伝え、 1 file の変更は 1 回の Edit にまとめる。
+- **session 中に Bash (sed / python / jq) で書き換えて dialog を迂回しない**。 保護は「設定変更を人間が 1 回見る」 ための仕組みで、 迂回するとその意味が消える (= 自分の権限を自分で広げる経路になる)。 git に載って人間が review した bootstrap script が、 owner が明示した値を他マシンへ伝播するのは別扱い (= [`multi-machine-state.md#one-shot-settings-propagation`](multi-machine-state.md#one-shot-settings-propagation))。
+
+## <a id="always-allow-persists-literal"></a>「常に許可」 は command をそのまま settings.local.json に保存する — secret を command に書かない (2026-09-11)
+
+Bash の承認 dialog で「Yes, and don't ask again」 (desktop では「常に許可」) を選ぶと、 その command の文字列が allow rule として repo root の `.claude/settings.local.json` に保存される (公式 docs `permissions`)。 token や password を command に直接書いた Bash を常に許可すると、 **secret が平文の allow rule として残る** (実例: 外部 service の API token を含む curl / export の行が 11 行、 数ヶ月残っていた。 file からは消せても、 その command を実行した session の transcript には残る)。
+
+- secret は command に書かず、 file か環境変数から読ませる (例 `curl -H "Authorization: Bearer $(cat ~/.secrets/x)"` = 保存される文字列に値が現れない)。 受け渡しの一般則 = [`secret-handoff.md`](secret-handoff.md)。
+- 見つけたら allow の該当行を消す (protected path なので dialog 1 回)。 値は漏れた前提で扱い、 必要なら rotate する ([`secret-handoff.md#rotation-labor-split`](secret-handoff.md#rotation-labor-split))。
+- 棚卸しは `settings.local.json` の長い allow 行を見るのが早い (secret は長い英数字列として出る)。
+- <a id="always-allow-broad-rule"></a>**何でも通す広い allow も同じ経路で溜まる** (実測): 「常に許可」 は押した時の command の形で保存されるので、 wildcard を含む command を許可すると `Bash(rm -rf *)` のような allow がプロジェクト単位の `settings.local.json` に残る。 ユーザー単位の `~/.claude/settings.json` を点検しても見えない。 見つけたら手で消すだけで終えず、 「この形は置かない」 を git の宣言に書いて、 session 開始の auto-apply 層が全マシンのプロジェクト単位の file から取り除くようにする ([`multi-machine-state.md#gate-rules-reassert-every-session`](multi-machine-state.md#gate-rules-reassert-every-session)。 実装例 = 個人層 `odakin-prefs` の `permission-rules.project-local.json` + session 開始の bootstrap の段)。 点検は定期に回す (dialog の数が減ったときほど広い allow が混じっている)。
+
+### <a id="always-allow-never-matches-again"></a>「常に許可」 が**構造的に**効かない class = 呼び出しごとに一意な path を含む command (2026-09-12)
+
+保存が literal であることの帰結として、 **command に per-call 一意な token (乱数 file 名 / session UUID / 日付) が入っていると、 保存された rule は二度と一致しない**。 user から見ると「常に許可を押したのにまた聞かれる」 = 直したはずなのに直らない症状になり、 押すたびに死んだ allow 行が 1 行ずつ増える。
+
+代表例は 2 つ (いずれも **session UUID が path に埋まる**のが本質):
+
+1. **tool 出力の spill file** = 長すぎる tool 出力が `~/.claude/projects/<project>/<session-uuid>/tool-results/<乱数>.txt` に退避され、 それを `sed` / `grep` で読み返す形。 session UUID も file 名も毎回変わるので、 共通部分は `sed -n` 程度しか残らない (実測 2026-09-05 と 09-12 の 2 件: sed 式・project dir・session UUID・file 名の 4 つすべてが相違)。
+2. **scratchpad** = `/private/tmp/claude-501/<project>/<session-uuid>/scratchpad/…`。 session ごとに path が変わるので、 ここへの Edit / Bash が dialog になる環境 (worktree session で本体 repo が cwd 外、 等) では毎 session 聞かれ続ける。
+
+⚠️ **「毎回変わる部分」 は目視で見落としやすい** (UUID は path の途中に埋まっていて、 一見ふつうの絶対 path に見える)。 `scripts/permission-dialog-audit.py --diagnose` が `rule_unique` として自動で切り分ける。
+
+⚠️ **件数を読むときは `--no-run-hooks` を使わない**。 実測 2026-08-20〜09-12 の dialog 219 件で、 hook を流すと `rule_unique` は **3 件** (spill file 2 + worktree の scratchpad 1) だが、 `--no-run-hooks` だと **21 件**に膨らむ。 差の 18 件は mail-send-guard 等の**意図した hook gate** が `rule` 側に落ちて拾われたもの (= script 自身が冒頭で断っている通り)。 この class は「頻度は低いが、 押しても永久に減らないので体感が悪い」 種類であって、 dialog 総数の主因ではない。
+
+- **Bash には path rule が無い** ([#file-rule-tools](#file-rule-tools)) ので、 Bash 側で塞ぐには `Bash(sed -n:*)` のような粗い prefix しか書けない。 ∴ **spill file は Bash でなく Read tool で読み、 path rule を glob で 1 本置く**のが正解 (`Read(~/.claude/projects/**)` + [#symlink-both-paths](#symlink-both-paths) に倣い絶対 path 形も)。
+- ⚠️ `~/.claude` は `additionalDirectories` に入れていない限り scope 外で、 **bare `Read` allow では素通りしない** (= 本 doc 冒頭の observed)。 明示 path rule が要る。
+- 一般化: 「常に許可を押しているのに減らない」 と言われたら、 **その command に毎回変わる部分があるか**をまず見る。 あるなら押す回数を増やしても永久に減らない。
+
+## <a id="long-command-falls-back-to-ask"></a>長すぎる Bash command は自動承認から外れて dialog になる (2026-09-12)
+
+`auto` mode の Bash 自動承認は classifier 判定だが、 **command が長くなると判定から外れて user への確認 dialog にフォールバックする**。 しかも長大 command は pattern 化できないため dialog に「常に許可」 が出ず ([#always-allow-persists-literal](#always-allow-persists-literal) の保存が効かない)、 同じ形を打つたびに毎回止まる。 user 側の体感は「同じ作業で毎回・何度も聞かれる」。
+
+**実測** (desktop app の dialog log × transcript 突合、 同一 session・同一 cwd・同一 settings):
+
+| command 長 (文字) | 結果 |
+|---|---|
+| 1,917 / 2,104 / 2,111 (heredoc 含む) | 通過 |
+| 4,272 / 8,916 (heredoc 含む) | **dialog** |
+
+同 session の Bash 56 回のうち dialog が出たのはこの長大 2 回だけで、 hook 由来ではない (= 当該 command を全 PreToolUse(Bash) hook に流し直して無反応を確認済み)。 ∴ 閾値は 2,100〜4,200 文字のどこか。 **真の境界は測っていない** — 下の backstop の既定 3,000 は安全側に寄せた値なので、 2,100〜3,000 の command は「通るはずなのに書き直させている」 可能性がある (= 過剰な制止。 うるさければ `CLAUDE_LONG_BASH_LIMIT` で上げる)。
+
+**切り分け**: 長さ以外の要因 (hook・cwd・mode) と混ざりやすい。 同 session の Bash 呼び出しを transcript から長さつきで一覧し、 dialog の時刻 ([#desktop-permission-dialog-log](#desktop-permission-dialog-log)) と突合すると、 「長いものだけが鳴っている」 かが 1 目で分かる。 hook 由来との区別は当該 tool_input を hook に流し直すのが確実 (= [#desktop-permission-dialog-log](#desktop-permission-dialog-log) の「mode を疑う前に hook を疑う」)。
+
+**対処 (書く側)**: これは危険だから止まっているのではなく、 **同じ結果をより短く書けば dialog 自体が発生しない**。
+
+1. 単位で分割する (= N 件の追記を数回に割る)
+2. 本文を scratchpad の file に書いてから、 短い command で流す (`cat <scratchpad>/chunk >> <target>`)
+3. file 編集が目的なら Edit / Write tool を使う (= path 単位の判定になり command 長は関係しない)
+
+**機械 backstop**: [`hooks/long-bash-command-guard.sh`](../hooks/long-bash-command-guard.sh) — PreToolUse(Bash) で閾値 (既定 3,000 文字、 `CLAUDE_LONG_BASH_LIMIT` で上書き / `0` で無効) を超えた command を **exit 2 で block** し、 上の 3 つを stderr で案内する。 block は Claude にしか見えないので、 user には dialog も待ちも発生しない (= 「聞かれる」 が「Claude が短く書き直す」 に置き換わる)。 長さは byte でなく codepoint で測る (= 日本語の command で閾値が 1/3 になるのを避ける)。
+
+⚠️ **guard の自己参照**: この種の guard を書く / 直すときは、 guard 自身の source・test・規約 doc が検出対象の pattern を literal で持つため、 **guard を直そうとするたびに guard に止められる**。 実例 (2026-09-12): URL guard の test fixture に意図的な違反 URL を 1 行足す Edit が、 その URL guard 自身に ask された。 → guard 側に自己参照の除外を持たせる。 ⚠️ 除外は **その guard を説明・検証している file だけ**に絞る (= 自分の source・自分の test・自分の規約 doc)。 `*/hooks/*.sh` のように dir 単位へ広げると、 将来 同じ pattern を出力する別 hook の検査が **silent に効かなくなる** (= 除外は穴で、 穴は検出されない)。 「別 hook の source は検査対象のまま」 を test に固定しておく。 test fixture の誤発火一般は [`hook-authoring.md`](hook-authoring.md)。
+
+## <a id="cd-with-git-goes-to-classifier"></a>`cd <別の dir> && git commit / push` は allow rule に当たらず classifier に回る (2026-10-07)
+
+compound command は部分ごとに allow rule と照合される (`&&` `;` `|` などで割り、 各部分が rule に当たれば通る)。 この照合には穴がある: **`cd` で別の dir に移り、 同じ command の中で `git` を実行する形は、 各部分が rule に当たっても確認に回る** — 移った先の repo の git hook が動きうるため (公式 docs [`permissions`](https://code.claude.com/docs/en/permissions) の Read-only commands の節。 行き先が今の作業ディレクトリと同じ `cd` は何もしない cd なので確認に回らない)。 `auto` mode ではその確認を classifier が担うので、 `Bash(git commit:*)` / `Bash(git push *)` を allow に入れていても `cd <repo> && git add … && git commit … && git push` は毎回 classifier の判定になり、 文脈しだいで止められる。 `git -C <dir> commit` も先頭が `git commit` でないので rule に当たらない。
+
+- **実測**: 記録を残すだけの commit と push が、 commit message の文脈から「実世界の取引」 と判定されて止まった。 同じ commit を `cd` を単独で打ってから打ち直すと、 判定に回らずに通った
+- **書き方**: Bash tool の作業ディレクトリは次の呼び出しに引き継がれる。 `cd <repo>` を単独の 1 回で打ち、 次の呼び出しで `git add <新規> && git commit … -- <paths>` と `git push` を `cd` も `-C` も付けずに打つ (git 同士を `&&` でつないだ形は、 各部分が rule に当たるのでそのまま通る)
+- ⚠️ **単独の `cd` と、 それに続く呼び出しを同じ並列の組で出さない**: 1 回の返事で複数の tool を並列に出すと実行の順は保証されず、 続きの呼び出しが前の dir で走る (実測: 別の repo の file を読むはずの呼び出しが元の repo で走り、 「file が無い」 になった)。 `cd` を出した返事では、 その dir に依る呼び出しを次の返事に回す
+- **機械**: [`hooks/cd-git-write-guard.py`](../hooks/cd-git-write-guard.py) — PreToolUse(Bash) で、 別の dir への `cd` の後の `git commit` / `git push` と `git -C … commit / push` を deny して、 上の書き方を案内する。 行き先が session の folder の外 (home の外 = scratchpad・/tmp) なら単独の `cd` を案内せず、 `GIT_DIR` / `GIT_WORK_TREE` の形を案内する (folder の外への単独の cd は戻される)。 heredoc の本文と quote の中は見ない = commit message に書いた文字では止まらない。 止めるのは書き込みの git だけで、 `git log` などの読み取りは止めない。 [`hooks/workspace-root-git-guard.py`](../hooks/workspace-root-git-guard.py) (判定 = `scripts/workspace-root-git-guard.py`) は、 repo を並べた作業ルート (自身は repo でない dir) で path を書かない `git init` と書き込みの git を止める = 戻された cd のまま作業ルートに repo を作る形の網
+- ⚠️ 判定に回ったものは承認しだいで通ることもあるので、 「通った = rule に当たった」 とは読まない。 止められたら形を疑う ([#hook-masks-deny](#hook-masks-deny) の順に読む)
+- <a id="subagent-commit-route"></a>⚠️ **subagent (Agent tool の子) では上の書き方が成り立たない** (実測、 同じ所で複数の agent が止まった) — 子の Bash は呼び出しごとに作業ディレクトリが戻るので、 単独の `cd` が次の呼び出しに引き継がれず、 `-C` は guard に止められる。 子は [`scripts/commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) で commit・push する ([multi-session-coordination.md#foreign-wip-scratch-worktree](multi-session-coordination.md#foreign-wip-scratch-worktree))。 worktree に入った session (background の隔離・`EnterWorktree`) も同じで、 Bash の作業ディレクトリが毎回 worktree に戻るので、 **別の repo** への commit・push は同じ道具で行う (道具の中の `git commit` で pre-commit hook は走る)。 push の後、 live の checkout に同じ中身の未 commit の編集が残る。 live が自分の commit の 1 つ手前で他に動きが無ければ `git -C <repo> add -- <path>` → `git -C <repo> merge --ff-only origin/<branch>` で揃える。 live に別の session の未 push の commit や編集があるときは merge せず、 自分の file だけを `git -C <repo> checkout -- <path>` で live の HEAD に戻す (変更は origin に在り、 相手の次の pull で入る。 残すと相手の pull が「would be overwritten」 で止まる) (実測)。 commit message を file で渡すなら、 **commit ごとに新しい file 名にする** — hook に止められた複合 command は中の heredoc も走らないので、 共有の scratch に残った同じ名前の前の file がそのまま使われ、 中身と違う message の commit が push された (実測。 push 後は書き換えず、 次の commit の本文で訂正する)
+- ⚠️ **単独の `cd` の行き先は session の folder (作業ルートと追加した dir) の中に置く** — 外の dir (scratchpad・`/tmp` など) へ単独で `cd` すると、 作業ディレクトリが元に戻される (実測 = desktop の Code タブで「Shell cwd was reset」)。 そこでは上の書き方が使えず、 `-C` も使えない。 一時の git worktree で commit するなら作業ルートの下に作る (外に作ったら `git worktree move` で中へ移す)。 作業ルートの下の一時 dir は repo を巡回する処理に拾われうるので、 使い終えたら `git worktree remove` で消す。 戻されたのに気づかずに続けると、 次の git は元の dir で走る (実測: 外の写しの dir で打つはずの `git init && git add -A && git commit` が、 repo でない作業ルートで走ってそこに repo ができた) = 外の dir の git は cd に頼らず行き先を書く — commit と push は `GIT_DIR=<dir>/.git GIT_WORK_TREE=<dir> git commit …` (`git -C … commit / push` は下の guard が止める)、 それ以外 (add・init・log) は `git -C <dir> …` / `git init <dir>`。 書き込みの git を cd の後に打つときは同じ 1 行で `[ "$(pwd -P)" = "<dir>" ] &&` を前に置く。 作業ルートにできた空の repo は、 root に `.git` があれば root だけを走査する fleet の道具から子の repo を全部隠し、 検査が 0 件で黙って通る (実測 = 節参照・壊れた text・学生の識別子の棚卸しが揃って root だけを見ていた) = 道具の側の root の判定は [`scripts/lib/repo_roots.py`](../scripts/lib/repo_roots.py) の `root_is_repo` にする (空の repo なら子の repo を数える)
+- <a id="git-path-variable-blinds-guard"></a>⚠️ **git の書き込みの command で、 repo の path を shell の変数で書かない** (`S=…; git -C $S/repo commit …`) — PreToolUse の guard は command の文字列から repo を決めるので変数を展開できず、 原稿の guard は検査不能 (`inspection unavailable (git-unreadable)`) で止める (実測、 違反ではない)。 guard が案内する直し方 (lock file・壊れた index・権限) はこの場合に当たらない。 path を展開した形で書く (同じ一時 repo の同じ commit が、 path を書き下すと通った)。 複数の repo を回す loop の中の `(cd $r && git commit …)` も同じ理由で止まる (実測 = 同じ commit を literal の path で渡すと通った)。 repo ごとに上の書き方 (単独の `cd` → 次の呼び出しで `git commit`) にする。
+
+## <a id="worktree-session-refuses-complex-command"></a>worktree に入った session は、 行き先を読めない Bash command を拒否する
+
+worktree に入った session では、 Claude Code 本体が Bash の command を実行の前に読み、 git の操作がその worktree の中に留まると読み切れない形を拒否する (dialog は出ない。 hook の文ではない)。 拒否の文 = `a worktree-isolated session's git operations must target its own worktree`。
+
+止まった形 (実測):
+
+- 値が実行時に決まる引数: `S=<dir>; python3 $S/x.py` (`runs python with a value computed at runtime`)。 git を含まない command でも止まる
+- 読み切れない合成: heredoc の interpreter に別の command をつないだ形 (`too complex to verify that it stays inside the worktree`)
+- git の連結: `git fetch …; git log …; git merge-tree … | head` の形、 別の repo への `git -C … fetch` を含む連結 (`names git in a form too complex to verify`)。 読むだけの `git -C <別の repo> status` と `log` の連結は通った
+
+書き方:
+
+- path は変数に入れず書き下す。 処理は file に書いて `python3 <絶対 path>` で回す (file の中の処理は読まれない)
+- git は 1 回の呼び出しに 1 つずつ打ち、 並列の組で出す
+- 別の repo に commit するときは worktree を出てから打つ (`ExitWorktree` の `keep`、 worktree は残る)
+- 複数の repo を束ねた親フォルダで起動した session が worktree で作業するときは、 `git -C <repo> worktree add -b <branch> <path> origin/main` の後に `EnterWorktree` の `path` で入る (実測)
+
+## 個人ごとの適用
+
+「どのフォルダを additionalDirectories に登録するか」は各ユーザー / 各マシンの選好なので、本 public 規約には書かず、各自の personal config (machine-local の `~/.claude/settings.json`) に置く。`~/.claude/settings.json` は git 同期されないため、複数マシンで揃えたい場合は各マシンで設定するか、各自の setup 機構に組み込む。
+
+## 関連
+
+- **Excel / Word / PDF ファイルの実作業** (openpyxl での様式 fill / docx 編集 / PDF 化 / 様式改変防止 / 検証スクリプト) は [`office-automation.md`](office-automation.md) が正本。 cwd 外の office file を弄るときは本ドキュメント (permission) と office-automation.md (手順) の両方を参照する。

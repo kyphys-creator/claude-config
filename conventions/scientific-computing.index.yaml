@@ -1,0 +1,168 @@
+# Stable slug index -- AUTO-GENERATED from the doc by scripts/generate-doc-index.py.
+# id/level/title are DERIVED from the markdown (edit the md + re-run, do NOT hand-edit
+# them here). legacy (a section's original §-number = a permanent forwarding address),
+# related, and any other hand field are PRESERVED. See convention-design-principles §14.7 (= #inbound-ref-robustness).
+# Validated by scripts/check-office-automation-index.py (dangling=0 / orphan=0).
+sections:
+  - id: scale-dependent-default
+    legacy: "1"
+    level: 2
+    title: "1. Scale-dependent default は unit system 変更で silently 壊れる"
+  - id: explicit-integrator-instability
+    legacy: "2"
+    level: 2
+    title: "2. Explicit integrator は dτ 安定境界を超えると silently 発散、 implicit Euler / 解析解で根治"
+  - id: nintegrate-workingprecision
+    legacy: "3"
+    level: 2
+    title: "3. NIntegrate WorkingPrecision propagation: 入力配列の precision を inherit させないと `NIntegrate::precw` 大量発火"
+  - id: porting-metric-divergence
+    legacy: "4"
+    level: 2
+    title: "4. 言語移植 verification: 副次 metric vs main metric の divergence は edge-of-stability boundary として documented で済む"
+  - id: archive-cutover-precondition
+    legacy: "5"
+    level: 2
+    title: "5. archive / cutover の precondition: smoke (= exit 0) ではなく sample assertion (= 1 件以上 byte exact verify)"
+  - id: sympy-verify-transcript
+    legacy: "6"
+    level: 2
+    title: "6. Visual source (= 写真 / scan / PDF) からの数式 transcript の hallucination は sympy symbolic verify で expose する"
+  - id: verify-independent-derivation
+    legacy: "7"
+    level: 2
+    title: "7. 検証は source からの独立導出 — 一致合わせは検証でない; 公表式の係数も数値 verify"
+  - id: first-principles-crosscheck
+    legacy: "8"
+    level: 2
+    title: "8. 数値結果は第一原理 (次元解析・対称性・Ward 恒等式・既知極限) で cross-check; 自前の数値がバグり得る"
+  - id: calibrate-magnitude-sign
+    legacy: "9"
+    level: 2
+    title: "9. Ratio/構造 check は overall scale を fix しない; 既知量で calibrate し、 magnitude と sign を分ける"
+  - id: basis-invariant-check-blind-spot
+    level: 3
+    title: "基底不変な検査は固定ラベルの規約を検証しない"
+  - id: figure-vector-extraction
+    legacy: "5"
+    level: 2
+    title: "5. 論文 PDF 図のベクトル path から曲線データを復元して数値照合する (2026-08-21)"
+  - id: svg-contour-self-calibration
+    level: 3
+    title: "変種 (2026-09): `pdftocairo -svg` 経由 + 同図内の公開等高線で自己較正"
+  - id: evolve-constraints-algebraically
+    legacy: "10"
+    level: 2
+    title: "10. 拘束量は独立変数として積分しない — drift → 符号反転 → 反減衰爆発 (2026-09)"
+  - id: namespace-override-verification
+    legacy: "11"
+    level: 2
+    title: "11. 別 script の関数を差し替える wrapper は、 差し替えが効いたことを sentinel で検証する (2026-09)"
+  - id: declared-self-consistency-audit
+    level: 2
+    title: "「self consistent に解いた」 と書く前に、 loop の全変数が code で戻っているか列挙する (2026-09)"
+  - id: floquet-exact-background
+    level: 2
+    title: "Floquet 指数は厳密な周期解の上で取る — 調和近似の背景は偽の不安定性を作る (2026-09)"
+  - id: first-step-skips-initial-heuristic
+    level: 2
+    title: "SciPy `solve_ivp` の初期 step 推定 overflow は `first_step` で消す (2026-09)"
+  - id: contour-distance-axis
+    level: 2
+    title: "等高線への「距離」 は物理的に意味のある軸に沿って測る (2026-09)"
+  - id: spectator-check-over-the-roll
+    level: 2
+    title: "dilaton 型結合の spectator 判定は pivot でなく roll 全体で — 正準場は Weyl 因子で伸びる (2026-09)"
+  - id: rate-diverges-as-amplitude-vanishes
+    level: 2
+    title: "振幅が 0 に近づくほど崩壊率が上がる流体は有限時間で尽きる — event の根でなく $\\Gamma/H\\gg1$ で打ち切る (2026-10)"
+  - id: completion-by-occupied-mode-energy
+    level: 2
+    title: "共鳴の完了をエネルギーで判定するときは、 育った mode 自身の運動量と振動数で数える (2026-10)"
+  - id: model-background-by-late-law
+    level: 2
+    title: "比べるための模型の背景は、 静止から放す時刻でなく後期の法則で指定する (2026-10)"
+  - id: mathieu-q-own-normalization
+    level: 2
+    title: "Mathieu の $q$ は自分の式の規格で第 1 調和から取る — 駆動の振幅 $/\\omega^2$ を $q$ と呼ばない (2026-10)"
+  - id: small-sdp-without-solver
+    level: 2
+    title: "小さな SDP を solver 無しで回す — SLSQP + explicit dual certificate の sandwich (2026-09)"
+  - id: analytic-kernel-checks
+    level: 2
+    title: "解析接続した積分核の検証"
+  - id: complex-null-is-not-zero
+    level: 3
+    title: "複素双線形の零は零ベクトルを意味しない"
+  - id: partial-derivative-held-variables
+    level: 3
+    title: "微分の固定変数を変数変換後も明示する"
+  - id: precision-through-final-comparison
+    level: 3
+    title: "精度は入力から最終比較まで追跡する"
+  - id: reference-side-numerics
+    level: 3
+    title: "照合の「厳密」 側も数値である — 参照実装の有効域・丸い入力・巨大な位相の差"
+  - id: narrow-reweighting-shift
+    level: 3
+    title: "狭い分布に重みをかける展開は、 重みの 1 階の項を落とさない"
+  - id: differentiate-integrands-before-quadrature
+    level: 3
+    title: "有限微分は可能なら被積分関数に作用させる"
+  - id: closed-form-function-class
+    level: 3
+    title: "閉形式は関数クラスと残る操作を明記する"
+  - id: truncated-profile-asymptotics
+    level: 3
+    title: "有限区間で切った profile の漸近"
+  - id: zero-inventory-across-cut
+    level: 3
+    title: "cut を越えて解析接続した関数の零点を数える (伝播関数の複素極など)"
+  - id: operator-time-state-order
+    level: 2
+    title: "一般時刻の演算子と初期状態の依存順を分ける"
+  - id: observable-projectors-and-symmetry
+    level: 2
+    title: "部分空間の和・電荷・保存則の対象を固定する"
+  - id: exact-rational-pipelines
+    level: 2
+    title: "厳密有理数の記号計算 pipeline に `nsimplify` を通さない — 抽出器は単項式の閉形式で先に叩く (2026-09)"
+  - id: chain-tail-credible-level
+    level: 2
+    title: "MCMC chain から尾の信用水準を出すときは、 chain を間引かず、 推定法を並べる"
+  - id: threshold-by-root-not-grid
+    level: 2
+    title: "符号や大小が変わる点は、 格子の値から読まずに根で出す"
+  - id: table-corners-as-nodes
+    level: 2
+    title: "表で関数を引く (逆引きも) ときは、 折れ目を表の点にし、 確かめの掃引で折れ目を通る"
+  - id: chunk-wide-broadcasts
+    level: 2
+    title: "(点の数) × (求積の点) の配列は、 点の側で分けて作る"
+  - id: sampled-extremum-metrics
+    level: 2
+    title: "格子で標本化した曲線の極値から作る量 (可視度・コントラスト・ピーク比) は格子に依る — 表に写す前に収束を確かめる"
+  - id: truncation-dependence
+    level: 2
+    title: "打ち切りへの依存を読む — 動かない値は収束とは限らない"
+  - id: table-parts-sum-check
+    level: 2
+    title: "全体と内訳を別の経路で計算した表は、 内訳の和が全体に合うことを検査に入れる"
+  - id: symmetry-of-prescription-finite-part
+    level: 2
+    title: "計算の処方が対称性を保つかは発散の係数では分からない — Ward 恒等式を極と有限部で別々に検査する"
+  - id: literature-sign-map
+    level: 2
+    title: "文献の式との符号の対応は、 規約に依らない項で固定する"
+  - id: cas-library-traps
+    level: 2
+    title: "記号計算・数値積分 library の罠と、 自作 engine の検算 (sympy / mpmath)"
+  - id: research-script-homes
+    level: 2
+    title: "研究スクリプトと知見の配置・全数索引"
+  - id: observable-state-generator-audit
+    level: 2
+    title: "観測量・状態・生成子を別々に固定して検算する"
+  - id: alternative-method-option-test
+    level: 2
+    title: "別の手法を選ぶ option は、 fallback と違う値を返すことまで test する"

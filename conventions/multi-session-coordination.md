@@ -1,0 +1,1301 @@
+<!-- doc-meta
+when: 並列 AI session と同じ repo を触るとき + spawn/handoff・セッション宛て掲示板を設計するとき + 他 session が名乗った窓口・担当に従う・記録する前 (#board-role-claim-is-not-assignment) + 作ったものの検収を別 session に頼む・頼まれたとき (#review-handoff) + 並行した worker が同じ file の全文の候補を作ったとき (#parallel-full-text-candidates) + 並列 session の開始時の一覧・turn 終わりの検査が同じ用事 (mail・台帳の項目・依頼) を求めるとき (#pending-item-claims) + Workflow (agent を並べる script) を組む・起動する・途中で止める・直して再開する前 (#workflow-fan-out) + 他の session の未 commit の変更が残る作業ツリーで test を回すとき (#verify-on-clean-export) + 子に仕事を渡すとき、 subagent か自分で締められる session かを選ぶ前 (#self-closing-delegate) + subagent に照合 (批判役・検算) を頼むとき (#subagent-work-on-record) + 同じ仕事 (方針・文の起草・判定) を何人かの worker に並べて書かせる前・並べた成果を集約するとき (#parallel-drafting) + 掲示板の依頼を受けて作業している間 (依頼元が途中で指定を差し替えたときに拾う、 #worker-watches-for-spec-changes)
+category: harness-core
+summary: 同 user の並列 AI session を安全に協調させる規律 (= 同 path race 防御、明示 add、**同一 file は明示 add でも巻き込むので `git commit -- <path>` で index を経由しない (#staging-window-race、 hook が見る範囲も自分の path だけになる)**、**生成物の再生成はその防御を貫通する (#generated-file-contamination)**、**起きた後の追跡は commit の `Agent-Session:` + model/effort trailer (#session-provenance-trailer)**、handoff、Git immutable-event board の主体は session、提出と受領を分離、明示引継ぎ、project SoT へ昇格、**Workflow は起動の前に本数と波数を空回しで見積もり、 観点は 1 本の prompt に並べ、 script を直したら再開でなく済んだ結果を file で渡す (#workflow-fan-out)**)
+-->
+# Multi-session coordination — 同 user の並列 AI session が race する
+
+同じ user が同じマシン (or 別マシン) で **複数の Claude session を並列起動して同じ shared repo を同時編集** している状況は、 zoom session 中の long-running 議論や autocompact 復帰直後の sub-task spawn 等で日常的に発生する。 collaborator (= 他 user) との race は [`shared-repo.md`](shared-repo.md) の Git workflow で扱うが、 本ファイルは **同 user の concurrent Claude session 同士の race** という別軸の risk と防御を扱う。
+
+scope: 1 user の手元で並列 AI session が同じ project を扱う場面。Claude 固有の spawn / marker 手順はその実装に限る。vendor-neutral な掲示板の主体・受領・引継ぎは [§13](#git-immutable-event-board) が正本。
+
+---
+
+## <a id="file-path-race"></a>1. 同 file path を別 session が独立に書く race
+
+> 🔎 **今この瞬間の兄弟を数える道具** = [`scripts/list-live-sessions.py`](../scripts/list-live-sessions.py) (harness が残す live session の刻印を読むだけ・何も書かない。 `--surface` で「同じ cwd の兄弟」 を 1 ブロックに、 `--self <uuid>` で自分を除外)。 **messaging の道具ではない** (addressable id は持てない) = 編集前に `git fetch` して明示 path で commit する、 の判断材料。
+
+### 問題
+
+- session A: 朝の zoom 中に `analyses/data/foo.yaml` を compile + commit
+- session B (= session A 終了後、 別 chat tab で再開): user の「foo について analyze して」 指示で同じ `foo.yaml` を独立に compile しようとして Write tool で同 path を上書き
+
+session A の commit を session B が pull せずに開始すると、 session B の `git status` には「`foo.yaml` は untracked」 と見える (= session B はその file の存在を知らない) → session B が Write tool で新規作成扱いになる → 同じ content なら git diff zero (= 害なし) だが、 content が分岐していると session A の work が silently 破壊される。
+
+「同じ content になる」 保証は **存在しない**: dataset compile / script generation 等で似た choice をしても、 1 entry の order / 1 line の punctuation / asymmetric error の符号 で差分が出る。 偶然 overlap は **判断が pure に決まる task** (= raw data から compile、 既存 mirror から複製) でのみ発生し、 creative choice が混ざる task では分岐する。
+
+### 防御策の階層
+
+**(A) Session 開始時 reflex** (= 最優先、 全 session の冒頭で必須)
+
+[`shared-repo.md` session-start](shared-repo.md#session-start) の `git fetch` + `git status` に加えて:
+
+1. **`git log --oneline -5`** で **最後の 5 commit を確認** (= session の prev work と被っていないか)
+2. **`SESSION.md` + 進行中 plan を読む** (= plan の `[x]` mark で「すでに実装済み」 と分かる task は重複実装しない)
+3. **同名 file の last-modified を `ls -la <path>` で確認** (= 同 session 内で別 turn が触ったか確認、 timestamp が想定外なら別 session の work を疑う)
+
+(A) はすべて pull だけでなく **「session の context として最新 state を読み込む」** ことが要点。 `git status` が「clean」 でも、 別 session の commit を pull していないだけかもしれない → `git fetch` の後に `git log` で実態確認。
+
+**(B) Write 前 reflex** (= 新規 file 作成と思った時)
+
+- `find ~/<repo> -path '*<basename>*'` で同名 file の有無を確認
+- 既存があれば必ず `Read` で content を取って差分判断
+- 「新規」 と思った path に既存 file があれば、 別 session が書いたもの (or 過去の自分 session が忘れた artifact) と仮定して **必ず Read してから決める**
+
+**(C) Edit 前 Read** (= 既存 file 編集と判明した時)
+
+Edit tool は `read_before_edit` 強制があるが、 **read のタイミングと edit の間に別 session の改変が挟まる可能性** がある (= zoom 中の real-time co-editing で頻発)。 Edit が
+
+```
+File has been modified since read, either by the user or by a linter.
+Read it again before attempting to write it.
+```
+
+を返したら **必ず再 Read してから retry**。 retry を「直前の Edit 内容で再試行」 と reflex に判断すると、 別 session が pre-empt した content を上書きする。 retry の前に diff 判断:
+
+1. 再 Read で latest 取得
+2. 自分の予定変更が依然意味があるか確認 (= 別 session が同じ意図で先に edit していれば自分の変更は冗長)
+3. 矛盾なし & 必要 → retry / 冗長 → skip / 矛盾あり → user 確認
+
+**(D) Commit 時 reflex** (= stage する時)
+
+- 並行 session が同 tree に居る (可能性がある) 環境では **`git add -A` / `git add .` を使わない** — 相手の**未 commit の WIP** を丸ごと自 commit に巻き込む (= 自分の commit message が説明しない変更が push され、 相手の WIP が中間状態で publish される + 相手側からは自分の編集が「勝手に consume された」 ように見える)。 **自分が編集した file を明示列挙して add** する
+- 実例 (2026-07-10): session X が script を編集中 (前半 commit 済・続き未 commit) のところへ、 session Y が別作業の `git add -A` で X の未 commit 分 42 行を無関係な message の commit に混入させて push。 X はその上に続きを積めたため実害は attribution の濁りに留まったが、 X の WIP が中間状態で publish される class の事故。 **同型再発 (2026-07-25)**: 「repo A は並行 session が編集中だから add を限定しろ」 という警告を chat で受け **repo A では遵守した** session が、 直後に隣の repo B で `git add -A` を打ち並行 session の WIP 3 file を巻き込んだ — 警告を named repo の話として受け取り一般原則に拡張し損ねた形で、 **rule の in-context presence でも止まらなかった** (= 防御は「並行 session が居る間はどの repo でも明示 add」 という無条件 reflex 側に置く。 巻き込んだ側の事後責務 = 相手 session への通知 + 巻き込み内容の commit message / 記録での明示、 history 書き換えはしない)。 **3 例目 (2026-09-05)**: 4 repo を連続 commit する wrap-up で、 session 冒頭に全 repo `dirty=0` を確認していたことを「今も clean」 の根拠にして `git add -A` を打ち、 その間に別 session が始めた 3 file の WIP を巻き込んだ — **clean の確認は時点情報で、 数十分後の add には効かない**。 defense は同じ (明示 add)、 かつ「冒頭で clean だった」 を理由に緩めない
+
+- <a id="no-amend-in-shared-worktree"></a>**並列 session の居る clone で `git commit --amend` を打たない** (2026-10-03 追加、 実測) — amend は path で絞れず、 HEAD の commit を置き換える。 直前に別の session が commit していれば、 その commit が自分の message で上書きされる (実測: 自分の commit の message を直すつもりで、 数十秒前に別の session が積んだ commit を書き換えた。 相手は push 済みで、 手元だけが分岐した)。 **HEAD が自分の未 push の commit でも起きる**: amend の pre-commit の hook が走る間に、 同じ clone の別の session の push が amend の前の commit を remote に出す (実測: その session の commit は index.lock で止まっていたが、 commit の出力を pipe で切って `;` で繋いだ push だけが走った = [#confirm-commit-landed](#confirm-commit-landed))。 amend の前に「HEAD が自分の commit で未 push か」 を確かめても、 確かめた時点で正しいだけで防げない。 message の誤りは次の commit で訂正する。 戻し方 = 自分の commit の上に何も乗っていなければ、 元の commit と tree が同じことを確かめて `git reset --soft <元の commit>`。 上に別の session の commit が乗っていれば、 どの commit も書き換えずに合流の commit で繋ぐ。 述語と本体 = [`scripts/git-amend-shared-clone.py`](../scripts/git-amend-shared-clone.py) (生きている別の session の cwd が repo の中か祖先にある・HEAD が remote に載っている・HEAD が自分の commit でない・状態が読めない、 のどれかで amend を止める)
+- <a id="staging-window-race"></a>**明示 add でも「同じ file」 なら巻き込む** (2026-09-09 追加) — 直前の防御 (= 自分が編集した file を明示列挙) が効くのは **相手が別 file を触っている**ときだけ。 同一 file を 2 session が編集していると、 相手が `git add <その file>` を打った瞬間に **自分の未 commit hunk も一緒に staging される** (= git の staging は file 単位で、 hunk の作者を区別しない)。 実例 (2026-09-09、 同一 session 内で**双方向に 1 回ずつ**発生): session X が `TODO.yaml` に 2 行足す → 検証 (parse + 出力の before/after 確認) に数分 → その間に session Y が同 file の別 entry を直して明示 add + commit → X の 2 行が Y の commit message (「別件の手順訂正」) の中に入って push され、 X が commit しようとした時には `git status` が clean になっていた。 **内容は失われない**が、 ① commit message が中身を説明しない ② `git log -S` でしか「いつ入ったか」 を追えない ③ **public repo では相手の未検査変更が leak gate を素通りして publish される** (= 最も危険な帰結。 `git diff` を目で通す規律は「自分が書いた hunk」 を前提にしている)。
+  - **防御 1 (最強) = `git commit -- <path>...` で index を経由しない** (2026-09-10 追加、 scratch repo の実験で確認)。 partial commit は **HEAD + 指定 path の working tree** から commit を作り、 index に居る他 file を巻き込まない。 実測 4 点: ① 相手が `git add B` 済でも `git commit -- A` は **A だけ**を commit ② **pre-commit hook が見る `git diff --cached` も A だけ** (= 一時 index が使われる。 相手の壊れた / 書き込み途中の file で自分の gate が落ちる事故も同時に消える) ③ B は staged のまま、 working tree も無傷 (= 相手に害が無い) ④ 対照の通常 `git commit` は B を巻き込む (= race の再現)。 ⚠️ **untracked (新規) file は指定できない** (`did not match any file(s) known to git`) — 新規は `git add <file> && git commit -m ... -- <paths>` と**同じコマンド行**に置く。 ⚠️ **その commit が commit の門 (pre-commit の検査) に止められると、 add した新規の file は index に残る** = 直している間に同じ repo で path を付けない `git commit` (定期の job の commit など) が走ると、 その file を相手の commit に入れて push する (実測: 止められている間に自動の commit が新規の file 4 本を入れた)。 同じ行の末尾に `|| git restore --staged <file>` を置き、 止められた時に index から外す。 commit を書く道具の側も、 自分の path を付けて commit する (= この防御 1)。 ⚠️ **同じ file の中までは守らない**: 指定した path は working tree の中身がそのまま commit されるので、 その file に相手の未 commit hunk があれば自分の commit に入る。 commit の直前に `git diff -U0 -- <path> | grep '^@@'` で hunk を数え、 自分の分だけかを見る。 相手の hunk が同居していたら相手の commit を待ってから自分の分を commit する (2026-09-14: SESSION.md に相手の 1 hunk が同居 → 相手の commit 後に自分の 1 行だけを commit)。 待てないときは、 自分の変更を pair にして origin 版へ当て直す ([#foreign-wip-scratch-worktree](#foreign-wip-scratch-worktree) の 3 点目)、 または下の一時 index 経路。
+  - <a id="temp-index-commit"></a>**防御 1' = 同じ file に相手の未 commit hunk が居るときは、 一時 index から自分の分だけを commit する** (2026-09-22 追加、 実測 2 回) — worktree を切らずに済み、 git-crypt の repo でも smudge の罠が無い。 作業 tree は触らない (= 相手の hunk はそのまま残る)。 **道具 = [`scripts/git-commit-own-hunk.py`](../scripts/git-commit-own-hunk.py)** (置換か全文の版を渡すと、 下の手順を穴を塞いだ形で 1 command で行う。 commit は `git commit` で作るので hook が全部走る)。 全文の版 (`--version`) は、 作った時の HEAD (`--base`) から今の HEAD までの commit が対象の path を 1 つも触っていなければ今の HEAD の上に commit し (版 = 親の版 + 自分の変更 で、 親の版が変わっていない)、 触っていれば止める (= 版を作り直す)。 commit の最中に HEAD が動いて git が `cannot lock ref` で止めた時も、 親の取り直しとこの確認から 3 回までやり直す (並列の多い時間帯は、 この 2 つの形で毎回のように止まった、 実測)。 手で踏むときの手順: ⓪ **親を最初に 1 回だけ決める** (`parent=$(git rev-parse HEAD)`)。 以下の全段でこの `$parent` を使い、 途中で `HEAD` を読み直さない ① `git cat-file --filters $parent:<path>` を取り出し (暗号化などの filter が掛かる path でも中身で読める)、 自分の変更だけを当てた版を作る (= 自分の置換を親の版にもう一度当てる。 old 文字列の出現数を assert)。 ⚠️ **`git show $parent:<path>` で代用しない** = filter を掛けないので暗号文が出る。 それに自分の行を足して ② に渡すと、 git-crypt の clean は暗号文で始まる入力を暗号化し直さずに通すので、 「暗号文 + 平文の行」 の blob ができる (復号は tampered で失敗し、 足した行は平文で remote に載る、 実測)。 ⑤ の前に `git cat-file --filters --path=<path> $blob` が作った版と一致するかを `diff` で照合する ② `blob=$(git hash-object -w --path <path> <その版>)` (⚠️ **`--path` を省かない** = repo の外に置いた版の file には path の clean filter が掛からず、 暗号化の path に平文の blob が入る。 実測: filter つきの path で `--path` の有無を比べると、 無い方は filter の前の中身のまま保存された) ③ `mode=$(git ls-tree $parent -- <path> | cut -d' ' -f1)` (新規 file なら `mode=100644`) → `export GIT_INDEX_FILE=<一時 file>; git read-tree $parent; git update-index --cacheinfo "$mode,$blob,<path>"` (⚠️ mode を 100644 と決め打ちしない = 実行 file の実行権限が commit で落ちる、 実測) ④ **pre-commit hook を手で回す** (`.git/hooks/pre-commit` は `GIT_INDEX_FILE` の index を見る = `git diff --cached` が自分の分だけ) ⑤ `tree=$(git write-tree); unset GIT_INDEX_FILE; commit=$(git commit-tree $tree -p $parent -F <msg>); git update-ref HEAD $commit $parent` (⚠️ 旧値 `$parent` を必ず渡す = 省くと、 その間に相手が commit していたとき相手の commit を HEAD から外す。 旧値つきなら HEAD が動いていれば失敗するので ⓪ からやり直す = 版も新しい親から作り直す。 新しい親までの commit が自分の path を 1 つも触っていなければ (`git diff-tree --quiet -r $parent <新しい HEAD> -- <path>` が 0)、 作り直した版は前の版と 1 byte も違わない = 道具の `--version` が `--base` を越えて進むのはこの場合だけ) ⑥ `git reset -q -- <path>` で実 index の entry を新 HEAD に揃える (作業 tree は不変) → push。 ⚠️ **⑥ を省くと実 index に自分の file の旧版が残り、 `git status` が `MM` になる = 自分の commit を取り消す変更が stage 済みの状態** (実測)。 相手が素の `git commit` を打つとそれが入り、 自分の commit が黙って巻き戻る。 ⚠️ **⑥ が `index.lock` で止まった時も同じ状態** (別の git が実 index を使っている。 一時 index の commit は実 index の lock を取らないので先に通ってしまう、 実測) = lock が消えるのを待って ⑥ を打ち直す。 道具は commit の前に lock が消えるのを待ち (消えなければ commit しない)、 commit の後に揃わなければ commit を HEAD から外して止まる (終了値 6)。 lock を持ったまま走る `git commit -a` / `-- <path>` の終わりを待った後は、 それが古い作業 tree から自分の変更を戻していないかも見る (道具は終了値 5 で知らせる。 lock の持ち方 = [#index-lock-file-exists](#index-lock-file-exists))。 ④⑤ の代わりに一時 index のまま `git commit -F <msg>` を打つ形は hook が全部走るが、 **git が `cannot lock ref` で止めるのは commit の最中に HEAD が動いた時だけ** (並列の多い時間帯は数分で 2 回止まった、 実測)。 版を作ってから commit を打つまでの間に相手の commit が入っていると、 親 = 相手の commit・tree = 「古い親 + 自分の変更」 の commit ができ、 **相手の commit の中身が error なしに消える** (実測)。 この形を使うなら、 commit の直前に `git rev-parse HEAD` が `$parent` のままかを見て、 直後にできた commit の親が `$parent` かを照合し、 違えば `git update-ref HEAD <その親> <できた commit>` で戻して ⓪ からやり直す (道具はこれを行う) が、 ⑥ は同じく要る。 ⚠️ **できた commit を commit の後の `HEAD` の読み直しで取らない** — その間に相手が上に commit を重ねると HEAD は相手の commit で、 その親 (= 自分の commit) を見て「親が違う」 と読み、 旧値に相手の commit を渡した update-ref が**相手の commit を HEAD から外す** (selftest で再現)。 一時 index の `git write-tree` と同じ tree の commit を `git rev-list --first-parent --format='%T %s' HEAD` で探して、 それをできた commit とする。 誤った commit の上に相手が重ねていれば、 旧値つきの update-ref は失敗する = 外さずに止まって手で直す。 `git commit` が `cannot lock ref` で止まった時は commit は入っていない (= 関門の拒否ではない) ので ⓪ からやり直す。 ⚠️ commit-tree は hook を呼ばないので ④ を省くと gate を素通りする。 post-commit 系 hook も走らない。 ⚠️ 対になる file (例: 縮退の本体と archive) は同じ一時 index に両方入れて 1 commit にする。 ⚠️ 相手側は「作業 tree = HEAD + 相手の hunk だけ」 になるので、 相手の `git diff` からは自分の分が消えて見える (= 混乱しないよう相手に 1 行知らせる)。 知らせる相手 = その hunk を書いた session。 用事の claim (「user に伝え済み」「対応中」) の持ち主や、 同じ案件を扱っている session を書き手とみなさない (実測: 伝え済みの claim を持つ session に知らせたら「書いていない」 と返った)。 書き手は会話記録の検索 (hunk に固有の文字列) で探すが、 自分が送った知らせを引用した記録にも当たる。 書き手が分からなければ知らせずに残し、 user に 1 行だけ伝える。 ⚠️ **① の前に、 HEAD の版にもう自分の変更が入っていないかを見る** — 相手が index を経由した commit (`git commit -a` や、 同じ file の `-- <path>`) で自分の未 commit hunk を巻き込み、 先に commit していることがある。 入っていれば一時 index の commit は要らず、 当てると二重になる (実測: 挿入した段落が 2 回入り、 次の commit で 1 回に戻した)。 挿入の版を作るときは、 アンカーの出現数だけでなく「足す行の HEAD 版での出現数 = 0」 も assert する。 ⚠️ **append-only の log (jsonl) で自分の行を語 (案件名など) で選ぶと、 相手が同じ語で書いた行も自分の版に入り重複する** (実測: 2 行、 次の commit で取り除いた) = 作る版は「HEAD の版 + 自分が書いた行そのもの」 で組み、 hash-object の前に `diff` の追加行数が自分の行数と一致することを assert する。 ⚠️ **一時 index の commit が commit 時の gate に止められた時、 作業 tree に当てた自分の変更は残っている** — 一時 index は使い捨てで実 index には何も残らないが、 作業 tree は「相手の hunk + 自分の変更」 のまま。 止められた理由を払って ⓪ からやり直すか、 その変更をやめるなら**自分が足した文字列だけ**を作業 tree から取り除く (file ごと戻すと相手の hunk が消える)。 取り除いた後に `git diff -- <path>` が相手の hunk だけになったことを見る (実測)。 ⚠️ **push の前に `git log @{u}..HEAD` を読む** — 自分の分だけを commit しても、 親の側に別の session が「push は後で」 と残した未 push の commit が居れば、 push はそれも一緒に remote に出す (実測)。 手で `git commit -- <path> && git push` と繋ぐ形も同じ。 道具は commit の後に、 今の commit の外で上流にまだ無い commit を件名つきで並べる。 一緒に出さないなら [`scripts/commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) で `origin/<branch>` の上に自分の分だけを出す。
+  - <a id="index-lock-file-exists"></a>**`Unable to create '…/index.lock': File exists` は、 別の git が実 index を使っている印** — 消さずに少し待って同じ command を打ち直す (消すと相手の書き込みと競合する)。 git の process が 1 つも動いていないのに残るなら、 落ちた git が残した lock = それを確かめてから消す。 **lock の持ち方は commit の形で違う** (実測、 [`scripts/git-commit-own-hunk.py`](../scripts/git-commit-own-hunk.py) の selftest の「git の前提」 が確かめ続ける): `git commit -a` と `git commit -- <path>` は hook の走る間も持ち続ける。 素の `git commit` は、 lock が在ると始まらず、 hook の間は持たない。 素の commit の親は pre-commit の前に読んだ HEAD で、 tree は pre-commit の後に読み直した実 index から作る (その間に HEAD が動くと `cannot lock ref` で止まる)。 ⇒ 一時 index の commit と実 index の reset の間に素の commit が割り込んで自分の変更を戻せるのは、 その commit の開始から読み直しまでの全部がこの間に収まる時だけで、 pre-commit が無いか、 ごく短い repo に限られる
+  - <a id="red-check-in-shared-tree"></a>**共有の作業 tree で検査が落ちたら、 持ち主に知らせる前に commit 済みの版で再現するかを見る** — 検査は作業 tree を読むので、 他の session の編集の途中 (本体を直して、 対になる spec や生成物をまだ直していない) を拾って赤になる (実測: 本体と mutant の spec の間の `[SPEC] old matches 0 times` が、 commit 済みの版では全部一致だった)。 対になる file は `git show HEAD:<path>` で取り出して照合する。 直す側は、 対になる file を続けて直して commit まで進める
+  - <a id="temp-index-guard-approved-region"></a>**原稿の guard が守る領域 (数式など) の変更を、 相手の未 commit の hunk がある file に当てるときも同じ道具で入る** — 候補の全文は作業 tree の版 (相手の hunk を含む) + 自分の変更で作り、 `manuscript-claim-guard.py apply` で承認を記録して作業 tree に当てる。 そのあと `git-commit-own-hunk.py --no-worktree` で同じ置き換えを親の版にだけ当てて commit する (作業 tree にはもう当たっている。 道具は `--no-worktree` が無いと親の版と作業 tree の両方でちょうど 1 回の一致を求める)。 数式などの領域の承認は file 全文の hash でなく領域で照合されるので、 相手の hunk を含まない commit でも commit 時の gate を通る (実測)。 規則・権限の文書と設定の承認は全文の hash に束縛されるので、 この形では通らない。
+  - <a id="reissue-keeps-checks"></a>**hook や guard に止められた command を出し直すときは、 その command が持っていた確かめの段 (自分の hunk を数える・fetch して behind を見る) も一緒に出し直す** — PreToolUse の拒否は実行の前なので、 止められた command は 1 段も走っていない。 止められた部分だけを直して出し直すと数える段が落ち、 その間に同じ file を書きかけた相手の hunk が自分の commit に入る (実測)。
+  - <a id="confirm-commit-landed"></a>**commit が入ったかは、 commit の終了値と、 できた commit の session の印で確かめる** — `git commit … && git push; git log -1` の形は、 commit が pre-commit の検査で止まると push を飛ばし、 そのうえ `git log -1` が並列の session の commit を出すので、 成功したように見える (実測: 自分の commit が検査で止まり、 表示された hash は別の session の commit だった)。 終了値を出す (`git commit …; echo "commit_exit=$?"`) か、 `git show -s --format='%(trailers:key=Agent-Session,valueonly)' <hash>` が自分の session かを見る。 止まった後に一部の file だけで commit し直したら、 残りは未 commit のまま残る = 最後に自分の path の `git status --short` が空かを見る。 commit と push は `&&` でつなぐ: 改行や `;` でつなぐと、 commit が止まっても push が走り、 並列の session の commit だけが出る (実測)。 commit の出力を pipe に流す形 (`git commit … 2>&1 | tail -1 && git push`) も同じで、 `&&` が見るのは tail の終了値なので、 commit が止まっても push が走る (`set -o pipefail` が無いとき)。 出力を短くしたいなら `> <file> 2>&1` に出して後で読む。 述語 = [`scripts/git-amend-shared-clone.py`](../scripts/git-amend-shared-clone.py) の B。 PreToolUse の hook が command を止めたときは、 その command の中の何も走っていない (前段の `git add` も) = 打ち直すときは add から全体を打つ (実測: add が走った前提で commit だけを打ち直し、 新しい file が index に無く commit が止まり、 改行でつないだ push だけが走った)。
+  - <a id="single-writer-log-whole-commit"></a>**一時 index の 3-way で commit する道具は、 その道具だけが書く追記の記録 (控え・log) を 3-way に回さず作業 tree の版をそのまま入れる** — 1 回 commit が落ちる (並列の commit と HEAD を取り合う) と記録の末尾に自分の前の行が残り、 次の回の追記と同じ末尾の場所になるので、 3-way が毎回「相手の未 commit の変更」 とみて commit を拒み、 記録が未 commit のまま溜まり続ける (実測 = 数日分)。 自分の行と相手の行を区別できるのは書き手が 1 つのときだけなので、 複数の書き手が居る file はこれまでどおり 3-way で扱う。
+  - <a id="unattended-writer-pending-retry"></a>**一時 index の 3-way で commit する無人の書き手は、 commit が落ちた変更を控えて、 後で自分で拾い直す** — 次の回の 3-way は「書く前の作業 tree (= 前の回の取り残しを含む) から書いた後まで」 を自分の変更とするので、 前の回の取り残しは相手の未 commit の変更と読まれて commit から外れる。 上の [#single-writer-log-whole-commit](#single-writer-log-whole-commit) が救うのは書き手だけが書く file だけで、 ほかの file (台帳の entry・新しく立てた file) は「次の回で入る」 と出しても入らない。 誰の担当でもないまま作業 tree に残り、 同じ file を書く並列の session が毎回一時 index で避ける (実測)。
+    - **控える**: commit の**前に** file ごとの (書く前, 書いた後) の組を clone の `.git/` の中に書き (途中で落ちても残る・push されない)、 commit が通ったら消す。 控えを書けなくても commit は止めない
+    - **拾い直す**: 後始末の段 (読む物が無い回も回す) が控えを読み、 file ごとに分ける: 足した行がもう全部 HEAD に在る → 控えを消すだけ / 作業 tree から自分の変更が消えている → 拾い直さない (人が捨てた変更を蘇らせない) / それ以外 → 今の HEAD に当てて commit。 書いた process がまだ生きている控えは触らない (その回に任せる)
+    - **当て直す文脈は今の作業 tree**: 控えた時の「書く前」 を文脈に当てると、 その後に別の session が自分の entry の直後へ追記して commit していた時、 HEAD と作業 tree で entry の並びが入れ替わり、 誰のものでもない差分が作業 tree に残る (selftest で再現)。 作業 tree から自分の挿入の塊だけを抜いた版を「書く前」 にする。 挿入だけなら塊を 1 か所見つけて取り除く (3-way で抜くと、 塊の直後に足された行と隣接して衝突する)。 当たらなければ控えた組に戻す
+    - **末尾への追記どうし**: 自分の変更が末尾への追記だけで、 HEAD の末尾にも別の追記があって 3-way が衝突したら、 HEAD の末尾に自分の追記を足す (追記どうしは順に並べれば両方正しい)
+    - **止まる合図ではやり直さない**: 道具が「誤った commit を HEAD から外せなかった」 で止めたら、 控えに印を付けて拾い直しから外し、 人が `git log` と `git reflog` を見るまで残す
+    - **残りを出し続ける**: 一定時間より古い控えと、 控えの無い取り残し (書き手が新しく立てた file が未追跡のまま) は、 session 開始の一覧の「道具が動いていない」 段に出す (書き手の出力の 1 行は、 無人の log なので読まれない)
+  - <a id="unattended-writer-stale-base"></a>**無人の書き手は、 手元が upstream と揃っていない clone に commit しない** — fetch の後に behind か手元だけの commit (ahead) があれば、 その回は書かずに理由を 1 行出して止まる。 手元の古い HEAD に commit すると分岐し、 push は拒まれ、 相手の未 commit の変更がある tree では `pull --rebase` も始まらない (実測で再現) = commit が手元に閉じる。 閉じた記録が upstream に無いあいだ、 別の機械の session は同じ用事を未処理と読んで二重に処理する (実測)。
+    - push が拒まれたときも `pull --rebase` で取り繕わず失敗として返す (終了値を 0 にしない・「次の回で送られる」 と言わない。 次の回も同じ理由で拒まれる)。 push できなかった回は、 記録した対象の外向きの印 (既読化・label) も付けない = 別の機械からは未処理のまま見える方が二重の処理より安い
+    - 気づく経路を書き手の log に置かない (無人の log は誰も読まず、 `claude -p` の log は最後の message しか残らない = turn の終わりの検査が追記を求めると本報告が消える、 実測)。 手元にだけ在る commit と最新化できない clone は、 機械をまたいで読まれる面 (fleet heartbeat の reader = [`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat)) と session 開始の一覧に出す
+  - **防御 2 = 編集と commit の間に時間を空けない**。 検証 (test / 出力確認 / lint) は **commit の後**に回す — 壊れていたら追加 commit で直せるが、 空けた時間は取り返せない。 防御 1 が使えない場合 (= 新規 file が多い / repo 全体を 1 commit にしたい) はこれが残る唯一の手。 `git add -p` の hunk 単位 staging は巨大 file や git-crypt file では実用にならない。
+  - <a id="behind-check-in-chain"></a>**behind の確認を `&&` の鎖に入れるなら、 数でなく条件で書く** — `git rev-list --count HEAD..@{u}` は behind が 0 でなくても数を出して成功 (終了値 0) で終わる。 `git fetch && git rev-list --count HEAD..@{u} && git commit … && git push` は behind のまま commit まで進み、 push で拒まれて rebase が要る (暗号化した台帳なら [#encrypted-file-no-three-way-merge](#encrypted-file-no-three-way-merge) の衝突の入口)。 鎖に入れる形 = `git fetch && [ "$(git rev-list --count HEAD..@{u})" = 0 ] && git commit … -- <path> && git push` (実測: 数を出すだけの形で、 behind のまま commit した)。 **自分の hunk を数える確かめ ([#staging-window-race](#staging-window-race)) も同じ** — `git diff -U0 -- <path> | grep -c '^@@'` は相手の hunk が混ざっていても数を出して成功で終わるので、 鎖に入れるなら自分が当てた数との比較にする: `[ "$(git diff -U0 -- <path> | grep -c '^@@')" = <自分の hunk の数> ] && git commit … -- <path>` (実測: 数を出すだけの形で、 同じ file の相手の未 commit の hunk ごと commit し push した)。 `<自分の hunk の数>` は Edit の回数でなく、 自分が直した行の塊の数 (同じ行を 2 回直せば 1 つ、 続いた行の直しも 1 つの hunk になる)。 Edit の回数を入れると、 相手の hunk が混ざっていなくても鎖が止まる (実測)。 数は鎖と同じ `git diff -U0` の出力で数える = 既定の文脈 3 行の diff (`git diff`・`gh pr diff`・PR の画面) では近い変更が 1 つの塊にまとまり、 `-U0` より少なく出る (実測: PR の diff の塊の数を入れて、 自分の変更だけなのに鎖が止まった)。 比較が偽で止まった鎖は何も出さないので、 commit が入ったかを `git log -1` で確かめてから次へ進む。 ⚠️ **並列の session が同じ checkout に commit しているときは、 `git log -1` の commit が相手のものでありうる** = 件名 (`git log -1 --format=%s`) が自分の message の 1 行目と同じかで確かめ、 鎖の終了値も読む (実測: commit の時の gate が commit を止めたのに、 その間に相手が入れた commit を自分のものと読み、 次の段へ進んだ)。
+  - <a id="path-commit-takes-staged-deletion"></a>**`git commit -- <path>` は、 相手がその path に stage した削除も commit する** (2026-09-23 追加、 実測) — 防御 1 は「HEAD + 指定 path の working tree」 から commit を作るので、 相手が `git rm` 済み (= working tree にも index にも無い) の path を指定すると、 自分の commit が**相手の削除**になる。 自分の書き込みが失敗して file が無いままでも commit は通り、 push まで進む。 実測: ledger に 1 entry 足す script が失敗し、 次の行の `git commit -- <ledger>` が、 並列 session が別の置き場へ移す途中で stage していた ledger の削除だけを commit して push した。
+    - **書き込みと commit を 1 行の `&&` で繋ぐ** (`python3 edit.py && git commit -m … -- <path>`)。 heredoc の script も `python3 - <<'EOF' && git commit …` の形にする (heredoc の後の改行で区切ると、 前段が失敗しても commit が走る)
+    - **commit の直前に `git status --porcelain -- <path>`** で、 自分が意図した種類 (`M` / `A`) かを見る。 `D` や想定外の状態なら commit しない
+    - **起きたら**: 相手に通知する。 相手の移行が landed するなら削除は終状態として残す (元の file を復元すると新旧の二重読みになる)。 自分の書き込みは新しい置き場でやり直す
+  - **巻き込んだ側の事後責務**は上の 2026-07-25 と同じ (= 通知 + 明示)。 ⚠️ **push 済みなら history を書き換えない** — 相手が同じ branch で作業中の force push は、 濁った attribution より高くつく。
+- <a id="regenerated-docs-foreign-untracked"></a>**生成物を再生成して commit するときは、 並列 session の untracked file が数に入る** (2026-09-12) — 索引・構造 tree の生成器は「追跡中 + ignore されていない未追跡」 の file を数えることがある。 相手の未 commit の新 file が居る tree で `--write` すると、 自分の commit に相手の file を数えた生成物が入り、 相手が commit しないうちは clean な checkout で drift になる (CI が落ちる)。 手元の `--check` はその untracked を含めて通るので気付けない。 → 生成物を commit したら `git worktree add --detach <tmp> origin/<branch>` の clean な tree で `--check` を 1 回走らせて確かめる (worktree は確認後に `git worktree remove`)。 git-crypt の repo ではこの worktree が smudge で落ちるので、 [#foreign-wip-scratch-worktree](#foreign-wip-scratch-worktree) の git-crypt の項の作り方 (`--no-checkout` で作って key の dir を symlink) にする。 `--check` は `cd <tmp> && …` の 1 回の呼び出しで回す (`<tmp>` が session の folder の外なら、 単独の `cd` は次の呼び出しに残らず、 続く git は元の dir で走る = [claude-code-permissions.md#cd-with-git-goes-to-classifier](claude-code-permissions.md#cd-with-git-goes-to-classifier))。
+- <a id="verify-on-clean-export"></a>**他の session の未 commit の変更が残る作業ツリーでは、 test を origin の写しで回す** — 作業ツリーで回すと、 相手の途中の変更で落ちる、 または相手の変更に依って通る。 `git archive origin/<branch> | tar -x -C <一時 dir>` に自分の file だけを載せ、 一時 dir の中から repo の venv の python で `python -m pytest` を回す。 `python -m` は今の dir を import の先頭に置くので editable install より写しの package が読まれる = `<package>.__file__` を 1 回出して確かめる。 worktree を増やさないので git の状態に触らない。 報告には写しの commit を書く (実測)。
+- <a id="full-text-candidate-remerge"></a>**写しで作った全文の候補は、 当てる直前に今の版へ 3-way で載せ直す** — 写しを作った後に、 他の session の commit や未 commit の変更が同じ file に入っていると、 全文の候補 (保護された file の当ての道具の `--candidate`・Write での置き換え) はそれを消す (実測: 当ての前の空回しの差分に、 他の session が後から入れた段落の削除が入っていた。 一度は写しを作った時から、 一度は当てる直前の数分の間に)。 当てる直前に `git merge-file -p <候補> <写しの元の版> <今の作業ツリーの file>` で自分の変更だけを今の版に載せ、 自分の差分の行数が載せ直しの前後で同じことを数え、 載せ直した版で試験を回し直してから、 当てる版と試した版が同じか (`cmp`) を確かめる。 空回し (`--dry-run`) の差分に自分の書いていない行の削除が出たら、 この形を疑う。 commit は自分の hunk だけ (相手の未 commit が同じ file にあれば [#temp-index-commit](#temp-index-commit))。
+- <a id="candidate-from-committed-base"></a>**全文の候補は commit 済みの版から作る (作業ツリーの file から作らない)** — 上の項の裏側。 候補を作る元の file に他者の未 commit の変更 (並列の session の途中の編集、 本人が editor で保存した変更、 editor が保存のときに文字を置き換えた変更) があると、 候補はそれを自分の変更として運び、 当てた commit に自分の書いていない hunk が入る (実測: 候補に作業ツリーにあった他者の未 commit の行が入り、 当てる側の照合で見つかった)。 作る前に `git status --short -- <path>` と `git diff -- <path>` を見て、 元は `git show HEAD:<path>` にする。 作業ツリーにある他者の変更を残すなら、 当てる直前に上の 3-way で載せる。 空回しの差分に自分の書いていない行の追加・書き換えが出たら、 この形を疑う。 <a id="line-numbers-from-committed-base"></a>記録・README に書く行番号も、 候補を作った版で数える (`git show <rev>:<path>` を写した file で)。 遅れた作業ツリーや未 commit の変更のある file で数えると、 commit 済みの版と行がずれる (実測)。
+- <a id="check-after-apply"></a>**当てた直後にも、 file と候補が同じかを確かめ、 合えば同じ turn のうちに commit する** — 当てる直前の載せ直しは、 自分の当てより後に当たる他の session の全文の候補を防げない (実測: 守りの道具が当てた時点の「内容一致」 を出した数秒後に、 別の session が自分の写しから作った全文の候補を同じ file に当て、 こちらの変更が黙って消えた)。 当てた直後に `cmp <file> <候補>` で比べ、 合えばその場で commit する (commit すれば、 次に当てる側の載せ直しの土台に自分の変更が入る)。 合わなければ、 今の版から候補を作り直して当て直す (相手の未 commit の変更が同じ行にあれば、 相手の commit を待ってから)。 同じ file を書く相手が居るかは、 書く前の宣言 (掲示板の touch) で分かる = 宣言してから候補を作る。
+- <a id="rule-doc-copy-not-committed"></a>**規則の文書の全文の候補も、 規則の文書と同じ名の file として repo に commit しない** — 規則を守る guard は新しい file の文を全部「足した文」 と読むので、 写しの中にある既存の文で commit が止まり、 同じ commit に入れた別の file も止まる (実測。 原稿の写しの [#manuscript-copy-not-new-tex](#manuscript-copy-not-new-tex) と同じ形)。 候補は、 今の file に置き換えの組を当てて全文を作る script と、 写しの置き場の `.gitignore` で持つ (写しはいつでも作り直せる。 当てる前の確かめは `--dry-run`)。
+
+- <a id="generated-file-contamination"></a>**生成物の再生成は、 防御 1 を貫通して相手の未 commit 変更を自分の commit に混ぜる** (2026-09-10 追加) — index を経由しない `git commit -- <path>` (= 防御 1) が守るのは「自分が触っていない **file**」 まで。 ところが `<generator> --write` 型の再生成は **source 群を全部読んで生成物を作り直す**ので、 相手が source (= doc の front-matter / data yaml / template) を未 commit で編集していると、 **その内容が生成物に入り、 自分の path として commit される**。 混入は自分の path の中で起きるので防御 1 の射程外。
+  - **検査 = 生成物を commit する前に `git diff <生成物>` を読み、 自分が変えた source 由来の行だけかを確認する** (= 生成物は「再生成したから正しい」 ではない。 1 行ずつ読める規模でないなら、 先に相手の作業が落ち着くまで待つか、 source 側の commit だけ先に出す)。
+  - **混ぜずに作る手 = clean な worktree で生成して、 生成物だけを写す**: `git worktree add <tmp> HEAD` → 自分の新しい source をそこへ copy して `git add` → その worktree で `<generator> --write` → `git -C <tmp> status --short` に出た生成物だけを元の tree に copy → `git worktree remove --force <tmp>` → 元の tree で `git commit -- <自分の source> <生成物>`。 相手の未 commit の source は worktree に無いので、 生成物に入らない (実測: 相手の front-matter の編集が居る tree で、 自分の 1 file 分だけの差の生成物を作れた)。 生成物が複数ある生成器では、 写すのは status に出た file 全部 (一部だけ写すと、 写し漏れた生成物が次の commit で drift と言われる = 実測)。
+  - <a id="generated-file-copy-erases-peer-hunks"></a>**元の tree の生成物そのものに相手の未 commit の hunk が居るときは、 写す手が相手の hunk を消す** (実測) — 写すのは file の全文なので、 元の tree の生成物 (例 = CLAUDE.md の構造 tree) にあった相手の途中の変更が上書きで消える。 このときは写さずに、 worktree で commit してから元の tree の HEAD を進める: worktree で `git commit` + `git push` → 元の tree で `git update-ref refs/heads/<branch> <新> <旧>` (旧値を渡す = 間に誰かが HEAD を進めていれば失敗して止まる) → `git reset -q -- $(git diff --name-only <旧> <新>)` (自分の commit が変えた path の index だけを新しい HEAD に合わせる) → そのうち相手の hunk の無い生成物は `git checkout -- <path>`、 相手の hunk の居る生成物は `git diff <旧> <新> -- <path> | git apply` (自分の差分だけを相手の途中の file に当てる)。 終わったら `git diff` を読み、 相手の hunk だけが残っていることを確かめる (実測で通った手)。
+  - 実例 2026-09-10: 層1 convention に 1 節足して index 生成 script を `--write` した際、 同 repo に別 session の未 commit 変更 (= `setup.sh` +24 行 + 未 tracked script 3 本) が居た。 生成物の diff を読んで自分の 1 行だけと確認できたので実害は無かったが、 相手が同じ生成物の source を触っていれば黙って混ざっていた。
+
+- <a id="measured-record-race"></a>**書き込み時に HEAD や hash を実測して書く記録道具は、並列 session が HEAD を進めると、相手の commit を自分の pass として記録する** (2026-09-13 追加) — 原稿の live identity (HEAD の短縮 hash と file の SHA-256) を ledger と SESSION に書く道具を、dry-run と本実行に分けて走らせた。その間に並列 session が同じ clone に commit を積み、本実行は相手の commit を、自分の pass の説明付きで書いた。dry-run が表示したのは自分の commit だったので、本実行の出力を読むまで気づけない。
+  - **検査 = 本実行の出力に出た hash を、自分が作った commit と突き合わせる。** 道具側で塞ぐなら、期待する commit を引数で受け取り、実測値と違えば何も書かずに止める。対象 file に未 commit の変更があるときも止める (実測した hash がどの commit も表さない。同じ回の dry-run は、相手の未 commit の編集を含む file を hash していた)。
+  - **起きたら**: 書いた identity を commit 前に戻し、自分の pass の記録 (決定と意図) だけを commit する。identity は HEAD を進めた側が、自分の記録 pass で「相手の commit、その前が自分の commit」 の履歴として書く。同じ記録 file を 2 session が書く順番は、path 指定 commit でも相手の hunk を吸うのでメッセージで決める (片方が commit と push を終えてから、もう片方が次の番号で積む)。
+
+- <a id="encrypted-file-no-three-way-merge"></a>**暗号化 (git-crypt 等 filter) された file は git が自動では 3-way merge できない — 追記型 ledger では片側の追記が marker も出さずに消える** (2026-09-14 追加) — filter で暗号化された file は object store 上 **binary** なので、 `git merge` / `pull --rebase` は行単位の 3-way merge を試みられない。 症状は 2 つあり、 後者が危険:
+  - `merge` は `CONFLICT (content)` を出すが **conflict marker は入らない** (= binary conflict)。 file を開いても `<<<<<<<` が無いので「解決済み」 に見える。
+  - `rebase` では**片側が採用されて成功したように見える**ことがある。 2 session が同じ append-only ledger (TODO / inbox の yaml) の末尾に追記していると、 **後から rebase した側の追記だけが消えたまま push される**。
+  実例 (2026-09-14): 並行 session と同じ `TODO.yaml` (git-crypt) に双方が 1 entry 追記 → `pull --rebase` が conflict → 解決したつもりで進めたところ、 自分の entry が file から消えていた (`git status` は `UU` なのに marker 0 件、 parse も通る)。
+  - **復旧手順**: `git merge origin/<branch>` → `git checkout origin/<branch> -- <ledger>` (= 上流版を丸ごと取る) → **自分の追記を再適用** → `git add` → merge commit。 rebase で押し通さない。
+  - <a id="encrypted-ledger-manual-three-way"></a>**手で 3-way merge する (上の当て直しの代わり、 rebase の途中の `UU` でも使える)**: 3 つの版を平文で取り出し (下の `git cat-file --filters <rev>:<path>`。 base = 自分の commit の親、 上流 = `@{u}` の先端、 自分 = 自分の commit)、 `git merge-file -p <自分> <base> <上流> > <merged>` で行単位の 3-way merge を手でかける。 自動で入らないのは両側が同じ位置を変えた所 (多くは末尾の追記同士) だけで、 そこには普通の conflict marker が出る = 追記同士なら両方を順に並べて marker を消す。 上流版を丸ごと取って当て直すのと違い、 **両側に既存 entry の書き換え (記録の道具が印を進めた等) と追記が混ざっていても、 当て直しなしで全部残る**。 merged を作業 tree の file に置いて `git add` → `rebase --continue` (merge なら commit) し、 下の機械 gate で両側の id を照合する (実測: 双方の末尾の追記 + 片側の既存 entry の書き換えが重なった conflict が、 marker 1 か所の手当てだけで解けた)。
+  - ⚠️ **検収は「件数」 でなく「id の照合」** — 両側が 1 件ずつ足していると、 片方が消えても件数は合う。 自分が足した id が最終 file に在ることを名指しで確認する。 ⚠️ **既存 entry の書き換えだった場合は id も件数も変わらない** ので、 どちらの照合も通ってしまう — **書き換えた本文が最終 file に在るか**を見る (= 自分の版の該当 block を別 file に退避しておき、 上流版に当て直してから、 退避した本文と一致するかを確かめる)。
+  - ⚠️ `.gitattributes` の `merge=union` は**効かない** (= union は暗号化バイト列を連結して file を壊す)。 自動 merge 側の解は無い。
+  - **予防**: 暗号化 ledger への追記は「編集 → commit → push」 を 1 単位で閉じる ([#staging-window-race](#staging-window-race) 防御 2 の強化版)。 保持時間がそのまま衝突確率。
+  - **機械 gate** = [`scripts/check-ledger-merge-loss.py`](../scripts/check-ledger-merge-loss.py) — 解決後・commit 前に `python3 … <ledger> --revs HEAD origin/<branch>` で **両側の id が残っているか**を照合する (消えていれば exit 1 + 消えた id を列挙)。 鍵は **`git cat-file --filters <rev>:<path>`** = smudge filter を通すので **git-crypt の repo でも平文が得られる** (`git show <rev>:<path>` は暗号文のままで使えない)。 この 1 点を知らないと「両親と比べられない」 と誤診して機械化を諦める。
+
+- <a id="autostash-foreign-wip"></a>**相手の未 commit 変更が居る tree で `git stash`・`pull --rebase --autostash` をしない** (2026-09-11 追加、 2026-10-28 に言い直し) — autostash は相手の未 commit 変更ごと stash して pop する。 upstream の新 commit が**相手の触っている file** を変えていると、 pop の conflict は相手の file の中で起きる (作業中の file に conflict marker が入り、 index も unmerged になる)。 交差が空でも、 stash から pop までの間は相手の変更が tree から消えていて、 その間の相手の読み書きと食い違う。 自分の commit を `git commit -- <path>` で済ませていても、 push の前の pull で相手を巻き込む。
+  - **自分の commit を出すだけなら pull は要らない**: `git fetch` → `git rev-list --count HEAD..@{u}` が 0 なら `git push`。 遅れていて手元に未 push の commit が無ければ `git merge --ff-only @{u}` (下の交差が空なら、 未 commit の変更はそのまま残って通る)。 未 push の commit もあれば [#foreign-wip-scratch-worktree](#foreign-wip-scratch-worktree) (origin から切った worktree で commit・push) か [#merge-blocked-by-foreign-staged](#merge-blocked-by-foreign-staged) の手順。 <a id="rebase-drops-local-merges"></a>⚠️ **未 push の commit に merge commit (worker の branch を取り込んだもの) が入っているときは `git rebase @{u}` で追いつかない** = rebase は merge commit を落として中の commit を直線に並べ直すので、 取り込みの記録が消え、 記録や依頼書に書いた未 push の hash も全部変わる (実測: 対応表に書いた取り込みの hash が無効になった)。 `git merge @{u}` で追いつくか、 rebase が要るなら `--rebase-merges`。 追いついた後に、 書いた hash を `git log` で引き直す。 実測: 遅れていない repo に push の前の習慣で `pull --rebase --autostash` を打ち、 他の session の未 commit の変更を退避して戻した (pull は空振り。 起動の文が stash を禁じている session だった = 文は打つ瞬間に発火しない)。 機械 = hook [`hooks/shared-tree-stash-guard.py`](../hooks/shared-tree-stash-guard.py) (PreToolUse Bash、 述語と本体 = [`scripts/git-stash-shared-tree.py`](../scripts/git-stash-shared-tree.py)。 未 commit の変更がある tree での stash・autostash を止め、 理由つきの `[stash-ok: <理由>]` だけ通す)。
+  - **検査 = `git fetch` の後、 `git diff --name-only HEAD..@{u}` (upstream が変えた file) と `git diff --name-only` (tree の未 commit 変更) の交差を見る。** 空なら `merge --ff-only` は相手の変更に触れずに通る。 空でなければ取り込まない: 相手に通知して、 相手の commit を待ってから取り込む。 相手の file の conflict を自分で解くのは最後の手段で、 解いたら内容を相手に通知し、 autostash の stash は drop しない (相手の元の作業の控え)。 同じ検査を自動の最新化に入れた例 = [`scripts/repo-sync-sweep.sh`](../scripts/repo-sync-sweep.sh) (交差があれば stash せず「持ち主の commit 待ち」 と報告する)。
+  - <a id="owner-gone-intersect-sync"></a>**持ち主が居ない (閉じた session・無人の job の取り残し) ときに最新化する手順** — 自分で解く最後の手段を、 相手の変更を失わない順で行う: ① 交差した file ごとに、 tree・HEAD・upstream の 3 版から合わせた版を先に作る (`git merge-file -p <tree の版> <HEAD の版> <upstream の版>`。 末尾に追記するだけの記録は `--union`。 暗号化した file は `git cat-file --filters --path=<file> <rev>:<file>` で平文を取る) ② 手元だけの行と upstream だけの行が両方とも版に残っていることを数えて確かめる (1 行でも欠けたら止める) ③ tree の版を控える ④ 交差した file だけ `git checkout -- <file>` で HEAD に戻して `git merge --ff-only @{u}` ⑤ 作った版を書き戻す = 相手の未 commit は新しい HEAD の上の差分として残る (実測 = 衝突も欠けも無く最新化できた)。 控えは書き戻しを確かめた後に消す (個人情報を含む写しを残さない)。 機械化 = [`scripts/intersect-sync.py`](../scripts/intersect-sync.py) (`--trial` = 読むだけ: 交差した file ごとに ①② を行い、 衝突・欠け・stage 済み・binary・削除を verdict にして、 結果を machine-local の記録に書く。 repo の file・index・ref には触らない / `--apply` = 判定が全部 clean で、 交差した file が 30 分以上書かれていない = 持ち主が作業中でないときだけ、 同期の sweep と同じ lock の内側で ③〜⑤。 ff が通らなければ控えから戻す)。 同期の sweep と fleet heartbeat は `--trial` だけを呼び、 A 行と fleet の行に試走の結果を添える = 自動で解く形に繋ぐかは試走の記録 (`--report`) を見てから決める。
+  - <a id="interrupted-fast-forward"></a>**途中で止まった最新化 (index と作業 tree は upstream の commit まで進み、 HEAD だけが残った) は誰の作業でもない = HEAD だけを進めて仕上げる** — 見分け方: 未 stage の変更が無く、 stage 済みの集合が HEAD → upstream のある commit X の差分とちょうど同じで、 index が X の木と同じ (`git diff --cached --quiet X`)。 stage 済みの file の中身が全部 upstream と同じなのが手がかり。 仕上げ方: 旧値を条件に HEAD だけを X へ進める (`git update-ref HEAD X <今の HEAD>` = index と作業 tree は触らない) → `git merge --ff-only @{u}`。 stash・`reset --hard` は使わない。 機械化 = [`scripts/intersect-sync.py`](../scripts/intersect-sync.py) (verdict `interrupted`、 `--apply` は stage 済みの file が 30 分より古く index の lock が無いときだけ) と、 掲示板の道具の fast-forward (`ai-collaboration/board/board_transport.py`、 次の ff が自分で仕上げる)。 実測の原因: `merge --ff-only` が checkout と index の書き込みを終えた後、 HEAD の更新が並列の `git gc` (reflog の整理) の ref の lock とぶつかって死んだ。 その下の原因: macOS の git が自動 gc を裏に回すと、 子が fork の後に異常終了して `.git/gc.log.lock` を残す。 以後の裏の gc は毎回その lock で死ぬので、 repack が一度も終わらずに loose object が溜まり、 git を叩くたびに前景で reflog の整理が ref の lock を取り続ける。 手当て = `gc.autoDetach=false` (setup.sh の段 1c、 本人が値を決めていれば触らない) / 残った lock は、 gc が動いていないことを確かめて消してから `git gc` を前景で最後まで / fleet heartbeat が、 1 日より古い lock・15 日より古い loose object の溜まり・macOS で false でない設定を、 その機械の行に出す。
+  - <a id="adopt-leftover-state-claims"></a>**持ち主の居ない未 commit を自分の commit で引き取るときは、 引用された根拠が実在するかに加えて、 状態の主張 (誰の番・期限・次の一手) をその件の最新のやりとりと照らす** — 実測: 根拠のメールは実在したが、 台帳の「当方の番」 が相手の最新の指示 (「出張の後に」) と食い違ったまま引き取り、 本人に今やることとして伝えた。
+  - <a id="upstream-subsumes-local"></a>**交差があっても、 upstream が手元の変更を全部含んでいれば待たなくてよい** (2026-09-15 追補) — 持ち主が同じ変更を (もっと手を入れた形で) 既に commit・push していて、 手元の tree に元の下書きが未 commit で残っている形。 確かめ方 = `git diff -- <file>` (手元) と `git diff HEAD @{u} -- <file>` (upstream) を並べて読み、 手元の追加・削除の中身が upstream 側に全部あるかを見る (行が一字一句同じである必要はない、 意味が包含されていればよい)。 含まれていれば、 手元の変更を固有の message で stash してから `merge --ff-only @{u}`。 stash の drop は、 持ち主か user が確認してからにする。 手元にしか無い中身が 1 つでもあれば、 上の既定どおり持ち主の commit を待つ。 実測: 1 行の pointer の追記が、 同じ箇所をより詳しく書き換えた upstream の commit に含まれていた。
+- <a id="pull-fetch-head-race"></a>**並列 session が居る repo では `git pull --ff-only` より `git fetch && git merge --ff-only @{u}`** (2026-09-12 追加) — `git pull` は fetch 結果を `.git/FETCH_HEAD` 経由で読むが、 同じ repo で別 session が同時に fetch するとこの file が書き換わりうる。 実例: `git pull -q --ff-only` が `fatal: Cannot fast-forward to multiple branches.` で落ちた (branch の merge 設定は 1 本だけ = FETCH_HEAD の同時書換えと推定、 再現は未確認)。 `merge --ff-only @{u}` は remote-tracking ref を直接読むので FETCH_HEAD に依存しない。 pull が落ちても tree は変わっていないので、 そのまま `merge --ff-only @{u}` で続けてよい。 ⚠️ **`fatal: Cannot fast-forward your working tree.` に続く `run $ git reset --hard to recover.` は打たない** — pull の fetch の間に別の session の commit が HEAD を動かすと出る (実測) 文言で、 打つと共有の作業 tree の他の session の未 commit の変更が消える。 `git status -sb` と `git diff --stat` を読み直し、 tree が無事なら `git fetch` の後に `merge --ff-only @{u}` で続ける。
+  - 実例 2026-09-11: guard の書き損じ ([`shell-env.md#guard-condition-and-chain`](shell-env.md#guard-condition-and-chain)) で自分の commit が走らないまま、 同じ行の `pull --rebase --autostash` だけが走った。 upstream の 3 commit が、 別 session が作業中の hook 規約を変えていて、 pop が front matter の summary 1 行とその生成物 (conventions の README) で conflict した。 両側の追記を合わせた 1 行に解き、 index を reset して相手の変更を unstaged に戻し、 stash は残して相手 session に通知した。
+  - 2 つ目の形: `pull --rebase` が `Your configuration specifies to merge with the ref 'refs/heads/<branch>' from the remote, but no such ref was fetched.` で落ちた
+    (実測: 毎分 commit して pull する無人の job の clone で、 対話の session が同じ分に手で `git fetch` を打った。 次の分は通った)。
+    無人の job の pull も `git fetch && git rebase --autostash @{u}` にする (同じ機械の session の開始の同期も同じ clone を fetch する = session が開くたびに競合しうる)。
+    同じ文は remote に branch が無いときにも出る = 走り直して通るかで分ける。
+- <a id="merge-blocked-by-foreign-staged"></a>**手元が ahead と behind の両方のとき、 index に相手の stage が 1 件でもあると非 fast-forward の merge (`pull`) は始まらない** — upstream が変えた file と交差していなくても、 `Your local changes to the following files would be overwritten by merge` に相手が stage した file が出る (実測)。 fast-forward が止まるのは、 手元の変更と交差した file があるときだけ (同じ実測で、 交差しない stage は出なかった)。 相手の commit を待てないなら、 merge を live の index の外で作る:
+  `t=$(git merge-tree --write-tree HEAD @{u})` (git 2.38 以上。 conflict なら終了値 1 で、 そこで止める) → `c=$(git commit-tree $t -p HEAD -p @{u} -m '<msg>')` → `git push origin $c:<branch>` → `git update-ref HEAD $c <元の HEAD>` (旧値を渡す = 間に HEAD が動いていれば失敗する) → `git checkout $c -- <HEAD と $c で中身が違う file>` で、 その file だけ index と tree を merge の版に揃える (相手が stage した file には触れない、 実測)。
+  ⚠️ 相手が stage した file (未 commit の変更も) を upstream も変えているなら、 最後の checkout が相手の作業を上書きする = その場合は `git push origin $c:<branch>` で止める (update-ref も checkout もしない)。 手元の HEAD は自分の commit のまま = upstream に対して遅れているだけになり、 相手が自分の変更を commit した後に追いつく (相手の変更と upstream の重なりは、 押し出す前からある相手の側の問題で、 この push は増やさない。 実測)。 交差の検査 = [#autostash-foreign-wip](#autostash-foreign-wip)。 commit-tree は hook を呼ばないが、 この merge が足すのは両側の gate を通った commit の中身だけ。 同じことは [#foreign-wip-scratch-worktree](#foreign-wip-scratch-worktree) の使い捨て worktree でもできる。
+- <a id="partial-undo-by-reverse-patch"></a>**commit を戻すとき、 並列 session の居る clone と、 残すものが混ざった commit では `git revert` でなく file ごとの逆 patch で戻す** — `git revert` は index に相手の stage が 1 件でもあると、 戻す commit と関係ない file でも `your local changes would be overwritten by revert` で止まり、 戻す file に相手の未 commit の変更があっても止まる (実測。 相手の変更が別の file の作業木にあるだけなら通り、 commit には戻した file だけが入る)。 revert は commit 単位でしか戻せないので、 同じ commit に残すもの (戻すと参照の直しがもう 1 回要る付け替えなど) があるときも使えない。 手順:
+  ① `git show <commit> -- <戻す path…> | git apply -R --check` が通ってから同じ形で当てる (相手の stage はそのまま残る、 実測)。 同じ file を戻す commit が複数あれば新しい commit から順に当てる
+  ② 確かめる = `git diff <戻す中で最も古い commit>^ -- <file>` の hunk が 0 (戻す前と同じ中身)。 その後に残す commit が同じ file を変えていれば、 `<commit>^` からの差分の `+` / `-` の行が残す commit の差分の行と一致することを見る
+  ③ 戻した部品の名前・option の名前の残りを `command grep -r` で探す (呼び元の file も含めて) ④ commit は path 指定 ([#staging-window-race](#staging-window-race))。 残すものと同じ行に入った文 (規約の 1 行・表の 1 行) は逆 patch でなく手で直す。
+- <a id="ordinary-divergence-replay"></a>**通常の分岐 (手元の未 push の commit + upstream の前進、 書き換えの痕跡なし) は、 退避 → 載せ直し → 揃える の順で解く** — 相手の未 commit の変更がある clone では `pull --rebase` が始まらず ([#merge-blocked-by-foreign-staged](#merge-blocked-by-foreign-staged))、 暗号化した file は 3-way できない ([#encrypted-file-no-three-way-merge](#encrypted-file-no-three-way-merge)) ので、 手で rebase / merge しない。
+  ① 手元にしか無い commit (`git log @{u}..HEAD`) の書き手 (trailer の session・件名) を見て、 同じ中身が別の session・別の機械から既に upstream に入っていないかを確かめる (入っていれば載せ直さない = 二重の記録になる) ② 手元の branch を退避する (`git branch backup/<machine>-diverged-<日付>`。 消すのは owner) ③ upstream に無い分だけ、 origin から切った worktree で載せ直す ([`commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) `--apply`。 暗号化 file も平文で当てる) ④ `git reset --keep @{u}` で手元を揃える (未 commit の変更が upstream の変更と重なる file があると git が止める = その file は [#owner-gone-intersect-sync](#owner-gone-intersect-sync) の手順で解いてから) ⑤ 手元に閉じ込めたのが無人の書き手なら、 閉じ込めた原因 ([#unattended-writer-stale-base](#unattended-writer-stale-base)) を別に直す。
+  session 開始の同期は、 書き換えの痕跡の無い分岐の 1 行に、 手元にだけ在る commit の数・最古の古さと本節を添える (判定 = [`scripts/lib/git_rewrite_follow.py`](../scripts/lib/git_rewrite_follow.py) の `follow_repo`。 実測: 対応表や forced-update の記録が在るだけで通常の分岐を「書き換えられた = pull / rebase をするな、 人が揃える」 と言い続け、 その間に無人の書き手が手元に閉じ込めた commit に誰も気づかなかった)。
+- <a id="stash-push-noop"></a>**`git stash push` は stash するものが無いと rc=0 のまま何も作らない — 直後の素の `git stash pop` は他人の stash を pop する** (2026-09-12 追加) — 「stash → 何か → pop」 を自動で回す script (session 開始時の auto-pull 等) が 2 本同時に走ると、 後発は先発が stash した後の clean な tree を stash しようとして空振りし、 後発の pop が**先発の stash** を pop する。 先発の pop は空振りし、 それを conflict と読むと「変更は stash に残っている」 と誤報する (実態 = stash list は空・stash commit は dangling・変更は worktree に戻っている)。 scratch で 2 process に sleep を差して決定的に再現した。
+  - **自分の stash を自分で特定する**: message に固有 tag (時刻 + pid + 乱数) を入れて push し、 `refs/stash` 先頭の subject がその tag でなければ「作られなかった」 として触らずに止まる (push 前後の sha 比較では、 間に他人が stash すると見分けられない)。 pop / apply は sha から引いた ref で行う (`git stash list --format='%gd %H'` で sha → `stash@{N}`)。
+  - **「stash に残っている」 と言う前に stash list で確かめる**。 無ければ sha を出す: 中身 = `git stash show -p <sha>` / worktree との比較 = `git diff <sha> -- $(git stash show --name-only <sha>)` (空なら同じ変更が在る。 `git diff <sha>` 全体は HEAD が進んだ分の差も出るので使えない) / 戻す = `git stash apply <sha>` / sha を見失ったら `git fsck --unreachable --no-reflogs`。 pop conflict 後の tree は unmerged なので `git checkout -- .` は効かない。
+  - `pull --rebase --autostash` の autostash は stash list を経由せず sha で戻すので、 この事故は起きない (scratch で確認: 他人の stash は残る)。 危険なのは `git stash push` と素の `pop` を手で並べる側。
+  - 参照実装 = [`scripts/repo-sync-sweep.sh`](../scripts/repo-sync-sweep.sh) (test に空振り stash / 途中で消えた stash の case)。 並列に走る hook 側の一般則 = [hook-authoring.md#cross-session-hook-concurrency](hook-authoring.md#cross-session-hook-concurrency)。
+- <a id="pathspec-commit-ignores-index"></a>**path 指定の commit (`git commit -- <path>`) は、 その path の作業木をそのまま commit し、 index の状態を見ない** — 上の防御の裏返し (実測 5 つ)。 ① pre-commit hook が作業木の file を直して再 stage しても、 commit に入るのは作業木の版 (= 同じ中身) だが、 **index には hook が直す前の版が残り `git status` が `MM` になる** (`git restore --staged <path>` で揃える)。 ② **`git rm --cached <file>` の後に path 指定で commit すると、 file は作業木に在るので追跡から外れない** (外したつもりで tracked のままだった)。 追跡をやめる commit は index を経由する: `git rm --cached …` → `git diff --cached --name-only` が自分の path だけであることを見てから、 path を付けない `git commit`。 ③ 組み直した PDF など commit したくない file を path に並べると、 その作業木の版が入る (build PDF の gate が止めるのは正しい動き)。 ④ **hook に止められた commit の前の `git add` は index に残る** — `git add <新規> && git commit … -- <paths>` が pre-commit や commit-msg の検査で止まると、 新規の file は staged のまま残る。 その file の名前を変えて path 指定で commit し直しても、 旧名は index に `A` のまま残り (`git status` が `AD`)、 次に path を付けない commit をした session に入る。 止められたら、 名前を変える・打ち直す前に `git restore --staged <旧 path>` で index から外す。 ⑤ **`git mv` で名前を変えた後は、 旧名を `git add` に渡さない** — 旧名は index にも作業木にも無いので `git add -A -- <旧名> <新名>` は `pathspec '<旧名>' did not match any files` (rc 128) で全体が止まり、 新名も stage されず、 `&&` で繋いだ commit も走らない。 `git commit -- <旧名> <新名>` は HEAD にある旧名を受け付け、 改名として commit する (他の stage 済みの file は入らない)。 改名の後に新名を直したなら `git add -- <新名>` だけを打ち、 commit の path には旧名と新名を並べる (実測 = 締めの scratch の repo で再現)。
+- <a id="concurrent-fetch-ref-lock"></a>**同じ repo を 2 process が同時に fetch すると片方が即失敗する** (2026-09-12 追加) — `error: cannot lock ref 'refs/remotes/origin/<branch>': is at X but expected Y` (scratch で 6/6 回)。 相手の fetch が ref を更新した直後なので、 timeout (rc 124 / 137 / 143) と区別して 1 秒おいて 1 回だけ取り直せば通る。 これを「fetch 未完了 = timeout」 と報告すると原因を誤る。 **push でも同型**: `! [remote rejected] main -> main (cannot lock ref 'refs/heads/main': is at X but expected Y)` は別の push と重なった印。 同じ clone の push は手元の branch を送るので、 自分の commit が相手の push に乗って届いていることがある (実測) = 打ち直す前に `git fetch` して `git branch -r --contains <commit>` を見る。 **commit でも同型** (2026-09-14 実測): 並列 session の commit と重なると `fatal: cannot lock ref 'HEAD': is at X but expected Y` で落ちる。 自分の commit は作られず、 **自分が stage した entry は index に残る**。 取り直す前に `git diff --cached --name-only` を見直す — 実測では、 取り直すまでの間に相手が `git add` した新規 file 2 本が同じ index に入っていて、 path を付けない `git commit` を再実行していれば相手の file まで自分の commit に入っていた。 取り直しは path 指定 (`git commit -- <path>`) で行う。
+- <a id="absence-check-staleness"></a>**「まだ無い」 の確認は、 他者が書き込んでいる場所 (並列 session が書いている repo、 返信が続いているメールのスレッド) では数分で腐る** (2026-09-12 追加) — 規約を足す前の定番の検査 (= 同じ規則が既に層1 に在るかを grep して、 無ければ書く) は、 **substrate が自分だけのものである**ことを暗黙に仮定している。 4 session が同じ repo へ同時に hoist している状況ではその仮定が壊れ、 grep した時点では真だった不在が、 書く時点では偽になる。 [`convention-design-principles.md#absence-channel-coverage`](../docs/convention-design-principles.md#absence-channel-coverage) が不在主張の **channel 軸** (= 探した場所が足りない) なら、 これは **時間軸** (= 探した場所は正しいが、 その後に増えた)。 channel を完璧にしても防げない。
+  - 実例: 複数の盲検 sandbox が同時に hoist した回。 session A が「この trap は層1 に未収録」 と grep で確認し、 その結果を peer に「既存被覆が無いことを確認しました」 と伝えた。 約 10 分後に別 session の commit (`eadf365`) が `web-tools.md` に同じ内容の行を足し、 peer が確認した時には**在った**。 どちらの session も誤っていない (A の grep は当時の tree に対して正しかった) が、 **A の報告文は時刻を含まなかったので、 恒久的な事実として読まれた**。
+  - **規律 1 = 不在の報告に観測時刻と commit を添える** (「`<commit>` 時点の `conventions/*.md` に無し」)。 sweep template 「Verified = ___ / NOT verified = ___」 の scope 欄に**いつ**を足すのと同じこと。
+  - **規律 2 = 書く直前にもう一度引く**。 grep と Edit の間に他 session の commit が入りうるので、 確認は「着手の許可」 ではなく「着手前の再実行が要る手順」 として扱う (= [`convention-design-principles.md`](../docs/convention-design-principles.md) の use-time verify: fact を運ばず手順を運ぶ)。
+  - <a id="mailbox-absence-as-of"></a>**受信箱でも同じ形** — 「新しい返事は来ていない」 は、 返信が数分おきに来るスレッドでは、 検索した後・答えを書いている間に偽になる (実測: 検索の条件は正しく、 便が検索の直後に届いた)。 規律 1 = 答えに確かめた時刻を添える (「HH:MM 時点では」 の形。 受信箱を読む道具は出力に読んだ時刻を出しておく = 書く側が時刻を拾える)。 規律 2 = 答えを書き終える直前と、 送信の直前にもう一度引く (送信の側の機械 = [`gmail-sending.md#reply-newer-in-thread`](gmail-sending.md#reply-newer-in-thread))。
+  - **規律 3 = 分担の宣言時に、被覆調査の結果を相手へ渡さない**。 渡すなら「私の grep では見つからなかったので、 足す前にそちらで引き直してください」 の形にする (= 相手が引き直せば新しい方を見る)。 実例では peer が引き直したので二重追加は起きなかった。
+  - <a id="pin-the-version-you-read"></a>**他者が編集中の file を読んで判定するとき (点検・検収・査読) も同じ形** — 判定は読んだ時点の文に対するもので、 相手は判定を書いている間も書き足す。 規律 1 = 読むときに file の中身の hash (`git hash-object <file>`。 未 commit の変更があると HEAD の hash では版を区別できない) を取り、 写しを一時 dir に置く。 規律 2 = 報告を出す直前に hash を取り直し、 変わっていれば写しと `diff` して、 変わった文だけを判定し直す。 報告には判定した版の hash と、 途中で変わったことを書く (実測: 点検の途中で相手が同じ節を書き足していて、 提出の直前の取り直しで見つかった。 その後の手直しの確認も、 同じ写しとの `diff` で変わった文だけに絞れた)。
+  - <a id="insert-after-last-line-reorders"></a>**新しい節を足す位置を前の節の最後の行で決めると、 読んだ後に並列の session がその節の末尾に足した行が、 新しい節の下に回る** — 編集の道具は anchor の文字列の直後に入れる。 「読んだ後に disk で変わった」 と知らせるが当てるのは止めない (実測: 前の節に足された 2 項目が新しい節の末尾に付いた)。 規律 = 節の末尾に足すときは、 前の節の最後の行でなく次の見出し (無ければ file の末尾) を anchor にする。 「読んだ後に変わった」 と出たら、 当てた後に節の境目を読み直し、 前の節の項目が新しい節の下に来ていれば戻す。
+- <a id="concurrent-closing-sweeps"></a>**締めの sweep (知見を正本へ上げる・参照を整える) を何本も同時に走らせるときは、 書く file を共有の場に先に宣言し、 先に宣言した側が持つ** — 締めの sweep はどの session も同じ少数の file (入口の CLAUDE.md・生成した索引・層1 の規約) に向かう。 そのため並列で回すと、 相手の未 commit の hunk が自分の commit に入り ([#staging-window-race](#staging-window-race))、 同じ知見が別々の file に二重に上がる (上の時間軸)。 実測。
+  - **書く前に宣言する**: 書く path (再生成する索引・registry も含む) を、 全 session が読む場 (掲示板・共有の log) に置く。 自分の宛先 (相手が direct message で使う名前) と、 上げる題を 1 行添える。 宣言は lock ではない。 読まない writer は止まらない。 効くのは、 書く直前の読み直し (規律 2) を 1 回の読みで済ませる索引としてだけ。
+  - **先着が持ち、 後着は並ぶ**: 同じ path (directory はその下全部) を後から宣言した側は、 そこに書かない。 同じ知見なら、 足りない根拠だけを持ち主へ渡す。 別の知見なら、 持ち主が手放すのを待ち、 **読み直してから**書く。 持ち主の session が死んでいれば待たない (宣言に時効を付ける。 その上で相手の残した hunk を [#temp-index-commit](#temp-index-commit) で避ける)。
+  - **手放すときに次を起こす**: 共有の場は push しないので、 手放す側が次の持ち主に 1 行送る。 最後に手放した 1 本が、 その回の全員の commit をまとめて 1 回だけ横断する (生成物を clean tree で `--check` = [#regenerated-docs-foreign-untracked](#regenerated-docs-foreign-untracked)、 壊れた link)。 同じ横断を N 本がそれぞれ回すのを、 1 回にまとめる。
+  - **宣言の場に機密を載せない**: 暗号化した file の path は hash にして載せる (衝突は検出でき、 名前は出ない)。 外に出せない場所 (local-only の作業 dir・認証情報) は宣言せず、 相手と直接調整する。
+- <a id="free-declaration-is-not-unowned"></a>**宣言の無い file でも、 それを作った依頼が動いていれば担当が居る** — 宣言は書いている間だけ持つもので、 依頼の担当 (別 vendor の agent を含む) は宣言を手放して CI の結果を待っていることがある。 宣言が無い = 今は誰も書いていない、 であって、 その file の担当が居ない、 ではない。 他の依頼が足した file (test・script) を直したら、 その依頼の thread に何をなぜ直したか (commit・原因) を書き、 相手が動いていれば 1 行送る (直した側だけが知っている状態にしない。 実測: 他の agent が足した test を CI のために直し、 知らせたのは後からだった)。
+- <a id="live-executed-tools-edit-in-worktree"></a>**他の session が live の checkout から実行する道具 (共有の engine・hook・forwarder の呼び先) は、 live の tree で書き換えない** — 保存した瞬間から他の session がその版を実行するので、 複数 file の変更の途中 (片方だけ書き換わった数分) に他の session の操作が失敗するか、 誤った結果を返す (実測: engine の 1 file だけが先に新しくなった間、 別 session の読みが 0 件になり、 その session の投稿が「依頼が見つからない」 で拒まれた)。 使い捨ての worktree (別 branch) で直して test を通し、 1 commit として live に入れる ([#foreign-wip-scratch-worktree](#foreign-wip-scratch-worktree) と同じ置き場)。 repo への symlink で効く hook も同じ (保存した時点で全 session の次の発火に乗る)。 受け手が live で書き換えているのに気づいたら、 その session に「worktree に移して main を HEAD に戻す」 を 1 行で頼む。
+- <a id="foreign-wip-scratch-worktree"></a>**live checkout に相手の未 commit 変更や未 push commit が居るときは、 自分の変更を origin から切った使い捨て worktree で commit・push する** (2026-09-12 追加) — `git fetch && git worktree add --detach <tmp> origin/<branch>` → 変更 → 検査 → commit → push 直前に再 fetch して rebase → `git push origin HEAD:<branch>` → `git worktree remove <tmp>`。 live の tree には触らない (= pull も autostash も起きない、 [#autostash-foreign-wip](#autostash-foreign-wip) の迂回路)。 **機械化** = [`scripts/commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) (`--copy SRC:DST` か `--apply CMD`、 `--check CMD`、 git-crypt の復号、 push 直前の再 fetch + rebase、 衝突したら push せず worktree を残す、 live に置いた未追跡 copy の後始末まで。 丸ごとの `--copy` は DST の live HEAD 版と origin 版が違えば拒否する = upstream の変更を黙って巻き戻す経路と、 live の未 push commit の hunk を公開する経路を両方止める)。 ⚠️ **live checkout で `git push` すると、 local branch に居る相手の未 push commit も一緒に公開される** (2026-09-13 near-miss: live から push した回の多くは behind が 0 であることしか確かめていなかった。 事後監査 = [`scripts/audit-push-provenance.py`](../scripts/audit-push-provenance.py) で、 その session の commit を載せた 40 回の push 範囲に他 session の commit は 0 件)。 live で push するなら最低限 `git log @{u}..HEAD` が自分の commit だけであることを確かめる。 5 点:
+  - **Codex の permission 接続**: helper が default branch へ送る `git push origin HEAD:main` / `HEAD:master` は、直接の `origin main` / `master` と publication target が同じ。prompt-free execution rule の正本は [`codex/PARITY.md#normal-git-push-rule`](../codex/PARITY.md#normal-git-push-rule) で両形を同じ positive control にする。`HEAD:<feature>` まで一般化しない。
+  - live の tree に自分が置いた untracked copy は、 push 後に `git cat-file --filters origin/<branch>:<path> | cmp - <path>` で一致を確かめてから消す (残すと相手の pull が「untracked working tree files would be overwritten」 で止まる。 `git show` は保存された blob を返すので、 git-crypt の file では暗号文と比べて、 同じ中身でも違うと出る = 実測)。 live で**追跡中の file** を直接編集して出したなら消さない: 同じ中身の変更が unstaged のまま残ると自分の `merge --ff-only` が「would be overwritten」 で止まり、 `git add -- <path>` で index を origin の blob に揃えると fast-forward が通って clean になる (2026-09-13 実測、 helper は一致を確かめてこの手順を出すだけで live には触らない)。 ⚠️ **その file に相手の hunk も残っているときは `git add` でも止まる** (index = 自分 + 相手 で、 HEAD とも origin とも違う)。 file の中身を退避 → `git checkout -- <path>` → `merge --ff-only` → 退避した中身を書き戻す、 を**同じコマンド行で**打つと、 live は origin + 相手の未 commit hunk だけになり、 相手から見た file の中身は変わらない (実測。 退避から書き戻しまでの間に相手が書いた分は失われるので、 行を分けない)。 `git add` を先に試して止まったら、 `git restore --staged -- <path>` で index を戻してから行う (相手の hunk を stage したまま残さない)。
+  - 生成物 (tree の件数・索引) は worktree 側で再生成する。 rebase で衝突したら upstream 側を取って再生成し直す (手で混ぜない)。 2026-09-14 実測: helper は rebase を**中断して** worktree を残すので、 worktree で `git rebase origin/<branch>` を打ち直し、 衝突した生成物は `git checkout --ours -- <file>` (rebase 中の `--ours` は upstream 側で、 向きが逆に見える) → 再生成 → `git add` → `GIT_EDITOR=true git rebase --continue` → 合わさった状態で検査を再実行 → push。 この経路では `--remove-live-copies` が走らないので、 push 後に live の copy を origin と照合して消し、 追跡中の file は `git add` で index を揃えてから `merge --ff-only` する (helper の衝突メッセージが同じ手順を出す)。
+  - <a id="worktree-lacks-build-products"></a>**worktree には ignore された build 物 (組んだ PDF など) が無い** — doc の link が build 物を指す repo では、 worktree で作り直した索引の link の検査が、 その link を欠けと数える (実測: 索引の記録の欠けた link が 0 から 1 に増え、 他の数は同じだった)。 作り直した生成物は commit 済みの版と比べ、 違いが build 物への link だけなら、 worktree で先に組んでから作り直すか、 build 物のある tree で作った版を使う (他の数が同じことを確かめてから)。
+  - 同じ file に相手の hunk が混ざっていて `git commit -- <path>` が使えないときは、 **自分の変更を (old, new) の pair に書き、 この script の `--apply` で origin 版に当て直す** (`--apply 'python3 "$LIVE/scripts/apply-text-pairs.py" <path> <pairs.py>'`)。 pair は相手の変更を含まない origin 版に当たるので、 相手の変更が自分と**同じ行**にあっても混ざらない (hunk 単位の staging では分けられない)。 live の index にも working tree にも触れない。 2026-09-14 実測: 相手の hunk が同居する SESSION.md をこの形で出し、 その間に積まれた相手の commit も push 直前の rebase で越えた。 index に直接入れる手順 (`git show HEAD:<path>` に自分の hunk だけを足した版を `git hash-object -w` → `git update-index --cacheinfo 100644,<blob>,<path>` → commit、 相手の hunk は working tree に残る) は、 **path を付けない commit で終わるので shared index の race が残る** — 同日、 その commit が相手の commit と重なって lock で落ち ([#concurrent-fetch-ref-lock](#concurrent-fetch-ref-lock) の commit 版)、 取り直すまでに相手の `git add` が同じ index に入った。 使うなら commit と同じコマンド行で `git diff --cached --name-only` が自分の path だけであることを確かめる。 実 index を経由しない形 (一時 index) と、 その道具 = [#temp-index-commit](#temp-index-commit)。 ⚠️ **git-crypt の file でも、 まず [`scripts/commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) を使う** (git-crypt repo を復号済みの使い捨て worktree で扱い、 live の index に触れない = 以下の注意が要らない)。 index に直接入れる手順を使うなら **2 点が変わる** (実測): ① `git show HEAD:<path>` は暗号文を返すので、 元にする版は `git cat-file --filters HEAD:<path>` (smudge を通した平文) から作り、 `git hash-object -w --path=<path> <tmp>` と **`--path` を付けて** clean filter (= 再暗号化) を通す。 ② **平文の diff を `git apply --cached` で index に当ててはいけない** — index の blob は暗号文なので、 当てた結果は壊れた blob になり、 次の `git diff --cached` が `git-crypt: error: encrypted file has been tampered with!` で落ちる。 当ててしまったら commit せずに `git reset -q -- <path>` で index の entry だけ HEAD に戻す (working tree の編集は残る)。 <a id="origin-already-has-my-hunk"></a>⚠️ **当て直す前に、 origin 版がすでに自分の変更を含んでいないかを見る**: 相手が同じ file を `git commit -- <path>` すると、 working tree にあった自分の未 commit の変更ごと相手の commit に入る。 その origin 版に手書きの置換で同じ変更を足すと二重に入る (実測: 置換の直前の文字列を目印に足したので、 元の文の直後に同じ文がもう 1 つ入った)。 `apply-text-pairs.py` は「再実行で二重に入る」 pair を拒否するので、 手書きの置換で代用しない。 commit 後は `git show HEAD:<path>` で自分の文の出現回数を数える (`grep -c` は一致した**行**の数なので、 同じ行の中で 2 重になっても 1 と出る。 `grep -o '<文>' | wc -l` か、 python の `str.count`)。
+  - **自分で切った worktree の変更をこの script に渡す**: worktree を session の folder の外 (一時 dir) に置くと、 単独の `cd` は次の呼び出しに残らず ([#regenerated-docs-foreign-untracked](#regenerated-docs-foreign-untracked) の `--check` の文と同じ)、 `cd <wt> && git commit` は allow に当たらず classifier の判定に回る ([`claude-code-permissions.md#cd-with-git-goes-to-classifier`](claude-code-permissions.md#cd-with-git-goes-to-classifier)) = その worktree では commit しない。 直して test を通したら、 差分を `git -C <wt> diff > <patch>` で書き出し、 `--apply 'git apply -3 <patch>'` で渡す (`-3` = 上流が近くの行を変えていても 3-way で当たる。 素の `git apply` は文脈の行が変わっただけで落ちた、 実測)。 `--copy SRC:DST` の SRC は今の作業 dir からの相対なので、 一時 dir の file は絶対 path で書く。
+  - worktree で検査すると、 checkout の dir 名・置き場所に依存する test が**落ちる / 空振りで通る**ことがある。 手順の不備ではなく test 側の欠陥なので、 そちらを直す ([hook-authoring.md#test-root-not-parent-dir](hook-authoring.md#test-root-not-parent-dir))。 直るまでは、 worktree と live の FAIL の**差**だけを自分の変更の影響として読む。
+  - **git-crypt の repo では `git worktree add` が smudge で落ちる** (key は本体の `$GIT_DIR/git-crypt` にあり、 worktree 自身の git-dir からは見えない)。 `--no-checkout` で作り、 key の dir を symlink してから checkout すると復号済みの worktree になる (2026-09-12 実測、 `git status` も clean):
+
+        git worktree add --no-checkout --detach <tmp> origin/<branch>
+        ln -s "$(git rev-parse --path-format=absolute --git-common-dir)/git-crypt" \
+              "$(git -C <tmp> rev-parse --path-format=absolute --git-dir)/git-crypt"
+        git -C <tmp> checkout
+
+    `-c filter.git-crypt.smudge=cat` で迂回する手もあるが、 暗号のまま checkout されるので、 `status` / `commit` / `rebase` のたびに clean 側の `-c` も付け続ける必要がある (付け忘れると clean filter で落ちる)。
+
+  - **原稿と PDF の並行作業**: 主ファイルと最終ビルドは同じ担当が書き、独立な追加内容は別の include file に分ける。各担当が自分の範囲を進められるようにし、追加依頼のたびに相手の作業全体を止めない。ビルド終了前の PDF・log を監査結果として確定せず、最終 source・log・PDF の組を確認してから生成レポートを作る。hash や mtime は観測した組の識別であり、それだけでは同一ビルドの証明にならない。
+  - **古い研究ブランチからの統合**: 最新の受入先の定義・訂正・差分を先に読み、独立な成果と共有ファイルへの必要な変更を区別する。成果の輸送のために古い本文を丸ごと戻さない。作業場所や担当に関する最新の owner 指示は引継ぎ記録へ反映し、古い委譲時の制約を現在の指示として再発火させない。権限と承認の制約 ([manuscript-claim-ownership.md](manuscript-claim-ownership.md) の裁定の要件、規則の文書の保護) は「古い委譲時の制約」に当たらず、委譲の時期に関係なく効き続ける。
+  - <a id="origin-worktree-live-copy"></a>**worktree で push した変更を、 live の tree に未 commit のまま残さない (live copy)** — 台帳を書く道具は live に書くので、 書いてから worktree で当て直して push すると、 live には同じ変更が未 commit で残る (手元に commit してから `git reset HEAD~1` で外して worktree に回した時も、 mixed の reset は変更を作業 tree に残す)。 live の HEAD から見ると upstream が同じ file を変えた形なので、 session 開始の同期は「未 commit の変更が upstream の変更と重なる」 で最新化を止め、 次に同じ file を書く session も同じ道を通って live copy を足していく (実測 = 共有の clone に live copy が溜まり、 人が揃えるまで遅れたままだった)。 push の後に live の自分の hunk を外す (その file に相手の変更が無ければ `git checkout -- <file>`、 あれば自分の hunk だけを逆に当てる)。 <a id="origin-worktree-untracked-copy"></a>**新しい file を出したとき、 live の元の file は untracked なので `checkout --` は効かない** (pathspec が無いと止まる) — upstream に同じ path が入った後は、 中身が同じでも、 その clone の fast-forward・rebase (autostash は untracked を退避しない)・`reset --keep` が全部 「untracked working tree files would be overwritten」 で止まる (実測 = 毎時の無人の書き手の rebase が止まり続け、 commit が手元に積もった)。 外し方 = `git cat-file --filters @{u}:<path> | cmp - <path>` で同じことを確かめてから (平文で比べる = git-crypt の file も同じ)、 消して同じ command の中で `git merge --ff-only @{u}` (作業木から file が消える間を作らない。 遅れた live でその file を読む相手がいることがある)。 ff できない clone では [#ordinary-divergence-replay](#ordinary-divergence-replay) の中で消す。 [`commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) は push の後、 残った元の file にこの外し方の 1 行を出す (`[live] … UNTRACKED`、 追跡中の file の知らせとは分けて出す)。 session 開始の同期 ([`repo-sync-sweep.sh`](../scripts/repo-sync-sweep.sh)) は A 行でその file を名指し、 fleet heartbeat の点呼 (`untracked_block`) は件数を他の machine に出す ([`multi-machine-state.md#fleet-heartbeat`](multi-machine-state.md#fleet-heartbeat))。 [`commit-from-origin-worktree.py`](../scripts/commit-from-origin-worktree.py) は push の後に live に同じ変更が残っていれば `[live] … UNCOMMITTED` の 1 行で知らせる (live には触らない)。
+  - <a id="script-writes-count-as-touch"></a>**script で書いた file も「この session が触った repo」 に数える** — turn の終わりの未 commit の催促 ([`hooks/session-commit-nudge.sh`](../hooks/session-commit-nudge.sh)) は Edit / Write で触った repo しか知らない。 Bash から呼ぶ道具 (台帳の記録の道具など) が書いた file は数えられず、 書いたまま別の仕事に移った session が 1 日以上 commit しなかった (実測 = その未 commit の変更が upstream の同じ file と重なって同期を止め、 別の機械の session が同じ記録を二重に書いた)。 file を書く道具は [`scripts/lib/session_touch.py`](../scripts/lib/session_touch.py) の `register(<書いた path>)` を呼ぶ (例 = `record-reply.py` の `--apply`)。
+
+- <a id="session-provenance-trailer"></a>**事後追跡 = commit message の trailer に session id を焼く** (2026-09-10 追加) — 上の防御は「巻き込みを起こさない」 側で、 **起きてしまった後に読み解く**手段が別に要る。 並列 session の commit は author が全部同じ人間に潰れる (= git は「誰の hunk か」 を保持しない) ため、 事故の再構成が transcript 漁りと記憶になる。 `prepare-commit-msg` hook で 1 行足すと機械的に読める:
+
+      Agent-Session: claude:<native-session-id>
+      Agent-Model: claude-opus-<version>
+      Agent-Effort: xhigh
+
+  - **push の監査**: [`scripts/audit-push-provenance.py`](../scripts/audit-push-provenance.py) `--session <id> --since <時刻>` は、 各 repo の remote-tracking ref の reflog (`update by push`) で push 1 回ごとの範囲を取り、 その session の commit と他 session・trailer 無しの commit が**同じ push で公開された**範囲を列挙する (誰が push したかは記録されないので「混ざった範囲が公開された」 の意味。 別 clone・別 machine の push と期限切れの reflog は見えない)。
+  - **読み方**: `git log --format='%h %(trailers:key=Agent-Session,valueonly) %(trailers:key=Agent-Model,valueonly) %(trailers:key=Agent-Effort,valueonly)'` で commit ⇄ agent/session/model/effort の対応表。巻き込みが疑われる commit を `git log -S '<消えた文字列>'` で特定したら、その commit の agent namespace + native session id が「吸った側」で、自分の値と違えば race が確定する。Claude では native id が transcript の file 名でもあり、Codex では task/session の native id として逆引きの入口になる。**model と effort は provenance の一部**だが判断主体ではない。値を runtime から確定できない場合は設定既定を actual と偽らず `unknown` を焼く。公式 hook が active model を供給する新規 Codex commit では欠測をtransport failureとしてwarningするが、hookやlocal state自体が利用不能な場合までcommitを止めない。
+  - **host / account / surface は書かない**。 session id から transcript を引けば冒頭の自己同定 stamp に載っており、 commit に焼くと公開 repo で機器名 (しばしば人名を含む) を晒す経路が 1 本増えるだけ ([multi-account-machine-surface.md](multi-account-machine-surface.md) I7 = 公開面には具体値でなく属性で書く)。 この判断の副産物として public / private の出し分けが不要になり、 **出し分けの設定ミスで漏れるという事故の型そのものが消える** (= 全 repo で同一挙動)。 一般則 = [`convention-design-principles.md §8.34`](../docs/convention-design-principles.md#context-branch-as-leak-path)。
+  - **これは carrier の記録であって帰属ではない**。 trailer が言うのは「どの経路を通って commit されたか」 だけで、 内容を決めたのは通常 human である。 commit author を判断主体と等値しない規律をそのまま適用する ([actor-attribution.md](actor-attribution.md))。
+  - **no-op / unknown の読み方**: supported session id が無ければ trailer 自体を足さない。session id はあるが metadata を確定できなければ `unknown` を書き、欠落を「人手 commit」や既定値へ silent に畳まない。新規 Codex commit の active model は公式 cache と exact-session local fallback の両方から欠けた時にwarningを出すが、`Agent-Model: unknown` を残してcommitは続行する。message に既に `Agent-Session:` または legacy `Claude-Session:` / `Codex-Session:` があれば追記しない (= rebase/cherry-pick/通常 amend で増殖せず、運ばれた最初の session が残る)。`git commit --amend -m` は message 全体を置換するため、元 trailer が hook input に来ない Git 経路では amending session の新 block になる。したがって **trailer 無しだけでは、人手 commit と未導入/未対応 runtime を区別できない** — audit で hook 配線を別に確認する。
+  - 実装・配線・検査の全所有表 = [`codex/PARITY.md#session-provenance-implementation`](../codex/PARITY.md#session-provenance-implementation)。中心実装は [`scripts/session_provenance_cache.py`](../scripts/session_provenance_cache.py) (model/effort の解決順とcache) と [`scripts/prepare-commit-msg-session.sh`](../scripts/prepare-commit-msg-session.sh) (Git trailer transaction) で、`scripts/install-session-trailer.sh` が全 repo に stub を配る。Claude は `setup.sh` Step 8b、Codex は `scripts/setup-codex.sh --repo <path>` / `--repo-root <path>` で配線する。repo 単位の opt-out = `git config agent.sessionTrailer false` (legacy の `claude.sessionTrailer` / `codex.sessionTrailer` も尊重)。**判断の経緯 (= 却下した案とその理由。特に「host / account を書かない」 の決め方) = [`DESIGN.md#session-provenance-trailer-design`](../DESIGN.md#session-provenance-trailer-design)**。
+
+- <a id="fold-with-append-point"></a>**並列 session が追記し続けている SESSION を畳むときは、 書く節の所有を分け、 要約の直後に追記点の行を置いて相手に知らせる** (2026-09-13 追加) — 畳む commit は数十行を消して 1〜2 行に置き換える。 相手が同じ時間帯に「最新 bullet の直後」 へ足すと、 (a) anchor にした行が消えていて挿入が落ちる、 (b) 旧 bullet の間に入って畳みから漏れる、 (c) 同じ file なので相手の hunk が自分の fold commit に混ざる ([#staging-window-race](#staging-window-race))。
+  - **手順**: 畳む前に相手へ「どの節を誰が書くか」 (例: 畳む側 = 要約・手順・Open items、 相手 = pass bullet) を送る → 相手の commit を待つ → [`scripts/fold-dated-bullets.py`](../scripts/fold-dated-bullets.py) `--marker '<追記点の行>'` で畳む → `git commit -- <path>` → 追記点の行をそのまま相手に再送。 相手は以後その行の直後に 1 pass 1 bullet で足す。
+  - **検算**: [`scripts/verify-verbatim-move.py`](../scripts/verify-verbatim-move.py) `--removed-prefix '<日付 prefix>' --normalize-links` で、 消えた bullet が全部 archive に在ることを確かめる。
+  - 実例 2026-09-13: 原稿の通読 pass が 1 日 40 本の bullet になった SESSION を 1 要約に畳む間、 別 session が次の pass を続けていた。 追記点 `- **<日付> 以降の pass (追記はここ、1 pass 1 bullet)**:` を置いて所有を分け、 衝突は 0 だった。
+
+### Anti-pattern
+
+- **`git status` が clean だから別 session の work と被らないと assume**: clean は「自 session の uncommitted がない」 を意味するだけで、 別 session の最新 commit を pull したかは別問題。 fetch + log 確認が必要
+- **明示 add したから「自分の変更だけが stage される」 と assume**: それは相手が**別 file** を触っている場合の話。 同一 file なら file 単位で巻き込む ([#staging-window-race](#staging-window-race))
+- **Edit retry エラーを「またユーザーが触ったか」 で済ませて再 try**: 再 Read せずに retry すると pre-empt 内容を上書き
+- **「新規 Write だから Read 不要」**: 新規だと思った path が既存だった事故が頻発。 Write tool は `read_before_write` を強制しないので、 自己規律で `find` or `ls` で先に確認
+- **`git add -A` なら「自分の変更だけが stage される」 と assume**: 並行 session の未 commit WIP も無差別に拾う ((D) 参照)。 明示 add が defense
+
+---
+
+## <a id="plan-checkbox-semantics"></a>2. Plan / SESSION の `[x]` mark を「実装済」 と reflex 解釈する race
+
+### 問題
+
+session A が plan の `[x] foo.yaml compile` を **forward-look (= 「次に実装予定」)** の意図で書いて, 実装途中で session 中断。 session B が plan を読んで `[x]` を「実装済」 と解釈し、 重複実装を skip。 結果: 実装が永遠に欠落し、 SESSION.md 上は「完了」 のまま。
+
+逆 pattern: session A が `[x]` を「実装済」 として書き、 session B が plan を読まずに同じ task を独立に再現。 上の §1 race と直結し、 偶然 content overlap なら害なし、 分岐すれば session A の work を破壊。
+
+### 規律: `[x]` は **実装済のみ**、 forward-look は別マーカー
+
+| マーカー | 意味 |
+|---|---|
+| `[ ]` | 未着手 |
+| `[ ] (実装中: <commit-hash> ↓)` | 着手済、 部分実装、 まだ完了でない |
+| `[x]` | **実装済**。 該当 commit が main に含まれている and その実装が当該 plan の意図を満たす |
+| `[x] (forward-look)` | (使うなら) 明示ラベル必須、 別 session が「実装済」 と reflex 解釈しないように |
+
+`[x] (forward-look)` は避けるのが原則。 forward-look は plan 本文に「次にやる」 section を別に作って、 checkbox 軸を「実装済 / 未着手」 の 2 値に保つ。 mixed semantics の checkbox は別 session で誤読される。
+
+### 検証: session 開始時に `[x]` の信用度を git log で確認
+
+新規 session で plan を読んで `[x]` を見たら、 その task が **対応する commit を含むか** を `git log --grep` で確認する習慣を入れる:
+
+```bash
+git log --oneline --all -- analyses/data/foo.yaml | head -3
+# → commit が存在 = `[x]` 信用できる
+# → 存在しない = forward-look の疑い、 plan 著者に確認 (= user) or 自分で実装
+```
+
+特に同日内の session re-entry では「self-trust の罠」 (= 「自分が `[x]` 書いたから実装したはず」) に陥りやすい。 git log で artifact を直接確認するのが安全。
+
+### Anti-pattern
+
+- **plan を流し読みして `[x]` を unconditionally trust**: forward-look 混入を見抜けず重複 skip
+- **session 切れる直前に「予定として `[x]`」 を書く**: 次 session の自分 (or 別 Claude session) が誤読の温床になる。 切れる前に `[ ] (next session で実装)` の方が明示的
+
+---
+
+## <a id="prev-commit-as-foreign"></a>3. 自 session の prev commit を「他人 commit」 と扱う
+
+### 観察
+
+新 session が `git log` を見て、 同 user の prev session が打った commit を確認する時、 「**他人の commit と等価に扱う**」 のが安全。 つまり:
+
+- commit message を読んで意図を理解 (= 自分の意図と想定するな)
+- diff を読んで実装内容を確認 (= 自分が書いたつもりの code と等価でない可能性)
+- 関連 plan / SESSION の最新 state も同様に「他人が書いた」 として cold-read
+
+理由: prev session の Claude は別 context window で別 reasoning trail を持っていた。 同 user の chat だが context window は分断されている → 知識・前提・判断は別 entity と仮定する方が安全。
+
+### 実例パターン
+
+- prev session が attribution 訂正 commit (= arXiv preprint の著者帰責を別グループへ訂正) を打った後、 新 session が plan の旧著者名と書かれた残存箇所を読んで「旧著者帰責は確定」 と reflex 採用 → 訂正済 fact を逆戻り
+- prev session が plan の Phase 2 task list で `[x]` を打った後、 新 session が「Phase 2 完了」 と reflex 解釈して Phase 3 着手 → Phase 2 の cross-check task が残っていることに気付かない
+
+防御: `git log -p -3` で最近 3 commit の **完全 diff** を読み、 prev session の意図を context として吸収してから自 session の action を判断。
+
+### SESSION narrative の stale (= state を変えた session が SESSION を更新しなかった)
+
+prev session が repo の **state を変える commit** (例: review markup の accept 変換、 設定の切替) を打ったのに **SESSION.md を更新しなかった**場合、 SESSION の prose が現状を**積極的に誤って記述**する (= §2 `[x]` の aspirational 疑いより強く、 「〜は未反映 / 未着手」 等の断定が事実と逆になる)。
+
+防御: 行動を分岐させる load-bearing な SESSION 主張 (= 「X は未反映」「Y は提案 markup のまま」 等) は **file/git の実体と突き合わせてから信用**する。 特に `git log --oneline -- SESSION.md` の「最後に SESSION を触った commit」 と「state を変えた commit」 がズレていたら narrative を疑う (= state 変更が SESSION を伴っていない = 記述が古い signal)。 grep / ls-tree / byte 比較等の安価な実測で裏取りし、 narrative を黙って上書きせず **stale を注記で flag してから user に渡す**。
+
+---
+
+## <a id="realtime-coediting"></a>4. zoom 中の real-time co-editing
+
+### 状況
+
+zoom session で user + Claude session が並列に動き、 user が手で `CLAUDE.md` / `SESSION.md` / plan を編集する一方、 Claude session が別 file を Edit する。 Edit tool の `File has been modified since read` エラーは zoom 中に高頻度で発生する (= 30 分の zoom で 3-5 回)。
+
+### 規律
+
+- **Edit エラー時の再 Read は必須** (§1 (C))
+- **user の手動編集を尊重**: 自分の Edit と user の edit が conflict した時、 user の edit を優先 (= 「user の意図が反映された latest」 として再 Read)
+- **重複 Edit を避けるための同期 signal**: zoom 中で user が「これは私が書く」 等の signal を出していたら、 当該 file は自 Edit を保留して user の commit を待つ
+- **session 終了前に未 push commit + 未 commit 変更を確認** (= [`shared-repo.md` session-end](shared-repo.md#session-end))。 zoom 後に user が別マシンから pull する経路を保持
+
+### user による手動編集の検出パターン
+
+Claude tool result に
+
+```
+Note: <path> was modified, either by the user or by a linter.
+This change was intentional, so make sure to take it into account as you proceed
+```
+
+の system reminder が混ざってきたら、 **その file への次 Edit 前に必ず Read** する。 system reminder 無しでも `File has been modified since read` が出たら同様。
+
+---
+
+## <a id="shared-tmpdir-enospc"></a>5. 並列 session が共有 tmpdir を埋め、 Bash 出力が ENOSPC で消える
+
+### 問題
+
+Claude Code は各 Bash 呼び出しの stdout/stderr を per-session tmp dir (= macOS では `/private/tmp/claude-<uid>/.../tasks/*.output`) に書く。 同 user が **複数 session を並列運用**すると、 共有 tmpfs (= 小容量) が他 session の蓄積 output (= 特に PDF render PNG 等の大物) で満杯になり、 自 session の Bash が `temp filesystem ... is full (0MB free)` / `writes failed with ENOSPC` で **出力を失う** (= command 自体は実行されるが結果が読めない)。 file 系 tool (Edit/Write/Read) は別経路で影響を受けにくい。
+
+### 対処
+
+- **掃除**: `find /private/tmp/claude-* -name '*.output' -delete 2>/dev/null` (+ `-name '*.png'`) で旧 session task output を削除して空き回復。 ⚠️ 自 session の current output も消す race があるので、 削除と本命 command を 1 行に併記 + 本命は出力最小化 (`... >/dev/null 2>&1; echo rc=$?`)。
+- **回避**: bash grep の代わりに **Read / Edit / Grep tool を使う** (= ENOSPC の影響小)。 git は `... 2>&1 | tail -1` 等で小出力化。
+- **根治 (harness 側)**: `CLAUDE_CODE_TMPDIR` を空きのある FS に向けると安定 (= session 起動前の環境変数)。
+
+### 実例 (2026-06-02)
+
+ドキュメント整備 session 中、 別 Claude session が同 project で並行稼働し共有 tmpfs を埋め、 grep/git の Bash 出力が断続的に ENOSPC 消失。 旧 session output 削除で回復 → 以降 git は小出力 + file 系は Read/Edit に切替えて継続。
+
+### <a id="delegate-output-inspection"></a>12. 委譲先の成果を検品する — 差分の正しさより「既決事項の生存」
+
+委譲先 (別 session / 別 vendor の実装者) が spec どおりに良い仕事をしても、 **spec に書かれていない既決事項を知らずに覆す**ことがある。 実装者は原稿の現在形しか見ておらず、 その一文が何往復の議論の産物かを知らない。
+
+**ルール**: 委譲した実装を受け取ったら、 検品を 3 系統に分ける (3 は、 委譲先の出力に他人の文の読みがあるとき)。
+
+1. **実測の追認** (申告を信じない): hash / sync 状態 / build gate / 機械 anchor を**自分で再走**する。 委譲先の「全部 pass しました」 は報告であって測定ではない。 併せて、 委譲先が読めなかった範囲 (閲覧制限・別 repo) に残った同型の修正漏れを列挙する。
+2. **既決事項の生存確認**: 直近に人間が確定させた文言・判断が生きているかを名指しで見る。 diff は「変わった行」 を見せるが、 **その行が何を覆したか**は見せない。 覆されていたら、 良し悪しの判断は人間に返す (= 実装者の判断が優れていることも、 履歴を知らないゆえの後退であることもある)。
+3. **第三者の文の読みの原文照合**: 委譲先 (批判役・worker・照合役) が出した、 他人 (referee・共著者・文献) の文についての読み・要約・判定の理由は、 原文と並べて照らすまで仮説として扱う。 照らすのは受け取る側で、 委譲先の「確かめた」 は 1 と同じく報告であって測定ではない。 委譲先の出力をさらに要約・平易化して外に出す段で限定 (「この一句は」) が落ち、 言い換えが原文の言明として鉤括弧つきで出る (実測)。 1 本の判定は回ごとに揺れる (同じ段落に別の回で別の判定が出た、 実測) ので、 判定そのものも仮説。 外に出す文での形 (照合票・引用の機械の検査) = [`rebuttal-letter.md#pre-send-verification-sheet`](rebuttal-letter.md#pre-send-verification-sheet)。
+
+**受け渡し側の予防**: 何往復もかけて確定した表現は、 spec に「この文は確定済み、 変えるなら相談」 と明記する。 明記なき確定は、 委譲先からは単なる現在形の一文にしか見えない。
+
+**なぜ**: 委譲の利得は並列性だが、 その代償は**文脈の非共有**。 検品を diff review だけで済ませると、 「正しい変更」 の中に紛れた「知らずに覆した決定」 が通過する。 起源 (2026-09): 委譲先の論文改稿は品質が高く、 むしろ渡した spec の物理的誤りを訂正して返してきた一方で、 同日午前に著者が語単位で確定させた脚注の主張水準を、 その経緯を知らないまま別方向へ書き換えていた (両方とも防御可能な物理で、 判断は著者に戻した)。
+
+## 関連 (本 §)
+- §1-§3 の並列 session race family の shared-resource 版 (= file race でなく tmpdir race)
+
+---
+
+## <a id="pilot-single-brain"></a>6. Pilot single-brain — 並列 session に同型の構造/規約タスクを渡す時
+
+### 問題
+
+同じ convention / structural task (= anchor schema 設計、 SoT 統合、 index 形式の確定 等) を**複数の parallel session に「各自 完成まで」 渡す**と、 各 session が独立に設計判断を下し、 **divergent な解に着地**する。 §1 の「同 file を別 session が独立に書く」 race と違い、 ここで衝突するのは file content でなく **設計それ自体** (= anchor の命名規則、 slug の振り方、 registry の schema)。 結果、 各 session が「正しいが互いに非互換な convention」 を生み、 **"multiple SoT" 問題**を 1 段上 (= メタレベル) で再生産する (= 後で統合する羽目になり、 [`convention-design-principles.md` §15](../docs/convention-design-principles.md#sot-consolidation-recipe) 「SoT consolidation recipe」 の是正手順を回す対象が増える)。
+
+### 規律: sequential な pilot→worker にする (= parallel-to-completion にしない)
+
+- **1 つの session が convention design を所有する** (= pilot single-brain)。 anchor / slug / registry schema 等の**設計を確定 (frozen) させる**のはこの 1 session だけ。
+- 設計が frozen になってから、 **worker session には個別 entry の適用だけを伝播**する (= worker は schema を再設計せず、 確定済 schema に従って自分の担当 entry を埋めるだけ)。
+- frozen な instruction を worker に渡す (= 「この slug 規則・この anchor 形式で適用せよ」 と明示)。 worker が設計判断を再度行う余地を残さない。
+
+### Anti-pattern
+
+- **同型タスクを N session に「完成まで」 fan-out**: 各 session が良かれと独立設計し、 N 個の非互換な convention が生まれる。 N が大きいほど後段の統合コストが爆発
+- **pilot の設計が frozen 前に worker を走らせる**: worker が暫定 schema で適用を始め、 pilot が schema を変えると worker の成果が陳腐化 (= §13 のデータ→コード ordering と同型、 「確定する側」 を先に固める)
+
+---
+
+## <a id="spawn-handoff-token-return"></a>7. 別 session への hand-off と結果の返送 — spawn_task + send_message (token-handshake で宛先解決)
+
+§1-6 は並列 race の **防御**。 本節は逆に、 **意図的に独立 session を起こして結果を受け取る** 構築的 technique。
+
+### 用途と、 なぜ Agent でなくこちらか
+
+「**完全に独立した別 session に作業を渡し、 結果も受け取りたい**」 とき。 委譲 primitive は 2 つあり、 **3 軸**で性質が分かれる:
+
+| 軸 | Agent (subagent) | 別 session (spawn_task / 下記 file-handoff) |
+|---|---|---|
+| **ブロッキング (= 並列性)** | **build 依存 — CLI 2.1.232 (2026-08) 以降の interactive session は background 既定で非同期 (= 呼び元は解放、 完了時に通知)。 それ以前の build / SDK / headless / `run_in_background: false` 明示は同期で、 呼び元は Agent 完了までブロックし idle で待つ** (いずれにせよ独立 session ではない = 下段) | **非同期 — 委譲した瞬間に呼び元が解放され、 別 session が走る間も自分の作業を続けられる** (真の並列) |
+| 独立性 | 呼び元 context を継承する *subagent* で **独立でない** (呼び元 session 終了で消える / user が独立に steer 不可) | **完全に独立** (own worktree〔= 任意、 §8〕 / 呼び元記憶ゼロ / 呼び元終了後も生存 / user が steer 可) |
+| 結果返送 | 結果は *呼び元に自動で返る* | 結果は *自動では返らない* → 下記 token-handshake (push) / file-handoff (pull) で返す |
+
+**⚠️ 最重要 (= 見落とされやすい実害): Agent は呼び元を同期ブロックする。** Agent が走っている間、 呼び元の会話 (= 人間が今見ている session) は次の作業に進めず手待ちになる。 作業が長いほど待ちは長い。 さらに **複数の session がそれぞれ Agent に委譲すると、 その全部が同時に凍る** = 人間の手元の全 session が一斉に手待ちになり **仕事が止まる = 純粋な無駄** (= 2026-06-27 に実際に 2 session 同時 stall で観測、 本節強化の契機)。 別 session は真に並列ゆえ、 委譲の瞬間に呼び元が解放され、 人間は他の作業を続けられる。
+
+⇒ **ユーザーが「別セッション / 独立した新 session」 を名指したら、 Agent でなく別 session を使う** (spawn_task、 無ければ下記 §file-handoff)。 これは破ってはならない既定: Agent は (a) 上記の通り呼び元をブロックして仕事を止め、 (b) そもそも独立 session でない (= ユーザーが名指した「別」 を満たさない)。 結果も要るなら spawn_task に「結果を呼び元に返せ」 を併せれば **「独立 ∧ 非ブロッキング ∧ 結果返送」 が同時に in-scope** で得られる (harness 変更不要)。 「新 session」 を Agent に潰すのは [`convention-design-principles.md §4.1` 深層](../docs/convention-design-principles.md#motivated-substitution-trap) の deliverer-retention 置換 (= ユーザーが名指した独立性を、 結果が自分に返る Agent へ無意識に潰す失敗) — §4.1 は **「なぜ滑るか」** の説明であって、 **滑った時の実害がこのブロッキング (= 仕事が止まる)**。
+
+**🚦 標準ルーティング (= 「仕事を止めない」 ための既定。 本節の運用結論 = 必ずこれに従う):**
+
+| 仕事の性質 | 使う道具 | なぜ親 (呼び元) が止まらないか |
+|---|---|---|
+| **長い / 独立 / ユーザーがオーナーの仕事 / 成果物と知見が残る仕事 (方針・実装・RCA・規則の追記 = §10 の [#self-closing-delegate](#self-closing-delegate))** | **別セッション** (spawn_task / 下記 file-handoff) | 構造上ぜったいに親を止めない (別プロセス・別 context window) |
+| **答えを自分の手元に戻して今の作業に繋ぐ小さな調査・照合・検算** | **background Agent** (`run_in_background: true`) | 非同期 — 委譲した瞬間に呼び元が解放され、 完了時に通知で戻る |
+| 前景 Agent (= `run_in_background: false` 明示。 2.1.232 より前の build では省略も前景) | **禁止** | 前景 *だけ* が呼び元を同期ブロックして止める。 同ターン内 inline chaining の便宜は失うが、 background + ターンを跨いで結果受領で代替でき (= 結果は呼び元の context に戻る・1 往復遅いだけ)、 親は止まらない |
+
+**∴ Agent は必ず `run_in_background: true` を明示で付ける (= 前景は禁止、 「ほぼ」 でなく全面)。** ⚠️ **upstream 状況 (2026-08-17)**: この要求を出した [anthropics/claude-code#71768](https://github.com/anthropics/claude-code/issues/71768) が maintainer により「shipped」 で close — CHANGELOG 2.1.232「non-teammate agent spawns in interactive sessions now run in the background by default」 + interactive では foreground option 自体が撤去、 frontmatter `background: true` で per-agent pin 可。 ∴ 最新 CLI では省略しても本規律を満たすが、 **明示は維持する** (= (a) 2.1.232 より前の build / Agent SDK / headless は既定が同期のまま = build 横断の耐性、 (b) 下記 legibility の二重化。 規律の文面は変えない、 「既定がそうなった」 は明示を外す理由にならない)。 理由は 2 つ: (i) 前景 *だけ* が親を止める、 (ii) **legibility** = `ask:Agent` の承認ダイアログは生引数を出すだけで前景/background を読み取りにくい (= `run_in_background` を省くと前景なのに dialog に何の印も出ない) → **常に background に固定すれば「dialog に現れた Agent は必ず background (= 止まらない)」 と確定**し、 human は gate で「これは止まるやつか?」 を判定せず済む (= veto は『そもそも立てるべきか・別 session にすべきか』 だけに使える)。 明示 `true` は dialog 引数でも裏取りできる二重化。 ⚠️ **機械 backstop の frontend 別整理** (= 2 段ある):
+- **(a) 細かい強制** (= 「background 無しの Agent だけ deny して付け直させる」 等、 tool 引数を見る介入型 guard) は **CLI のみ可**。 desktop app は介入型 guard が原理的に不能 ([`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork))。
+- **(b) 粗い pre-launch gate** (= settings.json `permissions.ask` に **`Agent` ツール名を入れる**) は **desktop でも honor される**: Agent 起動の*前*に承認ダイアログが出て human が veto できる (= mail 誤送信 gate と同機構、 `defaultMode: default` 前提、 [`claude-code-permissions.md` desktop-per-tool-gate](claude-code-permissions.md#desktop-per-tool-gate))。 前景/background の自動判別はできない (= 引数を見ないので) が、 human が dialog で「background か別 session で」 と差し戻せる。 tradeoff = 正当な調査 Agent も毎回承認。
+
+∴ desktop でも「Agent 起動を human の一拍に乗せる」 機械 backstop は在る ((b))。 その上で *前景禁止 (= 常に background)* を保つのは依然 *規律* (= dialog 通過後に Claude が前景を選ばない保証は機械化されない — desktop は引数を見て前景だけ弾けない) で、 最後の砦は human-steering。
+
+### robust な宛先解決 = token-handshake (method A)
+
+呼び元が「自分の id を spawned に渡す」 のは **破綻する**: session が *自分で取得できる id* (= 自分の transcript file 名 / jsonl の `sessionId` field) は、 `send_message` / `list_sessions` が routing に使う *addressable id* (`local_<uuid>` 形式) と **一致する保証がない** (= 観測例では別物だった)。 加えて `list_sessions` は self を除外するので自分を引けない。 ⇒ 呼び元は自分の addressable id を実行時に確実には知れない。
+
+robust 解:
+
+1. **呼び元が会話 (= assistant の message turn) に unique token を残す** (= 衝突しない distinctive な文字列 `<TOKEN>`)。 ⚠️ **token は message turn に出す必要がある — spawn_task の spec (= tool_use 引数) に入れるだけでは findable にならない**: `search_session_transcripts` は user/assistant の **message のみ** index し tool_use 引数は対象外。 ∴ spec の token は spawned に「何を検索するか」 を渡すだけで、 呼び元の findability は chat echo だけが達成する (= 2026-06-24 incident: spec に token はあったが chat に出さず子の search が 0 件 → 手動特定に degrade。 親 transcript の forensic で token の first appearance が spawn_task の tool_use 引数だったことを確認)。
+2. **spawned 側が完了時に `search_session_transcripts(<TOKEN>)` で全文検索** → HIT した session の addressable id を**直接取得** → `send_message` で結果を返す。
+3. 結果は呼び元会話に `From <title>` の user turn として着地 (= user 確認 gate 経由)。
+
+これは **呼び元が自分の id を知らなくても動く唯一 robust な方法**。 他は脆い: (B) 呼び元が id を渡す = 上記 namespace 不一致で誤 routing / (C) spawned が **similarity heuristic (title 意味一致 / cwd 一致 / recency / 話題近さ) で宛先を推定** = それは findability であって identity でない (= [`§8.14`](../docs/convention-design-principles.md#single-field-identity-corroboration) 単一一致≠同定 の cross-session routing 版) → **誤着** (実際に起きた; 観測例では起票元の title が generic だったため spawned が *話題が一致する無関係な sibling* を起票元と誤断。 recency はむしろ正解を指していたので「recency を見れば直る」 でもない = どの similarity 軸も identity の代用にできない)。
+
+### 既定の返送路 + 子側 fail-safe (= token が落ちた / push が後付けされた時)
+
+**既定の返送路は durable artifact (commit) = robust。 live session push は token が事前配置されている時のみ。** push の必要は *後から* 呼び元 user が live で要求して生じうる (= 起票時に async-only で設計しても後で push を頼まれる) ので、 token の事前配置は「push を計画しているか」 に condition せず常に行う。
+
+token / handle が無いのに「起票元に返せ」 と言われた spawned は、 **絶対に similarity (title / cwd / recency / topic) で宛先を推測して push してはならない** (= 上記 (C) findability≠identity)。 手順:
+
+1. `search_session_transcripts(<token>、 無ければ自分の spec の distinctive な語句)` で **自分を起票した session を content 照合で特定** (= identity を establish)。
+2. self を除外し一意に解決できれば、 その session **のみ** に send_message。
+3. 一意化できない / 候補ゼロなら **push せず durable file (commit 済) に倒し、 user に確認** (= 誤着を safe degrade に変える)。
+
+identity は similarity でなく content corroboration でしか establish できない。
+
+### spawn-spec template (= 結果を返したい委譲の boilerplate)
+
+**設計目標 = 結果が呼び元 (人間) に *自動で* 届く。 人間に検索/記憶/fetch させない (= 機械が手間を消す、 2026-06-24 RCA + user 訂正「機械が人間を楽にするためにある」)。** ⚠️ 一度この template を「durable file を人間が読みに行く」 方向へ書き換えたが、 機械から人間へ手間を移す逆方向で撤回した。
+
+**required (= 機械が結果を人間に届ける spine)**:
+
+- **deliverable を決定的 path に commit** (= 結果の実体、 push が無くても残る)。
+- **完了 marker を決定的な "results inbox" に 1 個落とす** (= status / result_path / 1 行要約)。 これを **surfacing 機構** (= session 開始時の surface・dashboard・OS 通知) が拾い、 人間が次に居る *どの session でも* 「結果が届いた・場所はここ」 と自動表示する。 surfacing は file を読む script 操作なので機械化可能 (= model の chat 出力にも親の findability 仕込みにも依存しない)。 ⚠️ marker は **子自身の完了 action** なので live-push より reliable。 ⚠️ inbox / surfacing 機構の実体は各 user の private layer に置く (= 本 public doc は *形* のみ規定、 具体 path は書かない)。
+- **worker の安全フィルタ停止**: 依頼元と worker は [停止後の手順](tool-call-robustness.md#api-safety-filter-on-main-response) を適用する。掲示板の hand-off が手順を渡す。止まった窓へ続きを送らず、停止した返答を再現しない。窓の終了と許される次の仕事は本人に判断を戻す。
+- <a id="worker-record-clause"></a>**成果報告の項目を spec に入れる** — deliverable に「捨てた案とその理由・途中で気づいたこと・確かめていないこと」の簡潔な節を求める。該当が無い項目は「なし」とし、file に書く場合は報告からその path を指す。作業の受領と後の整理に必要な項目として、最初の依頼で伝える。 in-process の Agent tool への委任は hook [`hooks/delegation-record-clause.py`](../hooks/delegation-record-clause.py) が指示の末尾に自動で足す。 spawn_task の chip と掲示板の依頼は hook が通らないので spec に書く。 Bash から headless で起動する worker (`claude -p` / `codex exec`) は、 Claude Code の PreToolUse[Bash] hook [`hooks/headless-record-clause-nudge.py`](../hooks/headless-record-clause-nudge.py) が実行位置を読める単純な起動を runner に通し、 既存の指示を保持して約束を自動で足す。 自動注入の射程は同 hook の docstring に記載する。 Codex 親では実行ファイルのprefixを変えず、worker側のhookで約束を渡す (配線と限界 = [Codexのwrap統合](../codex/PARITY.md#wrap-workflow-integration))。script内・scheduler・hookが無効な起動、 Codex アプリに出る起動の道具 ([`scripts/codex-app-launch.py`](../scripts/codex-app-launch.py)、 hook は起動文を書き換えない) にも、最初の指示に約束を含め、後で到達を仮定せず確認する。 封じた sandbox では template の CLAUDE.md が HANDOFF に同じ 3 点を書かせる。 締めの整理では [`scripts/headless-worker-reports.py`](../scripts/headless-worker-reports.py) が、 その session の headless の実行位置・Codex アプリの起動 (起動の道具の実行位置と、 その出力の thread id) または注入記録を持つ候補を数え、 引用内の言及や未対応構文の文字列候補を別に表示する。 親 session・tool call・元の起動文の hash に一致するローカル注入記録、 文書上の根拠、 作業 dir の成果物を出す。 読取時に古い孤立した注入記録を整理し、 親の会話記録が残る間は保持する (保持条件は同 hook の docstring)。 注入記録は runner の処理を示すので、 worker の受領は報告で確認する (この口は subagent・掲示板・token のどの道具にも現れない)。
+- <a id="out-of-scope-dated-item"></a>**観察・点検・棚卸しの依頼には「範囲外で見えた期限つきの用事は、 報告の note に 1 行で書く」 を入れる** — 依頼の範囲 (誤検出を減らす・台帳の鮮度など) で読む目は、 範囲外の期限つきの用事 (申込・予約・提出の期限) を見ても書く欄が無く、 報告に載らない (実測)。 1 行 = 何の用事か・期限・所在 (mail の id か file)。 拾った用事をどう扱うかは依頼元が受領で決める。
+- <a id="rule-change-stays-with-ruling-session"></a>**規則の文書 (CLAUDE.md・規約・設定) の変更は、 本人の裁定を直接受けた session が当てる** — 依頼の spec や message で別 session に頼まない。 受け手の session は、 別 session からの依頼を本人の承認として使えず (harness の規則 = peer の依頼で CLAUDE.md・設定を変えない)、 中継された裁定の文を本人の発言として記録することもできない。 依頼には残りの作業だけを入れ、 規則の文書の分は依頼元が自分で当てるか、 本人に受け手の窓で直接裁定してもらって受け手が当てる (実測: 依頼の完了条件に入れた 1 項目を受け手が当てずに返し、 依頼元が当て直した = 1 往復)。 依頼元の窓に本人の別件の発言が次々に届く運用 (振り分け役の窓) では、 承認が記録の時点で最新でなくなるので、 受け手の窓で裁定してもらう側を既定にする (実測: 振り分け役の窓で当てようとした承認が、 記録の前に別件の発言で切れた)
+- <a id="manuscript-pairs-for-ruling-session"></a>**原稿の保護区画 (表題・概要・序論・結論・式) の変更も、 本人の言葉を持つ session が当てる** — 書き直しを受けた worker の session には本人の発言が無いので、 guard は repo の外に置いた写しの `.tex` への書き込みも止める ([`manuscript-claim-ownership.md`](manuscript-claim-ownership.md))。 worker は 2 つに分けて出す: 保護区画に当たらない本文の変更は写しへの patch (見出しは `a/<path>` と `b/<path>` だけにする = 見出しに注を足すと `git apply` がそれを path と読んで止まる)、 保護区画の変更は note の「今 → 案」 の組 ([`apply-text-pairs.py`](../scripts/apply-text-pairs.py) の `--note` の形)。 本人が既に裁定した変更の組を先に、 その上に当たる案の組を後に並べる (案の組の「今」 = 前の組を当てた後の字句、 順を違えると道具が 0 回の一致で止める) と、 本人は案を 1 組ずつ採れる。 組を当てた全文は一時 dir で作って repo の検査を回し ([`concise-output.md#check-the-proposal-before-showing`](concise-output.md#check-the-proposal-before-showing)。 当たる区画は [`manuscript-candidate-regions.py`](../scripts/manuscript-candidate-regions.py) で出す)、 commit も提出もしない。 依頼元は組を本人に見せて ([`concise-output.md#show-the-text-being-changed`](concise-output.md#show-the-text-being-changed)) 裁定を記録し、 patch → 組の順に当てる (実測: この形で、 依頼元が当てた原稿は worker が検算に使った全文と 1 byte も違わなかった)
+- <a id="relay-delegate-rule-changes"></a>**委ねた先が規則の文書を変えて返したら、 依頼元は本人へ中継する前に差分を読んで点検する** — guard が返事に書かせる行 ([`agent-rule-ownership.md#additive-and-free-zones`](agent-rule-ownership.md#additive-and-free-zones)) を中継するだけで終えない。 見るのは 4 つ: 緩める変更が無いか / 書いた事実が実物 (code・実測) と合うか / 古い文と矛盾して同居していないか / 公開層に識別子や非公開の事実が入っていないか。 実測: 中継だけの報告に本人が「勝手に変えて大丈夫か」 と聞き、 点検すると、 実物で確かめていない挙動を事実として書いた文・中身と違う commit message・毎回の承認の画面を増やす既定、 の 3 件が見つかった (どれも guard の線の内側)。 直すのは依頼元か、 まだ動いている子なら子に 1 行で頼む
+
+<a id="headless-cli-instruction-inputs"></a>**headless CLIへ指示を足すときの上書きと空入力** (実測、Claude Code 2.1.282 / Codex CLI 0.152.0・0.158.0-alpha.2.1):
+
+- Claudeの `--append-system-prompt` を複数回渡すと、先の値を積み重ねず最後の値を使う。既存の追加指示を保つには内容を保持してから足す。
+- Codexの `-c developer_instructions=...` は既存の指定を置き換える。追加指示のつもりで元の指示を消さない。
+- Codexの空stdinはそのままならモデル要求を始めないが、条項だけでも足すとpromptを持つ要求になる。空入力を空のまま保つ。
+
+再測定は [`probe-headless-record-clause.py --run --mode argv`](../scripts/probe-headless-record-clause.py)。
+loopbackで実CLIの送信内容を見る試験で、外部モデルの遵守は測っていない。
+CodexのPreToolUseでrunnerや環境assignmentをcommandの先頭に足すと、元のprefix denyから外れることも確認した
+(0.158.0-alpha.2.1)。記録条項はworker側のcontextで渡し、親の許可判定の入力を保持する。
+
+
+- <a id="subagent-report-file-refused"></a>**in-process の subagent に報告の Markdown を書かせない** — 作業記録の REPORT や dir の README のような報告に当たる .md を subagent が書こうとすると、 harness が「findings は text で返せ」 という趣旨で拒否することがある (実測: 新規作成も既存 file への追記も拒否された。 同じ subagent が既存の索引・設計 doc に行を足す編集と、 code・tex・PDF の作成は通った。 拒否の判定条件は未確認)。 spec には「報告の本文は受け渡しの報告に書く。 保存は親が行う」 と書き、 親は受け取った本文を file に保存して commit する。 Bash の heredoc などで迂回させない。
+
+**task sizing (= worker を殺さない)**: 長い導出・生成 task を 1 spec に mega 盛りしない — worker は 1 応答の出力上限 (thinking 込み) を超える巨大 turn を試みると **決定的 retry loop で silent 死する**。 spec に焼き込む分割・turn 規律・部分結果 permission の正本 = [`output-cap-death-loop.md`](output-cap-death-loop.md#prevention-spec-rules)。 **どの大きさに切るか** (= sizing 述語) と **orientation cost の spec 前払い** は [§9](#worker-task-sizing)。 **受け手が別ベンダー CLI (Codex 等) で context 窓が小さい**なら、 圧縮で途中経過が消える前提で allow/deny list + step ごと commit を焼く ([`output-cap-death-loop.md#context-compaction-loss`](output-cap-death-loop.md#context-compaction-loss))。
+
+**optional (= live-push の bonus。 効けば即時 push、 落ちても上の auto-surface が拾うので人間は何もしない)**:
+
+- **token 行**: 起票側の会話 (= assistant の message turn) に unique token を残す (spec にも明記、 例 `RET-<slug>-<date>-<rand>`)。 ⚠️ **chat に出さないと `search_session_transcripts` に引っかからず呼び元が findable にならない** (= method A step 1、 spec=tool_use 引数は search 対象外)。 ⚠️ 「親の session-id 欄」 は作らない (= addressable id ≠ transcript id の namespace 不一致、 誤 id は推測より悪い、 robust なのは content marker = token)。
+- **返送指示**: 「完了時 `search_session_transcripts(<token>)` で起票元を特定し send_message。 self/他 session 除外、 token を持つ起票元以外に絶対送らない。 解決不能なら push せず + user 確認 (推測 push 禁止)」。
+
+### <a id="return-signal-economy"></a>Marker 経済 — 完了 marker は「受領義務」 の model であって完了 log ではない (2026-07-14)
+
+本節は既存の marker 経路の契約。session 宛て board を受領経路に選んだ依頼との境界は
+[1 義務 1 受領経路](#board-receipt-carrier) を参照する。marker の consume と board の accept は、
+権限も意味も異なるため相互に代用しない。
+
+required spine の完了 marker は「**人間が受領するまで surface し続ける義務**」 を 1 個 mint する操作 (= consumed になるまで毎 session 開始時に出る、 消すには手動 consume が要る)。 ∴ mint は「完了の記録」 でなく「**受領してもらう必要**」 がある時に行う — 記録自体は deliverable の commit が既に担っている。 これを無差別に行うと委譲 chain (実装 → 検品 → 検品の検品 …) の各段が marker を増殖させ、 子 marker・孫 marker が誰にも consume されず滞留する = **人間の注意を節約するための機構が人間の注意に課税し始める** (2026-07-14 観測: 起票者が「報告不要」 と明示した検品 spec に、 spine を反射で丸写しして 2 個目の marker 義務を焼き込み user 訂正)。
+
+1. **報告 waiver は marker にも及ぶ。** 起票者が「返事不要・完了通知不要」 と明示したら、 それは live-push (send_message) だけでなく完了 marker (= もう一つの返送経路) にも適用する — clean 完了は mint しない、 deliverable の commit が durable 記録。 ⚠️ waiver が放棄したのは「完了通知」 であって「問題の報告」 ではない: **行動を要する発見** (= FAIL verdict / major issue / user 判断 gate) が出たらその時だけ mint する (= findings-only marker policy)。
+2. **1 系譜 1 marker。** 同一作業系譜の follow-up (検品 / land / fix) は新 token で 2 個目を mint しない — root token の marker を更新する (= 同 token での再 record は in-place 更新挙動にする) か、 旧 marker を consume してから置く。 常に高々 1 個。
+3. **meta-work の default = findings-only。** 検品・review 等の meta 段は clean pass なら silent 終端 (= 結果 file のみ)。 これで chain は自然に沈黙終息し、 孫 marker が構造的に生まれない。
+4. **consume は受領した turn 内で完遂。** marker の内容を人間が受領した (= surface を見て言及した / live で結果を受け取った) session は、 同 turn で consume まで実行する。 「後で consume」 が滞留の入口。 consume は marker の所在 + token だけで誰でも可 (= 親 session である必要はない、 下の「consumer の拾い方」 と同型)。
+
+不変条件は変えない: 「**作られた受領義務は取りこぼさない** (= consumed まで surface し続ける)」 は維持し、 本節は「**義務をいつ作るか**」 を絞る = no-silent-drop と no-noise-accumulation の両立。
+
+### <a id="receiver-side-recognition"></a>受け取った側 = 「自分が worker か」 の判定 (2026-07-07 試験 rule)
+
+sender 側は上記 spawn-spec template を書いて chip を投げる。 receiver 側の逆問い = **自分が今受け取っている message は spawn-spec template そのものか**。 そうであれば **君 = worker**、 その prompt を再度 spawn_task に転記して grandchild を作らない (= 冗長な 1 段 indirection、 handoff-chain の無限延長を招く)。 execute in-tree。
+
+**判別 signal (form-syntactic、 動詞の semantic 判別より頑健)**:
+
+- 決定的 path (spec / results / return spine) 明示
+- unique token
+- 完了時実行 command 全文 (= results-inbox の `--record` 系)
+- 「上位 session の次回起動時に自動 surface」 等の **上位 session 前提** wording
+- board の宛先 (= `role-<project>-<function>` か session id + `inbox --session … --sync` / `claim` の command) — v2 request を通す handoff の形。 token も return spine も無いが、 これも「君に向けて書かれた依頼」 の form marker
+
+これらが揃った message を受けたら **その prompt を再 spawn しない**。 template の構造要素そのものが「君は終端の worker」 を示す **addressing の form marker** である (sender は自分を「上位」 として frame している = message は自分より下位 = 君に向けて書かれている)。 動詞 semantic 判別 (「投げて」 = spawn 明示 vs 「担当してほしい」 = execute 明示 vs あいまい 3-way) より、 form の syntactic 判別が頑健 = 前者は [`convention-design-principles.md §8.8 (= #proxy-blind-spot)`](../docs/convention-design-principles.md#proxy-blind-spot) の意味的 proxy 判別に該当、 後者は proxy でなく form 直接。
+
+**受け手の最初の 3 手** (掲示板の宛先で起動した worker。 (3) は掲示板を経ずに起きた worker にも): (1) 自分宛ての inbox を読み、 request がまだ無ければ仕様を読み進めず、 依頼元に尋ねるか立つのを待つ (claim の関門は request が在って初めて働くので、 request より先に起動した worker は二重起動を止められない)。 (2) claim が「別の claim が生きている」 で拒まれたら、 何も読まず・書かずに終了して人に 1 行伝える。 同じ宛先の worker が別に生きていると分かった時も (2) と同じ。 (3) 作り始める前に、 作るもの (file 名・hook 名・規則の anchor) が既に在るかを、 作業先の repo の file と `git log` で 1 回引く。 在れば作り直さず、 依頼の完了条件と照らして足りない分だけをやり、 二重起票だったことを依頼元に返す。 掲示板を経ない依頼 (提案の card など) と、 起票から時間が経って起きた worker には claim の関門も宛先の照合も働かない。 起票側の網は、 二重起票の検査 (`scripts/lib/spawn_dedupe.py`) の extension が `notices` で近い仕事を知らせる場合だけ在り (知らせるだけで止めない)、 受け手側の網はこの一手だけ (実測: 同じ仕事を掲示板の依頼と掲示板を経ない card の 2 経路で出し、 card から起きた worker が起きた時には、 もう一方の worker が実装と配線を終えていた)。
+
+**根**: [`convention-design-principles.md §4.1 (= #motivated-substitution-trap)`](../docs/convention-design-principles.md#motivated-substitution-trap) の inverse-direction 発現 = 泥仕事を admin 役 (chip-authoring) に退避 = deliverer-retention の反方向 substitution。 2026-07-07 Evidence 参照。
+
+⚠️ **試験 rule 段階 (2026-07-07 land 時点、 empirically untested)**: §4.1 doctrine「ambient rule 追加は既に override された最強信号より弱い → 構造的に無効」 は本 rule にも fade を **predict** する。 他 rule で fade は実証あり (2026-06-27 SPAWN-STATUS-CONFAB F3 = 4 分前 in-context Read でも未発火 / 2026-06-29 WTLOCAL-TITLE-REMISS = 2 日前 land + 常時 load でも未発火 / 2026-07-04 CHATLINK F1 = 4 重 load 下でも未発火)。 receiver-side recognition は未 test の rule で、 「form-syntactic な rule は semantic reflex より頑健」 という hypothesis の test 素材。 2-3 週の observation で判定:
+
+- **効いた (再発ゼロ)** → §4.1 doctrine の boundary refine (= form-syntactic rule は fade しない亜種の可能性)
+- **再発 (fade)** → §4.1 evidence 追記 + 本 rule 廃止 or 縮退。 「rule 追加は無効」 doctrine を form-syntactic domain にも extend する追認。
+
+⚠️ 判定 trigger = (a) 3 ヶ月以内に本 rule が発火した観測 (= assistant が chip-prompt-format を receive して in-tree 実行に切替えた明示 record)、 (b) 3 ヶ月以内に同型再発 (= chip-prompt-format 受領 → grandchild 誤 spawn)、 (c) いずれも観測されない (= evidence 不足 for evaluate)。 (c) は「本 rule の fire は目立たない = 予防効果ゆえ observe 困難」 の可能性を含む (= placebo と区別困難)。
+
+### <a id="receiver-premise-snapshot"></a>受け取った側の着手前確認 — spec の state 主張は起票時点の snapshot、 root が task と食い違ったら表に出す (2026-09-11)
+
+1. **spec が述べる外部 state は起票時点の snapshot** — 「CI が N 回連続で落ちている」 「まだ誰も直していない」 「X は未反映」 のように行動を分岐させる state の主張は、 着手前に live の一次 source (run 履歴・`git log origin/<branch>`・対象 file) で 1 回照会してから信用する。 起票から着手までの間に、 別 session が同じ問題を片付けていることがある。 実例 (2026-09-11): 「checks が直近 100 run すべて failure、 修正 commit を push して green を確認せよ」 という spec を受けた時点で、 別 session (Codex) の修正が約 2 時間前に push 済みで、 後続 4 run が green だった。 着手前の `gh run list` 1 回で重複修正を避け、 task は「原因と起点の確定 + 修正の検証」 に縮んだ。 [§3 の SESSION narrative の stale](#prev-commit-as-foreign) と同じ「state を書いた時点と読む時点のずれ」 を、 spec (= 他 session が自分宛てに書いた文) に当てたもの。 CI の場合の手順 = [`debugging-discipline.md#ci-red-streak-forensics`](debugging-discipline.md#ci-red-streak-forensics)。
+2. **起票側は対象 repo を `cwd` で明示する** — `spawn_task` の `cwd` は省略すると起票元 session の project になる (tool の仕様)。 起票元と別の repo の task を投げるときに省くと、 受け手は task と無関係な root で起動する。 実例 (同日): claude-config の CI task が、 封じた査読 sandbox (= CLAUDE.md が `~/Claude/` の読取と sandbox 外への書込を禁じる dir) を root にして起動した (起動経路は未確認。 `cwd` を省いた chip なら同じことが起きる)。
+3. **受け手の root の指示 file が task と矛盾したら、 最初の返信で矛盾を表に出す** — どちらも owner の指示なので、 黙ってどちらかを捨てない。 chat の明示指示に従って進めるなら、 (a) その旨を最初の返信に書く (= user が止められる)、 (b) 矛盾した root には何も書かない (結果 file・handoff・harness の自動 memory。 memory は起動時の root の project に紐づき、 次にその root で起動する session に自動 load される)、 (c) その root を使う別 session (例: 封じた sandbox の reviewer) に message を送らない、 (d) 後続の chip は `cwd` を対象 repo にする。 封じた sandbox 側の規則 = [`cold-eyes-isolation.md#sealed-sandbox`](../../ai-collaboration/conventions/cold-eyes-isolation.md#sealed-sandbox) の 8。
+4. **session の記録を読む仕事は、 どのマシンで走らせるかを spec に書く** — Claude Code の session 記録 (`~/.claude/projects/<slug>/*.jsonl`) は
+   マシンごとに別で、 同期されない。 別のマシンで書かれた session の記録は読めないので、 spec に「このマシンに無い id は記録なしと書き、
+   推測で埋めない」 を入れる (2026-09-14、 原因分析の作業書を別マシンに投げかけて気づいた)。
+5. <a id="receiver-test-inversion-check"></a>**spec が「入れる」 と決めた変更でも、 今の挙動を守る試験を逆にする (期待を反転する・試験を消す) なら、 当てる前に依頼元へ 1 行返す** —
+   決めた側がその反転まで見て決めたとは限らない (spec が引く候補の doc に「方針の変更」 と書いてあっても、 決定の行がそれに触れていなければ、 決めた側がそこを読んだ証拠にならない)。
+   1 行 = どの試験の何を逆にするか・止まるようになるもの・通るようになるもの・失う挙動。 止める側を足すだけで今の挙動を何も失わない変更とは分けて書く。
+   返事を待つ間は、 同じ依頼の他の項目を進める (待ちで止めない)。 実測: 当てて提出した後に依頼元が「設計の反転なら当てずに候補で」 と言い直し、 戻しの commit と候補の置き直しが要った。
+6. <a id="stale-peer-message"></a>**別 session の message は、 書かれた順と違う順で、 遅れてまとめて届くことがある = 指示を当てる前に、 後から出た指示と食い違わないかを確かめる** —
+   受け手が turn の途中にいる間に送られた message は、 turn の後にまとめて届く。 その束の中に、 後で出た方針の変更より前に書かれた指示が混じる
+   (実測: 方針の変更 = ある変更をこの便から外す、 を記録で読んだ後に、 その変更を便に入れる前提の細かい指示が届いた)。
+   指示どうしが食い違ったら、 届いた順でなく書かれた時刻の新しい方を取る (message に時刻が無ければ、 中身が指す掲示板の event・本人の裁定の記録の時刻で並べる)。
+   古い方の指示には手をつけず、 どれを取ったかを依頼元に 1 行返す (知らずに当てると、 戻しの commit と相手の検収のやり直しが要る)。
+7. <a id="receiver-spec-item-provenance"></a>**spec が挙げた「原文にある項目」 とその出所の一覧も、 起票側の要約 = 項目ごとに原文を引いてから使う** —
+   spec は前の worker の報告や note から書かれることが多く、 その要約の語が原文に無い項目として混じったり、 出所の file が実際と違ったりする。
+   1 項目ずつ原文の全体 (spec が挙げた file だけでなく同じ著者・同じ置き場の全部) を引き、
+   (a) spec が挙げた原文にあれば、 その節を出所として書く (b) 別の原文にあれば、 その file と節を出所として書き、 提出に「spec が挙げた原文の外」 と書く
+   (c) どこにも無ければ足さず、 見た範囲と一緒に提出に書く (足すと、 要約の語が原文の手順として正本に入る)。
+   実測: 依頼書が挙げた原文の外から出所を引く項目と、 原文のどこにも無い項目が、 同じ依頼に混じっていた。
+8. <a id="receiver-spec-rechecked-before-submit"></a>**提出の前に、 依頼書の file の履歴を引き、 引き受けた後に直っていないかを確かめる** —
+   依頼元は引き受けの直後に依頼書の前提や完了の条件を直して push することがあり、 知らせの message は上の 6 のとおり受け手の turn の後に届く。
+   `git log --format='%h %ci %s' -- <依頼書>` で引き受けた時刻より後の commit があれば、 差分を読んで提出物を合わせ、 提出に「どの版に合わせたか」 を書く
+   (実測: 引き受けの 1 分後に依頼書の前提の訂正が push され、 受け手は最初の版で書き終えて提出し、 訂正の知らせは提出の後に届いた。 提出の後に合わせ直す commit が要った)。
+
+### <a id="report-after-result"></a>完了の知らせは、 操作の結果を読んでから送る
+
+操作 (掲示板の提出・push・送信) と、 その完了を知らせる message や要約を、 同じ応答に並べない。 並べた呼び出しは前の結果を見ずに順に走るので、 操作が失敗しても「済んだ」 が相手に届く (実測: 提出が引数の誤りで断られたのに、 同じ応答の message と turn の要約が提出済みと言った)。 操作の出力を読んだ次の応答で知らせる。 後から分かったら、 相手に訂正を送り、 有効な記録の id を書く。
+
+### <a id="review-handoff"></a>作ったものの検収を別 session に頼むとき — 作業書に書くことと、 受け手の進め方
+
+作った本人の 4 軸 sweep は、 自分の説明を自分で確かめる形になる。 道具・hook・検出器のように「説明と実装の食い違い」 が後で高くつくものは、 別 session に検収を頼むと安く見つかる (実測: 起票側の sweep と全 test が緑の成果物から、 誤検出 3 形・見逃し 2 形・説明と本体の食い違い 2 件が出た)。 盲検の査読 ([`cold-eyes-isolation.md`](../../ai-collaboration/conventions/cold-eyes-isolation.md)) と違い、 受け手は repo も記録も読める — 隔離でなく**読む順序**で独立を保つ。 読む順序で守れるのは、 起票側の記録が対象と別の file にあるときだけ — 対象 file の中 (先頭 comment など) に結論や記録への path があれば、 先に剥がした写しを対象にする ([`cold-eyes-isolation.md`](../../ai-collaboration/conventions/cold-eyes-isolation.md#contamination-channels) (d))。 盲検にしたいなら読む順序でなく [`#board-blind-variant`](../../ai-collaboration/conventions/cold-eyes-isolation.md#board-blind-variant) の形にし、 掲示板の依頼は `--review-target` か `--not-blind` のどちらかを付ける。
+
+**作業書 (起票側)**:
+- 目的を「問題なしの報告を作ること」 でなく「不具合・誤検出・見逃し・説明と実装の食い違い・公開してはいけない記述を見つけること」 と書く。
+- **起票側の記録 (results / RCA) は、 受け手が自分の所見を書き出した後に読む**、 と順序を指定する (先に読むと結論に引っ張られる)。 対象の file と commit は列挙する。
+- **直してよい範囲を線引きする**: 「明らかな不具合 ∧ 直し方が 1 通り ∧ test を足せる」 は直して commit、 「何を検出するか・止めるか」 のような設計の選択は、 所見 + 提案 + 根拠で返す。 触ってはいけないもの (設定 file、 外部への発信) を名指しする。
+- results に書くことを指定する: 所見 (重さ順、 再現手順か根拠つき)・確かめた範囲と確かめていない範囲・判断を求める項目 (選択肢と推奨)。
+- **results の置き場を repo の file に指定する** — 作り手が報告をアプリの中の session ごとの置き場 (desktop app の side-session notes の dir など) に書くと、 起票側の会話からは path で読めても、 他の session・他の機械・後の検収からは辿れない (実測: worker がそこに報告を置き、 起票側が受け取りのたびに repo の記録へ写した)。 受け手は、 報告がそういう置き場にあれば repo の記録に写してから受け取り、 受け取りの記録には写した先を書く。
+- <a id="criterion-after-request"></a>**依頼を出した後に結論の基準が変わったら、 その依頼の thread に載せる** — 本人 (依頼の持ち主) が起票側の窓で、 結論の選択肢の意味・物差し・「何をもって言えるとするか」 を言ったら、 同じ turn に言葉のまま依頼の note に載せ、 作り手と受け手に 1 行送る。 前に書いた選択肢を本人の発言が退けたなら、 どれを取り下げるかも書く。 作り手は提出の前に依頼の note を読み直すが ([`CONTRACT.md#re-read-before-submit`](../../ai-collaboration/board/CONTRACT.md#re-read-before-submit))、 起票側の会話にしか無い基準は誰も読めない (実測: 基準は起票側の窓にだけ在り、 作り手は退けられた選択肢を選んで提出し、 受け手は別の仕事の資料としてその基準を読んでいたが判定に当てなかった)。 起票側が受け手に別の照合を頼むときも、 その結果が検収中のどの結論に効くかを 1 文で書く。
+
+**進め方 (受け手)**:
+1. 対象を読み、 **疑った点を仮説として番号つきで固定してから**動かす。 壊れなかった仮説も results に「棄却」 として残す (= 何を試して無事だったかが、 次の検収の出発点になる)。 自分の期待の方が誤りだった case は、 所見でなく期待の誤りとして分けて書く。
+2. 既存の test → 自作の入力 (書式の揺れ・境界・異常な入力) → **実データ** (過去の記録に当てて、 検出を最低数十件は目で読む) → **相手にしている本体** (hook が app の挙動を当てるものなら app のコード、 [`hook-authoring.md#imitate-target-predicate`](hook-authoring.md#imitate-target-predicate)) の順に当てる。 合成入力で見つかった形は、 実データでの頻度を測ってから重さを決める (合成では壊れるが実データに 0 件、 は「低」)。 **規模の軸も 1 本入れる**: 数百〜数千件の入力で経過時間を測り、 入力の件数に比例して外部 process を呼んでいないかを見る (hook なら settings の timeout と比べる)。 正しさの test が全部緑でも、 件ごとの呼び出しは規模でだけ表に出る (実測: 独立に書いた正しさの例は全部通った修正が、 数千件の dir の commit で hook の timeout の数倍かかった。 書き方 = [`hook-authoring.md#hook-cost-per-item`](hook-authoring.md#hook-cost-per-item))。
+   - **直した後に入った実例を 1 件ずつ辿る**: 修正の commit の時刻より後の記録を state の時刻で抜き、 それぞれを transcript で追う (通知が出たか・差し戻しが何回か・処理済みになった時刻と、 それを書いた session)。 合成の試験が全部緑でも、 実例は試験の置いていない経路 (道具自身の CLI で書いた変更など) を通って来る (実測: 修正後の実例が、 先出しの通知を付けていない経路から来ていた)。 実例が少ないことも「確かめた範囲」 として書く。 起票側が報告した件数は、 同じ道具を自分で回して数え直す。
+3. 直した case は、 **修正前の部品では落ちることを repo に残る形で確かめる** ([`hook-authoring.md#hook-test-foil-teeth`](hook-authoring.md#hook-test-foil-teeth))。 照合 (盲検) に出した版が残っていて、 試験が 1 つの file の中の関数なら、 [`scripts/transplant-functions.py`](../scripts/transplant-functions.py) で新しい試験の関数をその版に移した写しを作って selftest を回し、 新しい試験だけが落ちて古い試験は通ることを、 command と落ちた行ごと受領の記録に残す (実測: 照合の回ごとにこの形で確かめ、 手で組んだ移植と道具の移植で落ちる行が一致した)。
+4. 設計の選択を委任されたら、 決めた理由と、 前に出した推奨から変えた場合はその理由を results に書く。 外部への発信だけは、 委任の言い回しに関わらず文面を見せて明示の OK を取る。 **保護された規則・配線・原稿を変える承認も同じ** — 「最終判断を任せる」 は承認の代わりにならない。 承認は受け手の session の会話に結びつく ([`agent-rule-ownership.md`](agent-rule-ownership.md)) ので、 起票側の session での委任の発言は受け手に届かない。 受け手は変更を candidate にまとめ、 差分を 1 回見せて本人の一言をもらう。 起票側は作業書にそう書いておく。
+5. 起票元が既に閉じていたら、 marker の受領は user への報告をもって行い、 受け手が consume する ([§Marker 経済](#return-signal-economy) の「1 系譜 1 marker」 は保つ = 追補で 2 本目を作らない)。
+6. **差し戻した後に本人が判断項目を裁定したら、 受け手は実装に回らず起票側へ中継する** (掲示板の note + 起票側が生きていれば直接)。 中継の前に起票側の作業木 (未 commit の差分) を読み、 着手済みなら方向の確認だけを送る — 同じ file を 2 つの session が書くと、 相手の hunk を自分の commit に吸う ([#staging-window-race](#staging-window-race))。 **起票側が自分の窓で本人に同じ判断を聞いているなら、 受け手は自分の窓で重ねて聞かない** — 本人は両方の窓で答え、 2 つの session がそれぞれ承認を得て同じ file を書きに行く (実測: 検収側も同じ問いを出し、 両方に承認が出て、 起票側が書いている途中の file に検収側も手をつけかけた)。 本人に伝えるのは「その判断はあちらの session の窓で答えてください」 の 1 行にする。 再提出の検収で見つけた不具合も、 作業書の線引き (明らかな不具合 ∧ 直し方が 1 通り ∧ test を足せる) に当てはまれば受け手が直して commit する。 直したら起票側に 1 行で知らせ、 相手の手元の出力や作業木が直す前の版のままでないかを確かめさせる。
+7. **描いた印・図形・画像の検収は、 数値の検査 (面積比・個数・有無・置き場) が通っても、 紙の大きさと高い倍率の両方の crop で形と位置を見る**。 数値の検査は形を見ないので、 違う形でも通る (実測: 折れ線が閉じて ✓ が三角になっても墨の面積比は「読める」 だった)。 位置も同じで、 基準 (雛形のまま刷ったもの等) と並べた crop で罫線・点線との関係を見る (実測: 画像の置き場は同じまま画像の中の箱が下がり、 置き場の照合を通った)。 紙の大きさの crop は読めるか (小さすぎないか) を、 高い倍率の crop は形を言う。 作った側の「crop で確認した」 は、 どの倍率で何を見たかまで読んでから受け取る。
+8. **差し戻した相手がもう居ないとき、 受け手が自分で直して note で止めない** — 依頼は作り手の提出を待ったまま残り、 担当の期限が切れて一覧の隅に出るまで、 動く人が居ない (実測)。 note は carrier ではない。 直したら同じ turn で、 確かめ直して提出する worker を起こすか (掲示板なら `launch --request <id>`。 直した本人は検収しない)、 持ち主に閉じるかどうかを聞く。
+9. **受領の後に作り手が自分の提出物の誤りを見つけたら**、 file を直して commit し、 閉じた thread に何を直したかを note で残し、 検収した session に 1 行送る。 節や式の番号は変えない (検収の記録の参照が切れる)。 報告には、 検収が直す前の版に対するものだと書く (実測)。
+10. **提出の主張の裏を取る照合は、 その場で書く前に既存の道具を探す** — 「移しただけ」 の主張は [`../scripts/verify-verbatim-move.py`](../scripts/verify-verbatim-move.py)、 道具の直しは各道具の `--selftest` と hook の test。 使い捨ての照合で受け取ると、 受け取りの記録の根拠が file に残らず、 次の検収が同じ照合を書き直す (実測: 道具があるのに使い捨ての照合で受け取り、 締めで道具を回し直して同じ結果を得た)。 書き換えを含む提出 (移すのと同時に現況へ言い直した commit) で道具が FAIL を出すのは正しい形 = 出た行が言い直しかを読む。
+11. **依頼が閉じたかは、 thread の最後の event の種類で判定しない** — 受け取り (accept) の後に、 依頼元の訂正の note や担当の期限切れの印が続くことがある。 掲示板の道具の `show --request <id> --sync` が出す今の状態の行を読む (実測: 受け取り済みの依頼を、 最後の event が note だったので開いたままと読み、 待たなくてよい前提を待たせかけた)。
+12. **当てる形 (置き換えの組・全文の候補) を受け取るときは、 中身で名指して、 今の土台で確かめる** — 受け取りの記録は、 当てた後の全文の SHA-256 (と commit) で成果物を名指す。 file 名だけで名指すと、 受け取りの後に作り手が同じ名の file を別の中身に置き換えたとき、 記録が別のものを指す (実測: 受け取った版を作り手が既存の名に移し、 前に「使わない」 と書いた名が受け取った中身を指すようになった)。 作り手の土台より後に本人が対象の file を書き進めていたら、 組を今の file の写しに当て直し、 old がちょうど 1 回ずつ当たるか・候補との違いが本人の書き足した所だけか・組めるかを見る (本人の新しい行が組の足す行と重なることがある = 実測)。 原稿の guard の空回しは差分と保護領域を出すが、 当てた後の SHA-256 は出さないので、 写しに当てて自分で数える。
+13. <a id="re-pick-the-verdict"></a>**判定を選ぶ提出 (言える / 条件つき / 言えない、 直す / 直さない など) は、 事実の確かめとは別に、 結論を提出の事実から選び直す** — 提出が自分で挙げた事実 (足したもの・使ったもの・条件・見ていない範囲) を、 依頼が求めた選択肢の言葉と依頼の thread の基準に当てて、 提出が選んだ選択肢と合うかを受け取りに 1 行で書く。 合わなければ差し戻す。 受け取りに書く問い・決定・気づきの理由が、 受け取る結論と食い違わないかも見る。 script を回し直す・原典と照らすといった確かめは提出の事実を確かめるだけで、 その事実からの選び方は確かめない (実測: 確かめが全部事実の向きの受け取りが、 提出自身の挙げた入力が依頼の別の選択肢に当たる結論を通し、 同じ受け取りの別の問いの理由がその結論と食い違っていた)。 先の決定として引く本人の言葉は言葉そのものだけを使い、 依頼書の言い換えや、 条件の付いた発言の前半 (「いい。 本当に言えるのか」) で、 その条件の答えを決めない。 掲示板の受け取りの欄 = [`CONTRACT.md#accept-review-form`](../../ai-collaboration/board/CONTRACT.md#accept-review-form) の `--verdict`。
+14. <a id="rerun-is-not-independent"></a>**提出の script を回し直しても、 独立の確かめにならないことがある** — script の assert が提出の仮定 (近似・模型・数え方) をそのまま式にしたものなら、 通っても仮定を回し直しただけで、 その仮定に拠る結論は確かめていない。 受け取りの要約では、 独立に出した数 (別の式・別の模型・原典・既存の道具) と、 提出の script を回しただけの数を分けて書き、 後者だけに拠る結論は「提出の主張 (未確認)」 と書く。 頭の中で計算して「組み直して一致」 と書くのも確かめにならない = 受け取りに書く前に script にする ([`closing-sweep.md#unbacked-checks`](closing-sweep.md#unbacked-checks))。 実測: 提出の script の assert が提出の近似をそのまま式にしていて、 受け取りの要約がその数を確かめた事実として書いた。 別の模型で数え直すと因子が違い、 次の段の提出がそれを直したときに、 前の受け取りの要約も記録の上で直す要が出た。
+
+### 注意 (caveat)
+
+- **⚠️ これらのツール (`spawn_task` / `send_message` / `search_session_transcripts` / `list_sessions`) は harness 依存で、 全環境にある保証はない。** Claude Code CLI (= 2026-06-21 確認) では deferred tools 一覧にも ToolSearch (= 概念検索 + exact name select の双方) にも無く呼べなかった。 = 本 §7 は Claude Code (desktop) 等これらを提供する harness での「観測例」 を前提に書かれており、 **その観測を全 harness に一般化していた** (= `convention-design-principles.md` の「一度の観察を一般法則化しない」 の doc-authoring 版 = doc が tool の実在を裏取りせず前提化する drift)。 CLI で「独立 session + 結果返送」 が要るときは **下記 file-handoff (pull) で spec ファイル化 → user が手動で別 CLI session を開いて拾う** 形にする (= Agent は「独立」 要件を満たさないので代替にしない)。 ⚠️ ただし deferred tools は session 中に動的 surface されうるので「絶対に無い」 とも断定しない (= 「現時点で呼べる tool に無い」 までが正確、 = inline §3「null を universal absence にしない」 の presence 版)。
+- **⚠️ `search_session_transcripts` は会話記録の一部しか検索しない** (実測: 別 session の tool の入力にも出力にもある文字列で 0 件。 層1 の [`scripts/search-agent-transcripts.py`](../scripts/search-agent-transcripts.py) では同じ文字列が当たった)。 0 件を「どの session もしていない」 の根拠にしない。 「どの session が X を実行したか」 は `search-agent-transcripts.py --tool-runs --regex '<X>'` (subagent の呼び出しも親の session の id で出る)、 発言は同じ道具の `--role`。 token の照合 (上の §7) は token を assistant の発言に出すので、 この穴に当たらない。
+- `send_message` は **常に user 確認を挟み、 unsupervised (auto / bypass) mode では使えない** ⇒ **この push 経路は supervised 専用**。 unsupervised (scheduled-task / cron) では下記「Unsupervised 返送」 の file-handoff (pull) を使う。
+- **⚠️ live-push (`search_session_transcripts` / `send_message`) は permission 設定で抑止できない always-prompt class** (= tool 側が「毎回明示承認」 を宣言、 `allow` 登録済 + `defaultMode: default` でも承認チップが出る = 起票元へ返すたびに踏む。 観測 2026-06-28、 機構正本 = [`claude-code-permissions.md` §always-approve-tools](claude-code-permissions.md#always-approve-tools))。 ∴ **required spine の results-inbox marker がチップを踏まない正規経路**、 live-push は「効けば bonus」 だがチップ込み (= この点でも optional 扱いが正しい)。
+- **非同期**: 結果は spawned 完了時に届く (呼び元はブロックしない = 「自分の作業を続けたい」 と両立)。
+- token は一意性を持たせる。 複数 HIT した場合 (= token が spawned の spec にも引用される等) も **recency で選ばない** (= similarity≠identity)。 self を除外し、 その token を *自分の発話として最初に残した* 起票元を呼び元とする。 判別不能なら push せず user 確認。 **token を持つ呼び元以外には絶対送らない** (= 誤着防止)。
+- **⚠️ 機械 enforcement の限界**: spawn_task / send_message への PreToolUse guard は (a) 一部 harness (Claude Code desktop 等) が hook を honor しないと観測されていた (2026-09-11: desktop の件の少なくとも一部は root 限定の `disableAllHooks` = [#disableallhooks-kill-switch](hook-authoring.md#disableallhooks-kill-switch)) + (b) これらの tool が hook 非対応 harness に偏在し『hook が効く環境 ∩ tool がある環境』 が乏しいため ~無効 (= placebo にしない、 = [`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork))。 `list_sessions` に lineage (spawnedBy) field が在れば spawned が宛先を推測する必要自体が消えるが、 これは harness 側の改修 (= upstream、 本 doc の scope 外)。 ∴ 現状の防御は本 § の規律 (token + 子側 fail-safe) が担う。
+- <a id="side-session-notes-deleted-on-archive"></a>**⚠️ desktop の side session が共有する notes の folder (`<app の userData>/side-session-notes/local_<家族の頭の session の id>/`) は、 家族の session が archive されると app が丸ごと消す** — app 本体の main process は、 session を archive する処理の中で、 家族の中に folder を持つ生きた session が残っていなければ、 その folder を `rm` の recursive で消す (確かめ方 = `python3 scripts/claude-app-bundle.py grep --where asar 'removeSideSessionScratchpad\('`、 読み方 = [`claude-app-bundle-reading.md`](claude-app-bundle-reading.md))。 app はこの folder を、 同じ家族の session どうしが動いている間に読み書きするメモの置き場として渡す = scratchpad・`/tmp` と同じ一時の場所。 家族より長く要るもの (本人の答えを待つ保護された file の候補、 掲示板の記録が根拠に引く結果・証拠・引き継ぎ、 後の session が当てる差分) は repo に置き (規則の文書と同じ形の path を避ける = [`closing-sweep.md#protected-files-need-ruling`](closing-sweep.md#protected-files-need-ruling))、 掲示板には repo の path を書く。 依頼元が子を畳むとき・自分が畳まれる前は、 folder に残る候補を repo に移してから archive する (実測: 掲示板の記録が指す notes の folder の file の大半が、 家族の archive の後に消えていた。 消えた中には本人の答えを待つ候補があり、 候補を作った窓の会話記録の Edit の入力から作り直した = [`closing-sweep.md#evidence-scripts`](closing-sweep.md#evidence-scripts) の `replay-session-scripts.py` は Write で作った file だけを戻すので、 cp で写した土台に Edit を当てた候補は、 土台が今も同じなら記録の old / new を当て直す)。
+- <a id="mid-turn-archive-looks-like-rejection"></a>**作業中に archive された session の会話記録は、 人が tool を断ったときと同じ形で終わる** (desktop、 実測): 走っていた tool の `tool_result` が「The user doesn't want to proceed with this tool use. The tool use was rejected …」、 `toolUseResult` が「User rejected tool use」、 続く user の本文が「[Request interrupted by user for tool use]」 で、 archive だと分かる印は記録に無い。 = 子の記録だけを読んで「本人が断った」 と結論しない。 見分けは app の log (macOS = `~/Library/Logs/Claude/main.log`) の同じ時刻の `LocalSessions.archive` と `torn down in mid-turn (archive)` の行 (log の session の id は記録の file 名の id と別の名前の空間 = 同じ log で記録の id を引いて対応を確かめる)。 サイドバーの行からの archive は、 作業中でも確認を出さずに進む (実測。 確認の文言は app の本体に在るが、 その経路では出なかった)
+
+### Unsupervised 返送 (= cron / scheduled / auto / bypass): file-handoff (pull)
+
+返す先の live 会話も承認 user も居ない文脈では `send_message` が発火しない。 代わりに **decoupled な pull**:
+
+- **どこに書くか**: orchestrator が **spawn 時に result path を契約として固定** (= ここでは **path が token の役割を兼ねる**。 supervised で token-handshake が要るのは consumer の addressable id が事前に不明だから / unsupervised は orchestrator が path を決めるので id discovery 不要)。 場所は **決定的なリポ内 path** (`/tmp` は不可 = reboot で消える + 別 session の誤参照、 [`expensive-intermediate-artifacts.md`](expensive-intermediate-artifacts.md))、 **self-describing な structured file** (`status: done|partial|failed` / timestamp / payload / error = cold な consumer が context ゼロで parse 可)、 collision-free な命名 (slug / run-id)。
+- **consumer の拾い方**: (a) [主] 次の run が既知 path を読む (= cron の自然形、 `status==done ∧ fresh` を確認して consume + marker clear)、 (b) [従] spawner が live だが unsupervised なら既知 path を **bounded poll + timeout**。 timestamp で staleness 判定。
+- **使い分け基準 (1 文)**: 結果を受け取る live 会話 (+ 承認 user) が在る → **send_message (push)** / 受け手も承認者も居ない → **決定的 path に書き consumer が次 run で読む (pull)**。
+
+= push (send_message、 id を token で探す) と pull (file、 path が token を兼ねる) は同じ hand-off の **supervised / unsupervised 双対**。 producer が決定的 path に書き consumer が自分の schedule で読む pull は、 他の決定的-path/pull 機構 (定期生成物・status marker file 等) と同型。
+
+### この technique の射程 (honest)
+
+これは「結果が返らないから独立 session を避ける」 動機を解消し route を *可能にする*。 ただし route は **選択の瞬間に表象されている必要**があり (= 存在を知っているだけでは pre-deliberative な既定を変えない)。 ⚠️ **cross-session の「使えば馴染む」 習慣化は起きない** (= 各 session は fresh instance で学習の持ち越しが無い)。 route が選択の瞬間に表象されるのは (a) 同一 session 内で既に使った後 (in-context) か (b) auto-loaded surface (= session 冒頭で必ず読まれる場所) 経由のみで、 **ambient な convention doc (本 doc 含む) は cold session では発火しない**。 ⇒ technique は route を *可能にする* enabler であって、 それを必ず選ばせる仕組みではない (= 「書いた」 だけでは fresh session の既定は変わらない)。 (⚠️ 「結果が要らない場面でも独立を避けるなら *作る主体でいたい* 別動機が残る」 という説は証拠が薄く speculative — tool availability / 動機づけられた task 誤読で説明でき、 別個の cure を要する load-bearing 問題として扱わない。)
+
+### 親が子の起動 / 走行を知る (= 第 3 方向、 parent → child)
+
+上記は全て **結果の返送** (child → parent)。 別 need = **親が「chip が起動したか・子が走っているか」 を live で知りたい** (= 例: 長く走る子を course-correct したい)。 ⚠️ まず frame: **完了結果は上記 spawn-spec template の results-inbox marker が必ず自動で届ける**ので、 live 起動確認は *course-correct が要る稀ケース限定*、 過剰利用しない。
+
+棚卸し済の現実解 (= 2026-06-27 に親 session で probe して確定):
+
+- ❌ **`read_widget_context("spawn_task")` は使えない**: 親 session で実走 (`spawn_task` / `mcp__ccd_session__spawn_task` 双方) → `No widget context available`。 chip は readable widget context として state を露出しない (= 当初は「新規 tool ゼロで起動を知る最有力 lead」 だったが negative 確定)。
+- ❌ **`Task*` family も chip を追えない**: `TaskList` / `TaskGet` = session-local な構造化 TODO (= 別 namespace、 spawn chip は列挙されない)、 `TaskOutput` / `TaskStop` = in-session background task 用で DEPRECATED。 chip の `task_id` (= `mcp__ccd_session__*` namespace) を status-query する tool は無い。
+- ✅ **現実解 = `list_sessions` を chip の distinctive な title で突き合わせ**: `isRunning` / `lastActivityAt` で走行を確認 (sessionId / cwd / branch も取れる)。 ⚠️ `list_sessions` は **self 除外 + task_id → session の対応無し**ゆえ title / cwd / branch の **突き合わせ** が要る。 title が generic だと誤特定 ([`§8.14`](../docs/convention-design-principles.md#single-field-identity-corroboration) の cross-session 版) → **chip に distinctive な title を付ける** (§8 の `[local推奨]` / `[worktree推奨]` prefix も識別の足しになる)。
+- ❌ **`dismiss_task` の "already started" 返りを起動確認に使うな**: 破壊的意図と紛らわしく、 消そうとしないと分からない偶然依存。
+- ✅ **走っている子に途中で知らせる** (= 前提が変わった、 子の作業に効く道具ができた): `list_sessions` の title で sessionId を取り、 `send_message(session_id=…)`。 `ListAgents` の `claude-NN` 名は task と対応しないので、 名前から推測して送らない。 子の turn 中なら queued になり、 turn が空いた時に届く (2026-09-13、 並走中の sweep に新しい gate と棚卸しの mode を 2 回知らせた)。 <a id="queued-message-arrives-stale"></a>掲示板と message の両方で合図を出すと、 掲示板を見張っている子は掲示板の合図で先に動き、 message は子の turn が空いた後に届く (実測)。 message は届いた時点で古くなっていても子の動作が変わらない形に書く (「掲示板の <event id> を見る。 その合図で先に動いていれば何もしない」)。 古い message への子の返事を受けたら、 同じ頼みを重ねて送る前に掲示板の状態を読む (重ねると子の turn が 1 つ余計に回る、 実測)。
+- <a id="chip-correction-by-message"></a>❌ **chip の作り直しで訂正しない**: chip は作った瞬間に起動したものと扱う (人は数秒〜十数秒で押す)。 直したいこと (宛先・仕様の訂正・request の id) は起動した session に `send_message` で送る。 作り直すのは `dismiss_task` を単独で出し、 取り下げ (withdrawn) を読んだ後の応答だけ — 取り消しと作り直しを同じ応答に並べると、 取り消しが失敗しても作り直しは既に出ている ([`#control-dependency-is-dependency`](../docs/convention-design-principles.md#control-dependency-is-dependency))。 tool の説明にある「新しい chip を先に出してから古い方を dismiss」 は、 古い方が起動済みなら必ず二重起動になる。 chip の文面には変わりうる事実を写さず、 宛先の id・仕様の path・掲示板の request id だけを書く (= request を立ててから chip)。
+
+honest な天井: **「起動した」 を *live 親に自動 push* する経路は harness 上ほぼ無い** (= harness 通知無し / desktop hook gap で SessionStart 注入が live 親に効かない 〔[`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork)〕 / `send_message` は child → parent + user 確認)。 ∴ realistic な上限は **discoverable な pull** = 本手順で、 「完了は auto-deliver のまま起動確認だけ on-demand に倒した」 honest な fallback (= 結果を取りこぼす穴ではない)。 真の根治は **upstream** (`spawn_task` が session_id を返す / `list_sessions` に `spawnedBy` lineage field があれば突き合わせ fragility も discoverability も一掃される = §7 caveat の lineage field と同根、 harness 改修ゆえ本 doc scope 外)。
+
+〔3 方向の責務境界: **完了** = results-inbox marker (child → 人間 / 未来 session) ／ **findability** = 本 §7 method A (child → parent) ／ **本節** = parent → child 起動。〕
+
+---
+
+### <a id="green-light-carrier"></a>green-light は同 turn で「運搬体 (carrier)」 を持たねばならない — 「別 session 待ち」 は carrier ではない
+
+**失敗 mode**: handoff spec (plan file) を書き、 実装 OK (= green-light) も取れているのに、 状態表記が「別 session 待ち」 のまま**誰にも push されず眠る**。 待ち行列に (a) **時計が無い** (= deadline を持たない義務は deadline 系の surfacing 全部の圏外)、 (b) **owner が無い** (= 「どこかの将来 session」 は全 session にとって他人の仕事 = 責任の拡散)。 ambient に置かれた doc は cold で発火しない (= 各 session は fresh instance) ため、 これは「いつか拾われる」 のではなく**構造的に拾われない**。 実事例: ある再発防止 plan が green-light 済みのまま 2 ヶ月滞留し、 その間に防ぐはずだった同型 incident の 3 例目が発生した (= 対策の設計は正しかったのに、 queue の力学で負けた)。
+
+**ルール**: **決定 (green-light) が生まれた同 turn で、 機械に push される運搬体へ変換する**。 運搬体は次のどれか:
+
+1. **spawn_task chip** (harness にあれば) — user の可視 queue に入り、 1 click で worker session が立つ
+2. **deadline つき TODO** (task ledger に mint、 `cross_ref` = plan file path、 self-imposed deadline 〔例 +14d〕 + 適切な priority) — deadline-horizon 系の毎 session push + 強制 disposition (= act / 明示 defer / 見送り決着) の管轄に入る
+3. **即時実装** (= 小さければその場でやる — queue に入れない のが最強の queue 管理)
+4. **session 宛ての board request** (v2 `request`、 受け手の session か role id 宛て) — 受け手の inbox と、 受け取り側の session 開始時の surface に載る (実装は各 user の private layer。 [1 義務 1 受領経路](#board-receipt-carrier) = この carrier を選んだ義務に完了 marker や期日つき TODO を重ねない)。 **板への投稿は記録であって push ではない** = 相手の session が生きている (session 一覧に居る) なら、 投稿のたびに直接 message (`SendMessage`) で「thread id + 何を書いたか」 を 1 行送る。 message だけで済ませない (板に無いものは記録に残らない)
+
+「plan header に green-light 済みと書く」 「project list に 🟡 で載せる」 は**どれも carrier ではない** (= push されない記録)。 これは same-turn conversion family の一員: 会議確定メール → 同 turn calendar 登録 / 依頼メール → 同 turn TODO / 印刷 → 同 turn 点呼行、 と同じ「生まれた瞬間に機械の管轄へ」。
+
+**user 判断待ちの plan も同型に眠る**: blocked-on-user は「正しく idle」 に見えるが、 **その質問自体が carrier を持たなければ二度と user に提示されない** (= 「OK 待ち」 のまま数ヶ月、 誰も聞き直さない)。 → 「disposition を取る」 という TODO (deadline つき) を mint するか、 複数溜まっているなら 1 本の棚卸し TODO に束ねる。
+
+**人に渡す手順も同型**: 「あとで 1 回やって」 を chat に書いて終えると、 その手順は人の記憶という push されない場所に置かれる → [`convention-design-principles.md#human-memory-not-a-carrier`](../docs/convention-design-principles.md#human-memory-not-a-carrier)。
+
+**限界の宣言**: mint の瞬間の recall (= 「green-light が出た、 carrier を作らねば」 と気づくこと) は規律依存で残る。 plan file の散文から green-light を機械検出する案は棄却 (= 表現が freeform で fragile、 検出器肥大)。 構造的利得は「ambient (push ゼロ) → deadline-horizon pipeline (毎 session push + 強制 disposition)」 への移動であり、 保証ではない — 床は human-steering。
+
+### <a id="session-message-quota"></a>本人が書くまで、 別 session への送信は 10 通で止まる (desktop)
+
+desktop app は、 本人がその session に最後に書いてから、 その session が他の desktop session に送った message が 10 通に達すると、 本人が次にその session に書くまで送信を止める (「session どうしの自動のやり取り」 と見なす。 送った message は届かず、 止まったという結果だけが返る。 実測)。
+worker を何体も起こす指揮役は、 起動の go・番の知らせ・受領・wrap の依頼で 10 通に早く届く。
+
+- **送る前に束ねる** — 同じ相手への知らせは 1 通にまとめる。 相手が答えを返す必要の無い事実 (記録の場所・済んだこと) は掲示板の note にする (掲示板への書き込みはこの数に入らない)。
+- **止まったら** — 本人に 1 行で、 届かなかった宛先と中身を伝える (本人が書けば再開する)。 待てない知らせは掲示板の note にも書くが、 受け手が掲示板を見張っていなければ読まれない = 受け手がその知らせを待たずに先へ進む形 (「返事が無ければ〜で進める」) なら、 進む前に届くとは限らないことも本人に伝える。
+
+## <a id="worktree-vs-shared-checkout"></a>8. worktree (隔離) か shared checkout (ローカル) か — 並列変更の隔離 vs live 反映
+
+独立 session / subagent を起こすとき (= §7 の spawn_task hand-off、 Agent tool の `isolation: "worktree"` オプション 等)、 その作業を **隔離 worktree** (= 同じリポの別フォルダ checkout、 履歴は共有・作業中の中身は独立) でやるか **本物の checkout (ローカル、 共有作業ツリー)** でやるかを選ぶ。 これは §1「同 file path を別 session が並列上書きする race」 の構造的な解 (= 隔離) と、 その**適用限界**の節。
+
+### 判断ルール (default + 例外)
+
+- **worktree (隔離) が向くのは**: 並列の別 session/agent が同じ file を変更して衝突しうる **∧** 作業が **自己完結** (= 成果が隔離コピーの中でコミットまで完結し、 live 環境に反映されなくても検証できる) とき。 worktree は安くない (= 別 checkout の setup コスト + disk。 Agent tool の説明も「並列衝突する時だけ使え」 と注意している) ので、 衝突の実害が無いなら使わない。
+- **ローカル (shared checkout) にすべきは**: 成果が **本物の作業ツリーに反映されて初めて意味を持つ / 検証できる** とき。 典型 = symlink や install/setup スクリプトで **live 環境** (= 例: hook や dotfile を home 配下の決まった場所へ配線する構成) に効く変更、 live 環境がないと動作検証できない変更。 worktree だと (a) 変更が live の場所に **届かない** (= 別フォルダなので symlink 先の実体は変わらない)、 (b) 隔離コピー内で setup/install を走らせると symlink が **後で自動削除されるコピー** を指して **live 設定を壊す**。 この場合、 並列衝突の risk は worktree でなく §1 の規律 (= 着手前 `git fetch` + 自分の file だけ明示 path で commit + 他 session の未 commit 変更に触れない) で抑える。
+
+### 迷ったら 2 問 (= worktree は AND 条件、 1 問 shortcut だと片方を見落とす)
+
+worktree は **(a) 別 session が同じ file (path) を並列に上書きしうる (= 衝突 risk あり) ∧ (b) 成果が隔離コピー内で完結** の両方 yes で初めて正当化される (= 上 line 308 規則の operational 再述):
+
+> (a) 別 session が同じ file (path) を並列に上書きしうるか? — no → **local 確定** (= worktree は衝突解、 衝突 risk 無しに expensive option を正当化しない) / yes → (b) へ
+> (b) 成果物は **隔離コピーの中で完結** するか? — no → **local** (= worktree は live 反映できない、 隔離コピー内の変更が live に届かない) / yes → **worktree**
+
+### 既定: 新規 unique-名 file の handoff は local
+
+新規 unique-名 file 1 本を書いて commit/push で完成する handoff (= cold-eyes RCA / 一回限りの調査 note / 個別 slug の plan 等) は **file path が unique で他 session と衝突しえない** ゆえ (a)=no → **既定 `[local推奨]`**。 既存 file 編集や複数 file 触りを含む handoff はこの既定の射程外 (= conflict-risk を個別判断)。
+
+⚠️ **観測された application error pattern**: (b) 自己完結だけ見て (a) 衝突 risk を未確認のまま worktree を選ぶ (= 2026-06-29、 4 軸 family の (ii) under-execution residual の correctness 軸 instance、 詳細 [`docs/convention-design-principles.md` §4.1 evidence](../docs/convention-design-principles.md#motivated-substitution-trap) + layer-3 plan)。 ⚠️ 本節 codify は **correctness 軸** (= worktree AND 条件の明示化) であって firing 軸 (= prefix 脱落自体) ではない — firing は build-nothing verdict (= 同 §4.1 evidence、 firing-surface lever 枯渇)。
+
+### 注意
+
+- この判断は **hand-off / 隔離オプションを選ぶその瞬間に表象されている必要**がある (= §7「この technique の射程」 と同じく、 ambient な doc は cold session では発火しない)。 ∴ spawn_task の spec を書く・`isolation` を渡す **まさにその時** に本節を想起する。
+- **chip / spawn_task UI で human が worktree か local を選ぶ hand-off では、 本節 verdict を chip の *title 頭* に `[local推奨]` / `[worktree推奨]` で付ける**。 理由: `spawn_task` には isolation 引数が **無い** (= Agent / Workflow `agent()` の `isolation` 引数と非対称) ので system が推奨を pre-select できず、 worktree/local は human が UI で選ぶしかない。 → 推奨の **default 化は不可、 visibility で代替**する。 tldr (= ホバーしないと出ない tooltip) でなく **常時表示の title** が唯一の視認 lever ゆえ、 human が何も考えず押しても推奨が目に入るようにする。
+
+---
+
+## <a id="worker-task-sizing"></a>9. worker task の適正サイズと orientation の spec 前払い — 委譲 spec の切り方 (宛先は spec author)
+
+§7 が hand-off の**運び方** (token / 返送 spine)、 [`output-cap-death-loop.md`](output-cap-death-loop.md) が worker の **output (生成) 側**の死機構と予防の正本。 本節はその上流 = **task をどの大きさに切るか** (sizing) と、 **input (読解) 側**の立ち上がり費用 (orientation) を spec 側で前払いする規律。 worker は cold session で ambient doc は発火しない (§7 「この technique の射程」) — ここでも操縦桿は spec だけなので、 両方とも spec author (親) の仕事。
+
+### <a id="sizing-predicate"></a>sizing 述語: 新規概念 1 個 + 既存部品の合成まで
+
+spec を書く前に **「この chip に新規概念がいくつあるか」 を数える** (新規概念 = worker が spec と名指し部品だけからは組み立てられず、 自力で設計・導出しなければならない要素):
+
+- **0-1 個** (例: 部品 library 単体 / 較正 1 本 / 既存 pipeline への 1 部品差し替え / 検証済み手法の新 target への適用) → 1 chip で OK。 機械的な合成の**量**は大きくてよい (= 1 つの coherent な新規概念 + repo 内の既存部品の組み合わせで完結する大きめの chip は一発 landed した実測)。
+- **2 個以上** (例: 「machinery 構築 + 較正 + 適用 + 検証」 を 1 spec に束ねる monolith) → **直列 stage に分割** (機械 stage 先・判断 stage 後、 前 stage の成果物 (file / API) を次 spec が名指す)。 = [`output-cap-death-loop.md` prevention rule 1](output-cap-death-loop.md#prevention-spec-rules) 「1 worker = 1 bounded stage」 の "bounded" を、 spec を書く手が数えられる述語にしたもの。
+
+### <a id="orientation-prepay"></a>orientation cost は spec 側で先払いする
+
+worker の立ち上がりの「何を読むべきか探す」 段階は、 最初の durable 成果 (= 初 commit) が出る**前に** context と時間を消費する = そこで死ぬと全損になる無防備区間。 spec author が前払いする:
+
+- (a) **読んでよい file を名指しで cap** (≤ ~4-5 個 + 「他を開かない。 疑問が出たら results に書いて進む」)。
+- (b) **copy 元を関数名まで名指す** (「pipeline の copy 元 = script X の関数 F / G / H」)。
+- (c) **組み立て図を 1-2 行で書く** (「X の関数 F の部品 Y を Z の G に差し替えるだけ」)。
+
+(a)-(c) が書けないのは**親自身が構成を把握していない signal** で、 その chip はまだ切り出せる状態にない (= 先に親が scout するか、 scout 自体を bounded chip にする)。 write 側の cap (「触ってよい file はこれだけ」 「成果物はこれだけ、 増やさない」) は並列衝突防止 (§1) と scope creep 防止を兼ねる。
+
+依頼書には、 方針の段か実装の段かも書く (実装の段なら確認済みの方針の file と本人の確認の発言、 方針の段を立てない作業ならその理由 = [`policy-before-implementation.md#delegating`](policy-before-implementation.md#delegating))。
+
+### <a id="junction-fanin"></a>sizing 述語の追加軸: 合流点の入力 fan-in (2026-07-11 追記)
+
+新規概念数と別に、 **「読ませる入力 context をいくつ融合させるか」 (= fan-in)** も数える。 複数の独立した部品 script / 結果 file を 1 つに突き合わせる **junction chip** は、 新規概念が 1 個でも「全入力を読了した直後の最初の設計 turn」 に thinking が集中し、 orientation 前払い (a)-(c) が完備でも**読了直後に silent stall し得る** (実測 1 件: 入力 5 file の junction chip が file 読了直後に ~30 分沈黙・durable 出力ゼロ)。 fan-in が 4-5 file に達する junction は、 **「最小の must-close anchor 1 本を通して commit するまで」 を第 1 stage に切り出す** (= 巨大設計 turn を構造的に不可能にする) か、 spec に「骨格 Write → 実行 → append の逐次 turn 規律 + 部分 commit permission」 を焼き込む。
+
+### <a id="stall-rescue"></a>stalled worker の rescue: message 注入 (2026-07-11 追記)
+
+orientation 直後の silent stall (session は running のまま・活動 timestamp 停止・durable 出力ゼロ) は、 **稼働中 session への cross-session message 送信で復活できる** (= message は相手 session に新 user turn を注入する → 死んだ生成 loop を捨てて新 turn から再開される)。 実測 1 件で有効だった rescue message の 4 要素: ① scope 縮小 (最小 must-close 単位に落とす) ② turn 規律の明示 (1 turn = 1 小 step、 骨格 → 実行 → append) ③ 部分結果 permission (「gate 1 本通過時点で commit + marker してよい」) ④ 放棄予告 (「応答なければ session を放棄して fresh chip で再発注する」)。 rescue 失敗時は **zombie session を閉じてから** fresh chip を切る (= local-tree worker は同じ file path に書くので、 後で目を覚ました zombie と fresh worker の併走は衝突源)。
+
+### Evidence と正直な限界 (2026-07-11、 同日 2 回更新)
+
+単一 project・単一日の staged numerical-audit chain (worker 委譲 9 chip) の実測:
+
+- **一発 landed 8** = 部品 library / 較正 1 本 / 部品差し替え / 1 概念 + 既存部品再構成の大きめ chip (以上 4 = 弱い前払い) + **(a)-(c) 最強形 (explicit file cap + 関数名指し) を焼いた 4 chip が全部一発 landed** (= 起票時 「未着地」 だった直接実証は同日中に解消。 うち 1 chip は死んだ monolith の scope を分割した再発注)。
+- **死亡 3 (いずれも初回成果物ゼロ)** = ① 6-stage monolith 6h stall (= output-cap 死 loop、 正本 = [`output-cap-death-loop.md` §Evidence](output-cap-death-loop.md#evidence) の project B) / ② bounded 寄り spec の orientation 段階死 (proximate は infra error — 「orientation が長いほど初 commit 前に死ぬ露出時間が延びる」 という robustness 解釈までが誠実な範囲) / ③ **(a)-(c) 完備でも入力 5 file の junction chip が読了直後に stall** (= 上の fan-in 軸の evidence。 この 1 件は message 注入 rescue により縮小 scope で完遂 = 全損回避、 上の rescue 節の evidence)。
+
+⚠️ **一般化は暫定** (N = 単一 project・単一日、 landed 8 / 死亡 3 うち 1 rescue 成功)。 fan-in 述語と rescue 手順はどちらも **N=1**。 反例 (= 高 fan-in junction の一発 landed / rescue message 無効例 / cap 付き非 junction chip の同型死) や追加観察が出たら本節を更新する。
+
+---
+
+## <a id="delegate-model-routing"></a>10. delegate の model 選択と routing — main と別 model で走らせる
+
+§7-8 は hand-off の運び方 (token / 返送 / worktree-vs-local)、 §9 は spec を書く時の task サイズだが、 それらと**直交**する軸として、 **delegate (Agent tool / headless CLI / spawn_task 別 session) を main session と別 model で走らせる**選択がある。 main を高価 or 最新の model に置いたまま、 機械的な sweep / rename / doc 編集 / verification-gate 回し等を安価 or 安定な model へ振ると、 (a) main の premium-model budget を温存でき、 (b) 特定 model 版に既知 bug がある場合 ([`tool-call-robustness.md`](tool-call-robustness.md) 参照) それを避けられる。 ただし **version 粒度で pin できる経路は限られる**ので、 選択の瞬間に本節を思い出す必要がある。
+
+### 3 経路の比較 (2026-07-12 実測)
+
+| 経路 | model 指定粒度 | pin 精度 | いつ使う |
+|---|---|---|---|
+| **(a) Agent per-call `model` 引数** | **alias のみ** (`sonnet`/`opus`/`haiku`/`fable`) | ✗ **alias は最新解決** = `opus` → `claude-opus-4-8[1m]` (実測)、 特定 version への固定は構造的に不能 | main から subagent を投げるだけ・model 保証不要な bg 調査 |
+| **(b) custom agent 定義** (`.claude/agents/*.md` の frontmatter `model:` + `effort:`) | **full model ID** (例: `claude-opus-5[1m]`)+`effort:` | ○ pin 可、 durable | delegate の既定を version 単位で固定・毎回 CLI 引数を書きたくない (⚠️ registry は session 開始時 load = mid-session 追加した定義は次 session から) |
+| **(c) headless CLI** (`claude --model <full-id> --effort <level> -p …`) | **full model ID** + effort | ○ pin 可、 起動時即時反映 | scheduled / cron / launchd から model を明示的に pin して走らせる・(b) との組合せ可 |
+| **(d) background CLI** (`claude --bg --model <full-id> --effort <level> '<hand-off 文>'`、 依頼元の session の Bash から) | **full model ID** + effort | ○ pin 可 (実測: 起動 1〜2 s、 banner に model と effort が出る) | 別 session の worker を**人の手でコピペせず**に起こす (掲示板の request の後、 hand-off 文を引数に)。 `claude attach <id>` で端末に開ける、 `claude agents --json` が desktop の session と並べて出す (どちらも起こしたときの設定フォルダで打つ = [#worker-surface-visibility](#worker-surface-visibility))。 ⚠️ 依頼元の環境変数を継ぐ = 課金・account は起動した shell の設定 (banner で確かめる)。 ⚠️ 引数の hand-off 文で turn が始まらず「idle — send a prompt to start」 で待つことがある (実測) = 起動の出力を読み、 idle なら同じ文を SendMessage で送る。 宛先は短い id ではなく [`scripts/list-live-sessions.py`](../scripts/list-live-sessions.py) が出す `uds:` (短い id 宛ては「No agent named」 で届かない、 実測)。 終わりを待つなら同じ宛先に `notify_when_idle`。 ⚠️ desktop app の一覧には出ない ([`#worker-surface-visibility`](#worker-surface-visibility))。 ⚠️ 作業ディレクトリは信頼済みの dir にする (未信頼の dir では「Workspace not trusted」 で起きない、 実測)。 ⚠️ <a id="bg-worktree-isolation"></a>CLI の背景 session は既定で、 session の今の cwd の中の Edit/Write を `EnterWorktree` を呼ぶまで断る (断る文 = `This background session hasn't isolated its changes yet`。 system prompt も先に worktree に入るよう促す) = repo に `cd` した worker は worktree に入り、 作業を main でなく branch に push する (実測)。 main の作業木で働かせるなら `--settings '{"worktree": {"bgIsolation": "none"}}'` を足す (起動行に付けた環境変数 `CLAUDE_BG_ISOLATION` は job に届かない、 実測)。 掲示板の起動はこれを既定にしている ([`#role-request-launch-line`](#role-request-launch-line)) |
+| **(e) desktop app の `start_session`** (依頼元の Claude が呼ぶ。 掲示板の `request --surface desktop` が引数を出す) | full model ID + effort (引数) | △ **呼び元より高い model と、 effort の指定は黙って捨てられる** (実測: Opus の呼び元から Fable を頼むと Opus で起き、 effort は呼び元のものになった。 返りの文は何で起きたかを言わない)。 起こした後に `set_session_model` → `set_session_effort` で直す (session 単位、 次の turn から) = [`#desktop-start-model-cap`](#desktop-start-model-cap) | 本人が app の左の一覧で見て、 途中で直接話しかけたい worker。 ⚠️ 依頼元の turn が他の session の message で始まった時は起こせない (app が断り、 本人が押す card になる) |
+
+- <a id="role-request-launch-line"></a>**掲示板の役割 id 宛ての `request` は、 受け手の起こし方を request が決める** (engine `board.py`)。 `--surface background` = (d) の 1 行を出す (`CLAUDE_CONFIG_DIR=<login 済みの設定フォルダ> claude --bg --model <m> --effort <e> --settings '{"remoteControlAtStartup": false, "worktree": {"bgIsolation": "none"}}' "$(cat <hand-off 文の file>)"`、 `--launch` でその場で実行)。 worker は依頼の repo の main の作業木で働く (worktree に入らない = [`#bg-worktree-isolation`](#bg-worktree-isolation)、 hand-off 文も「EnterWorktree を呼ばず、 明示 path で commit して main に push」 と書く)。 worktree は並列の書き手と同じ file を触る仕事などで依頼元が `--worktree` を付けたときだけ (desktop の引数も `use_worktree` になる) で、 そのとき hand-off 文は「branch を push し、 自分で main に取り込まず submit に branch 名を書く。 取り込みは owner の OK」 と書く。 `--surface desktop` = (e) の `start_session` の引数 (outbox の `<request id>.start_session.json`、 title は仕事の名前が先で model が後ろ、 hand-off 文に「app の記録を読んで違えば止まる」 step 0) を出し、 依頼元の Claude がその引数で呼ぶ (この shell からは起こせない)。 どちらも outbox の `<request id>.launch.json` に model・effort・surface を残し、 `claim` はそれと違う tier の model で動く session を断る (依頼元か本人がその model を認めたら `--model-ok`)。 model = `--expect-model`、 無ければ owner の既定 (`AGENT_BOARD_LAUNCH_MODEL`)、 無ければ起票元の model / effort = `--effort` (`low`〜`max`。 掲示板の `board.json` が `launch_effort_floor` を持てば、 それより低い effort の request と `launch --request` を 1 行で断り、 持ち主が名指した値だけが `--effort-quote '<持ち主の発言そのまま>'` で通る = [`CONTRACT.md#launch-effort-floor`](../../ai-collaboration/board/CONTRACT.md#launch-effort-floor))、 無ければ owner の既定 (`AGENT_BOARD_LAUNCH_EFFORT`)、 無ければ起票元の `CLAUDE_EFFORT` (どの surface でも記録・引数・CLI の `--effort`・hand-off 文・title に同じ値が入る。 「<model> <effort> の worker に」 = `--expect-model <model> --effort <effort>`。 実測: `--effort` が無かった頃、 起票元と違う effort を頼むと記録が起票元の値になり、 直した `start_session` の引数を launch check が断った) / 設定フォルダ = owner の既定 (`AGENT_BOARD_LAUNCH_CONFIG_DIR`。 実測: ある機の既定フォルダは未 login で banner が従量課金、 login 済みの固定フォルダでは定額) / surface = `--surface`、 無ければ `AGENT_BOARD_LAUNCH_SURFACE`、 無ければ engine の既定 = owner の掲示板への desktop の session からの request は desktop、 terminal・headless・Codex からの request と共同研究者の掲示板への request は background (どの経路で engine を呼んでも同じ。 実測 = forwarder を通さず engine を直に呼んだ session が CLI の 1 行を受けた)。 hand-off 文は outbox の file に書かれ、 貼り付けも quote も要らない。 **起動の経路は掲示板の request が決め、 起こす側が `start_session` と `claude --bg` を手で選ばない**。 既にある依頼 (相手側の AI・別の機械・別の session が役割 id に出した依頼) の窓も、 `launch --request <id>` で同じ記録と引数を作ってから起こす (何も投稿しない。 上位 tier か max を頼むなら `--reason` = [`#premium-launch-reason`](#premium-launch-reason))。 `--surface desktop` の worker は依頼元の子のまま置き、 一覧で依頼元の下に並ぶ (本人が見る形 = worker は起こした session の下)。 子の turn の終わりの知らせは依頼元に届くが、 依頼元が動くのは掲示板の提出と blocker と、 子が依頼元に出した問い (掲示板の note か `SendMessage`) だけ。 子の判断・承認・検収の問いは依頼元が検収で決め、 本人の裁定が要るものだけを依頼元が自分の窓で 1 回本人に聞く (同じ問いを 2 つの窓で本人に出すと二重に届いた、 実測)。 `--detach` を付けた request だけ、 記録が合った worker を `detach_session` で一覧の上の段に独立させる手順を出す (子の turn の終わりの知らせが依頼元に来なくなる。 提出と blocker は掲示板の watch で届く)。 desktop の hand-off 文は worker に「判断・承認・検収の問いは依頼元に出し、 この窓で本人に頼むのは、 その窓でしか出せないもの (道具の許可の画面と、 この session での本人の承認が要る操作 = [`claude-code-permissions.md#relayed-approval-does-not-reach`](claude-code-permissions.md#relayed-approval-does-not-reach)) だけ」 と書く ([`CONTRACT.md#worker-questions-to-requester`](../../ai-collaboration/board/CONTRACT.md#worker-questions-to-requester))。 `--surface agent` = 依頼元が自分の Agent tool (subagent) で受ける仕事 (app の一覧に出ず、 自分で締めを回さない = 結果を依頼元がそのまま使う小さな調べもの・照合・検算だけ、 [#self-closing-delegate](#self-closing-delegate))。 desktop の request を subagent が `claim` すると掲示板が断る (依頼元か本人が subagent を選んだときは `--subagent-ok`)。 subagent は親と同じ session id と環境で動く (実測 = subagent 固有の変数は無い) ので、 claim の検査は「最後の tool 呼び出しがこの claim である transcript」 (親の transcript か `<親の transcript の dir>/<親の id>/subagents/agent-*.jsonl`) を claimant とし、 その model を比べる (`scripts/lib/session_model.py` の `acting_transcript`)。
+- <a id="worker-surface-visibility"></a>**worker が本人の画面のどこに出るかは、 起こした経路で決まる** (実測): (d) の session は Remote Control を切ると desktop app のどこにも出ない (端末の `claude attach <id>` だけ)。 Remote Control を入れると app の「Remote Control」 の棚に並ぶ = 別の機械の常駐 session と同じ棚なので、 手元の worker が別の機械に投げたように見える (その account を他の人と共用していれば、 その人の端末からも読める)。 (e) の session は依頼元の子として左の一覧に並ぶ (掲示板の既定。 `detach_session` で上の段に独立させると、 turn の終わりごとの知らせが依頼元に来なくなる = request の `--detach`)。 本人が依頼元を Remote Control (スマホ) から動かしているときは (e) を起こせない (app が「desktop アプリで打った指示からしか起こせない」 と断る、 実測) = 掲示板の出力の代わりの 1 行 (`AGENT_BOARD_LAUNCH_REMOTE_CONTROL=follow` の `launch --request … --surface background --launch`) で、 Remote Control つきの (d) を同じ設定フォルダで起こす = 本人が読んでいる一覧に出る (子にはならない。 依頼元と同じ公開範囲に載る = ai-collaboration [`board/CONTRACT.md#remote-control-fallback`](../../ai-collaboration/board/CONTRACT.md#remote-control-fallback))。 Codex の worker は headless の `codex exec` で起こすと Codex アプリのどこにも出ない (実測) = 起動の道具 [`scripts/codex-app-launch.py`](../scripts/codex-app-launch.py) で thread を作って起動文を予約し、 アプリに開かせる = アプリが書き手として走らせ、 進行がアプリに出て、 その窓から話しかけられる (手元の共有 Codex daemon が走らせる thread は、 走っている間アプリに進行が出ない = 盲検の判定 session の形。 掲示板の Codex の役割宛ての request の既定。 正本 = ai-collaboration [`board/CONTRACT.md#codex-worker-launch`](../../ai-collaboration/board/CONTRACT.md#codex-worker-launch))。 **本人が見たい worker は (e)、 見る必要の無い機械的な worker は (d)**。 端末の tab に `claude attach` を開いて見せる代用は、 tab を開いても panel を表に出さないと本人に見えない (実測)。 一覧の子の title は頭から切られて並ぶ = 仕事の名前を先に、 model は後ろに書く (頭に tag を並べると、 どの子も同じ字列に見える、 実測)。 (d) の job は起こしたときの設定フォルダの下にだけ登録される = `claude logs <id>` / `claude attach <id>` / `claude agents` は、 起こしたときと同じ `CLAUDE_CONFIG_DIR=<そのフォルダ>` を付けて打つ (付けないと依頼元の設定フォルダを探して「No job matching」 と出る、 実測)。 `claude agents` は TTY が要る (Bash の tool からは `--json`)。
+- <a id="desktop-start-model-cap"></a>**(e) で起こしたら、 「起きた」 と言う前に app の記録を読む**: `scripts/session-model.py <local_…>` の `app の記録` (= 次の turn の model と effort。 正本は app の session の記録、 読み方 = [`scripts/lib/desktop_sessions.py`](../scripts/lib/desktop_sessions.py))。 違えば worker は hand-off 文の step 0 (`scripts/session-model.py self --expect-model <model> --expect-effort <effort>`) で止まり、 `go` を待つ。 **止まる前に、 その道具が出す「go 待ち」 の 1 行を、 app の記録が名指す起こした側 (記録の `spawnedFrom`) へ `SendMessage` で送る**: 起こした側のほかの子が動いていると、 app は子の turn の終わりで起こした側を起こさない (worker が止まった知らせが本人の次の発言まで届かない、 実測) が、 子からの message は待機中の起こした側の turn を始める (ほかの子が動いていても、 実測)。 **本人が押す card (`own_initiative`) で起きた worker は、 この 1 行だけが起こした側を起こす**: 押されるまで子が無く、 押す操作は起こした側の tool 呼び出しを経ないので、 起動の hook も見張りも出ない (実測)。 起こした側が自分の `start_session` で起こしたときは、 同じ turn のうちに見張り `scripts/session-launch-check.py --wait-first-turn <local_…> --model <model> --effort <effort>` も Bash の `run_in_background` で出して turn を終える (背景の Bash の終わりもほかの子が動いていても起こした側の新しい turn を始める = [#tidy-after-child-turn-ends](#tidy-after-child-turn-ends) の `--wait` と同じ仕組み。 worker の 1 行が届かない形 〔step 0 の古い hand-off・掲示板を経ない hand-off〕 も拾う)。 見張りは worker の最初の turn が終わると起こした側を起こし、 app の記録を読み直して次の一手を 1 行で出す。 起こした側は worker の 1 行か見張りの 1 行どおりに動く: 違う = `set_session_model` → `set_session_effort` の順に出し (model を変えると effort も別の値に動いた、 実測)、 同じ見張りをもう一度 (turn が終わっていればすぐ返る) / 合う = `go` を送る / worker が掲示板の依頼を claim した = go を送らずに提出を待つ。 **effort だけが違うときは、 起こした同じ turn にまず `set_session_effort` を出し、 その返りの後に見張りを出す**: worker の最初の turn は起こしてから約 1 分後に始まり (SessionStart の hook が終わってから、 実測で約 1 分)、 その前に記録が直れば最初の turn から頼んだ値で API に送られ、 worker は step 0 を通って claim する (実測: 起こした直後に上げると最初の turn から頼んだ値、 最初の turn の後に上げると step 0 で止まった)。 呼び元より高い effort への引き上げは app が本人に承認の確認を出す (返りは本人が押してから) = 押すのが最初の turn に間に合わなければ worker は step 0 で止まり、 見張りの 1 行どおり go を送る。 model は worker の最初の turn が終わってから直す (最初の turn の前に返った model の切り替えが、 最初の turn に効かなかった = 実測)。 step 0 は app の記録 (次の turn の値) と、 この turn に API へ送った値 (会話記録の `api-request`) の両方を頼んだ値と比べる: 記録だけが直っていれば「go を送って」 の 1 行を送る。 step 0 の 1 行は書いた時刻を持つ (起こした側の turn の途中では届くのが遅れ、 go の後に着いた = 実測。 その 1 行より後に go を送っていれば読み捨てる)。 本人が app で model を変えたときは、 本人が選んだ model として扱う (worker への message に `[model-ok]`、 claim に `--model-ok`)。 機械 = [`scripts/session-launch-check.py`](../scripts/session-launch-check.py) (起こした直後に記録と比べて直し方と見張りの 1 行を出し、 `set_session_*` の後も見張りが走っていなければ同じ 1 行を出し、 記録が合うまで go の `SendMessage` を止める。 card を出したときは頼んだ値を台帳に残し、 起こした側より高い値を頼む card なら、 押された子を起こすのは worker の 1 行だと知らせる。 本人に頼まれて `proposal_id` だけで card を起こしたときは、 台帳の頼んだ値で照合する。 Stop 用の `--hook-stop` は 2 つを見る (配線は利用者の層): 起こした側が見張りも go も出さずに turn を終えた回 (記録・止める) と、 worker の窓が記録の違いで止まるのに起こした側へまだ何も送っていない回 (既定で 1 回止めて送る 1 行を出す、 mode = env `SESSION_LAUNCH_WORKER_STOP`)。 opt-in で、 掲示板の request を経ない worker の起動も止める)。
+- <a id="ask-before-stopping-a-busy-worker"></a>**動いている worker を止める・起こし直す前に本人に聞く**: 止めると、 それまでの読み込みに使った分がそのまま無駄になり、 起こし直すと同じ読み込みをもう一度払う。 見え方を変えたいだけなら止めない (記録は残る = `claude attach <id>` / `claude --resume <id>`、 desktop の session は一覧から開ける)。 聞くときは 1 行で: 何を (model と動いた時間)・なぜ止めたいか・止めないで見る道。 機械 = [`scripts/busy-worker-stop-check.py`](../scripts/busy-worker-stop-check.py) (busy の session への `claude stop|kill|rm` と `stop_session` を、 本人が発言する前の 1 回目は止める。 終わって idle の worker の片付けは止めない)。 `archive_session` は止める・起こし直すとは違う: archive は相手の turn を止めないので使用料の無駄は起きず、 app も turn の途中の session の archive を断る (app の code を読んだ範囲。 その断りの文は実測していない) = 同じ機械が turn の途中の相手への archive を止め、 本人に聞くのでなく turn の終わりを待ってから畳むよう出す (本人の発言では通らない。 turn が終われば下の [#tidy-after-child-turn-ends](#tidy-after-child-turn-ends) の判定に進む。 待ち方 = 同節の (3) の `--wait`)。
+- <a id="touch-only-own-sessions"></a>**自分が起こしていない session の model・effort を変えない、 止めない、 畳まない**: 起こした = 相手が自分か、 自分が `start_session` で起こしたか、 app の記録の親を辿って自分に着く (自分の子・孫。 `detach_session` で外した session も記録に起こした窓が残るので、 起こして切り離した窓は自分のもの。 本人が作った fork は数えない)。 それ以外の session (本人が開いた窓、 別の指揮役が起こした worker) に変えるべき点を見つけたら、 起こした窓に `SendMessage` で何を・なぜを 1 行で伝え、 変えるかはその窓が決める。 本人が開いた窓なら本人に 1 行で伝える (本人は app の model の menu で変えられる。 session は自分の model・effort を変えられない)。 自分でするのは、 本人がこの窓でその session の id か題を出して頼んだときだけ。 理由 (実測): 1 つの窓についての本人の言葉を、 別の指揮役の子 (本人がその model を名指して起こさせた窓) に当てて切り替え、 その窓の作業が止まった。 本人の名指しは起動の記録に残っていたが、 切り替えた側は今の model と題だけを読んだ。 app も自分が起こしていない session への変更は本人の確認に回すが、 auto mode では app の判定で決まることがある (`set_session_model` の説明)。 機械 = [`scripts/session-launch-check.py`](../scripts/session-launch-check.py) の TOUCH_GATE (`set_session_model` / `set_session_effort`。 `stop_session` / `archive_session` は [`scripts/busy-worker-stop-check.py`](../scripts/busy-worker-stop-check.py) が同じ判定を呼ぶ): 本人のこの窓の直近 3 回の発言に、 その session の id・一覧の名前・題が無ければ止める (打ち消し・苦情・本人が自分で直した報告の文は数えない)。 既定で on、 外す = `~/.claude/session-touch-gate.off`。 Bash の `claude stop` は app の記録の親を持たないので見ない。
+- <a id="tidy-after-child-turn-ends"></a>**止まった子を起こす message と、 済んだ子の片付けは、 子の turn の境目で読む** (desktop の session、 実測): (1) 止まっている子に `SendMessage` を送ると「20 秒以内に動き出さなかった・あとで拾うかもしれない」 と返り、 届かなかったように見えるが、 子はその後に起きて読む (`list_sessions` の `isRunning` が true に変わる・子から返事が来る)。 送り直さない = 同じ依頼が 2 回届く。 (2) 子が「済んだ」 と message を送った直後は、 子の turn がまだ終わっていない = その時点の `archive_session` は busy として上の機械に止められる (turn が終わるまで)。 片付けは子の turn の終わりの知らせ (`isRunning` が false) を待ってから出す。 (3) **その知らせは、 親が起こした子が 1 つでも動いている間は親を起こさない** (知らせは親の次の turn まで待たされ、 多くは本人の次の発言に同梱されて届く = 親は子が終わったのを知らないまま止まる、 実測)。 子の終わりを待って次の手 (照合・片付け) を打つなら、 依頼を送った同じ turn に Bash の run_in_background で `python3 scripts/child-wrap-check.py --wait <子の local_…>` を出す = 背景の Bash の終わりは、 ほかの子が動いていても親の新しい turn を始める (実測)。 待つのは Bash の process で、 親の model の turn は使わない。 何人かの子を 1 本で見張るときは、 どれか 1 つが終わった時点で見張りを終え、 残りを見張り直す (全部が終わるまで待つと、 先に終えた子が残る = 実測。 道具はそう動き、 見張り直す 1 行を出す)。 見張りの開始時刻は道具が子の会話記録 (親の依頼が子の窓に届いた時刻) から引き、 呼ぶ側に渡させない (実測: 呼ぶ側が「今」 や「数分前」 を渡し、 直前の wrap の依頼が窓の外になって、 wrap 済みの子が畳めない側に出た)。 親が子の `uds:` の宛先に送った message も、 子の窓では `from-session` で親のものと分かる (`from` は `uds:…`) = 親の指示として数える。 同じ道具は子を畳む前の照合 (動いているか・wrap の記録・子の commit が push 済みか・本人待ちの問い・本人が子の窓で話しているか) を出す。 本人が子の窓で話した後に親が子へ message (差し戻し・wrap の依頼) を送っても、 本人の話はそれで終わらない (実測: 本人が子の窓で仕事をしている間に親が差し戻しを送り、 その message が本人の発言を隠して、 道具が子を畳む番と出し、 親が wrap を頼んで本人に止められた)。 wrap の依頼と数えるのは、 語の直後が依頼の形の message だけ (道具の名前・thread id の一部・「」 の引用・「済み」 などの報告は数えない。 実測: 道具の名前を書いただけの報告が依頼と読まれた)。 依頼の後に親が「その wrap はしないで」 と送ったら、 その依頼と、 それより前の子の wrap の起動は数えない。 親から独立させた (detach した) session は子でない = wrap の見張りの知らせも出さない。 本人待ちの子への `archive_session` の 1 回目は上の機械が止める (本人の発言の後は通る。 判断の問いなら親が子に答えを送った後も通る。 本人が親の窓で、 子の問い・子の窓での本人の最後の発言より後に、 子を畳むよう言っていれば 1 回目から通る = 「閉じていいよ」「畳んで」「アーカイブして」 などの語、 同じ節が打ち消し・問いなら数えない。 実測: 本人の「閉じていいよ」 の 1 分後の `archive_session` を、 その言葉が 1 回目の止めより前だったために 2 回止めた)。 子の判断の問いには親が答える = 親の message が問いの後に子の窓に届けば答えと数える ([`#role-request-launch-line`](#role-request-launch-line)。 実測: 親が答えて片づいた問いを本人待ちと読み、 照合と archive の hook が止めた)。 本人だけが答えられる問い (承認・外部への発信 = 問いの文の語で見る) は親が代わりに答えて閉じない = 本人がその子の窓で答える。 hand-off の手順 0 ([#desktop-start-model-cap](#desktop-start-model-cap) = worker が自分の model・effort を読み、 違うので go を待つ) の停止は依頼元の go 待ちで、 本人待ちではない = 照合と archive の機械はその停止 (掲示板の hand-off で始まった窓で、 model の確かめが走り、 掲示板の claim が続かずに終わった turn) を本人待ちの問いに数えず、 go がまだ届いていなければ「依頼元の go 待ち」 と別に出す (app はこの停止も親に「本人待ち」 と知らせる。 実測: go の後に仕事も wrap も済んだ worker が、 手順 0 の停止を本人待ちと読まれて畳めなかった)。 別 session からの message (`SendMessage`) も、 ほかの子が動いている間に親の turn を始める (実測)。 ⚠️ 待たされた知らせは本人の次の発言と同じ 1 通で届くので、 文脈の上では知らせが先に来ていたように見える = 止まった理由を「知らせを見ていたのに待った」 と自分の落ち度として書く前に、 記録の時刻 (親の Stop と次の turn の間に turn があったか、 子の Stop はいつか) を見る (実測: そう書いた親の記録に、 知らせと本人の問いの間の turn は無かった)。 (4) **子の提出を受け取った (accept) turn に畳む手順に入らず、 子が何時間も残る** (実測、 型は 3 つ): 畳む規則が親の文脈に無い (起こした hand-off も、 親が読んだ規約の範囲も、 その規則を含まない) / 後の仕事に使うつもりで残す (次の依頼は出していない) / 畳む前に本人に「片づけますか」 と聞き、 答えを待つ (app の archive の道具の説明が本人の同意を求めるのに従う形)。 掲示板を使うなら「終えた」 は機械で判定できる = 子が claim した依頼が全部、 受け取られたか子の手を離れ (子の release・担当の引き継ぎ・lease の切れた後の別の session の claim = 掲示板が claim を外す 3 つ)、 子の役 (role id) 宛ての次の依頼も無い (`child-wrap-check.py --finished`)。 子の残りが子の窓の外で出る答え (本人・検収係・共同研究者) を待つことだけなら、 その当てを子への次の依頼にしない = 子に候補の在りか・当て方を依頼の note に残させて claim を手放させ、 畳む (待ちは掲示板の依頼が持ち、 答えが来たら新しい窓が引き受ける。 次の依頼で残すのは今すぐ始められる仕事だけ。 実測: 畳む網が止めた直後に、 中身が「外の答えが来たら当てる」 だけの次の依頼で子が残され、 網はその子を開いている依頼と数えて黙った = [`convention-design-principles.md#exception-route-as-proxy`](../docs/convention-design-principles.md#exception-route-as-proxy))。 機械は 2 つ: 受け取った直後に子の状態に合わせた 1 行 (`--hook-accept`、 PostToolUse の Bash) と、 畳む番の子を残して turn を終えたときの、 子と片づいた時刻 (受け取りか子の手放し) ごとに 1 回の停止 (`--hook-stop`)。 本人を待っている子には `--wait-due` を背景で出す = 本人が子の窓で答えて子が終えたとき、 ほかの子が動いていても親が起こされる (Stop の網は親の次の turn が来なければ効かない。 実測: 親の turn が来ないまま、 または起こされた turn が API の接続の誤りで落ちたまま、 子が長く残った)。 本人の再試行 (API の誤りの後に app が入れる「Try again」 の 1 行) は本人の発言に数えない。 本人が子の窓で答え、 子がそれに応えて問いを残さず止まった後は、 道具の既定では 10 分本人がその窓で話さなければ「本人と話している途中」 ではない (env `CHILD_WRAP_ANSWERED_GRACE_MIN`、 `none` = 数え続ける。 数え続けると、 本人が窓で話した子は、 本人に聞くまで畳めない = 親の message では解けない)。 畳む前に本人に「片づけますか」 と聞くかと、 後の仕事のために残す条件は個人層の規則で決め、 hook の文には `--extra` で足す。 (5) **本人がその子の窓を画面に開いている・ピン留めしている間は、 app が `archive_session` を断る** (`the app is keeping it for the user (pinned or in use)`、 照合が畳める側に出ていても同じ、 実測)。 同じ turn に打ち直さない (同じ答えが返る)。 本人に 1 行 (窓を閉じれば畳む・本人がサイドバーから archive することもできる) を伝え、 次の turn に `list_sessions` (`include_archived`) の `isArchived` を先に見る = 本人がサイドバーから畳んでいれば済んでいる (実測)。 (6) **子が turn の途中で許可・入力の確認を出したまま止まると、 registry の status は `waiting` になる** (`busy` でも `idle` でもない)。 これを turn の終わりと読むと、 wrap の途中で止まった子を畳める側に判定し、 親が送った wrap の依頼も子に届かないまま待たされる (実測)。 道具は `waiting` を turn の途中として扱い、 理由に「子の窓で確認が出たまま」 と出す = 親は本人に子の窓を見てもらうよう 1 行伝える (親は子の承認を代わりに出せない)。 (7) **app が `archive_session` を「live work」 で断ったら、 同じ turn に打ち直さず、 照合の道具が名指したものに合わせて動く**: 断りの文 (`still has live work (an agent run, a Remote Control client, a queued message or a background task)`) は 4 つを並べるだけで、 どれかを言わない (実測。 app の code では種類を持っている = 読んだ範囲。 この文が出た turn には hook `known-error-nudge` がこの (7) を出す)。 測った断りはどれも、 子が仕掛けて残した背景の作業 (締めの後も生きている掲示板の `watch`・Monitor) だった (実測)。 子の turn の終わりより後に親が送った message も、 配達待ちか、 届いて子が turn に入る形で畳めない時間を作る (子が turn に入ったのは実測、 配達待ちでの断りは app の code を読んだ範囲)。 `child-wrap-check.py <子>` がどちらも名指す (背景の作業 = 共通の部品 [`scripts/lib/session_background_tasks.py`](../scripts/lib/session_background_tasks.py) が子の engine の直下の shell と会話記録から並べる): Monitor が数十秒で期限切れなら子に何も送らずに待つ / 見張りなら子に task id を名指して `TaskStop` を 1 通で頼む / 見張りでない作業 (計算など) は終わるまで待つ。 **wrap を頼んだ後は、 子の turn が終わるまで子に message を送らない** (送ると子が turn に入り、 子の turn の途中なら配達待ちになる = どちらも畳めない時間を作る。 頼むことがあれば `--wait` が終わってから 1 通で)。 `--wait` は、 子の turn が親の最後の message より後に終わるまで待つ。 子の側の予防 = 締めの最後に自分の見張りを止める ([`closing-sweep.md#stop-own-watches`](closing-sweep.md#stop-own-watches))。 道具が見ないもの = subagent の背景・cron の予約・Remote Control・本人が子の窓を開いていること ((5))。 (8) **子への締めの頼みは、 道具が出す文 (`child-wrap-check.py` の `WRAP_ASK_TEXT` = skill の名つき) を言い換えずに送る** (実測: 文脈圧縮の後に親が締めの頼みを自分の日常の語で書き、 skill の名が消え、 子は skill を起動しなかった。 要約は手順の名を一般の語で運ぶ)。 <a id="wrap-model-before-ask"></a>**頼む前に子の model を読む**: wrap は知見の移し替えと整理 (確立した手順の運用 = [#model-fit-before-sending](#model-fit-before-sending) の表の下位の側) なので、 規則が wrap の model・effort を決めていれば、 子が止まっている間に `set_session_model` → `set_session_effort` で切り替え、 `scripts/session-model.py <子>` で app の記録を読み直してから頼む (切り替えは次の turn から効く = 送った後では wrap の turn に間に合わない。 session は自分の model を変えられない = 本人が自分の窓で締めを頼んだなら、 本人に model の menu で選んでもらう)。 照合の道具と hook の文は、 頼む段の前にこの段を出す (道具が子の app の記録を読み、 規則の値は個人層が `--wrap-model` か env `CHILD_WRAP_MODEL` で渡す。 値が無ければ「読んで、 規則があれば切り替える」 の一般形)。 照合の道具の出力と hook の文は、 wrap を頼む段でこの文そのものを出す (写せば名が残る)。 機械は 2 つ: 送る前 (`child-wrap-check.py --hook-presend`、 PreToolUse の SendMessage) に、 自分の子への締めの頼み (締め・仕上げ・片づけ + 頼みの形) で skill の名の無いものを 1 回止めて文を返す (同じ子への次の送信は通す = 原稿の仕上げなど別の仕事なら同じ文で送り直す) / 畳む前 (`busy-worker-stop-check.py`) に、 wrap の記録の無い (か、 wrap の turn の後に書いた分のある) 自分の子の `archive_session` を 1 回止め、 照合の理由を全部返す (同じ子への 2 回目と、 本人が親の窓で wrap を省くと言った後は通る。 本人の「閉じていい」「畳んで」 は本人の側の理由だけに効く。 実測: 親の本人への問いが照合の理由の 1 つ「wrap の記録が無い」 を落とし、 本人の「畳んで」 が理由の欠けた問いへの答えになった)。 照合も、 最後の wrap の turn が終わった後に子が file を書いた・commit したら、 その分を wrap されていないと数え (受け取りの知らせ・礼のように子が何も書かなかった message は数えない)、 wrap の記録の無いことだけが残す理由なら「次の一手 = 先に wrap skill を頼む」 を頭に出す (実測: wrap の後に親が仕事を 1 つ足し、 前の wrap が数えられて、 足した分は wrap なしで畳まれた)。
+- <a id="codex-thread-close"></a>**Codex のチャット (thread) も、 終えたものは同じ順で畳む = 指揮役が終えたと判定 → wrap を頼む → wrap の記録と push を確かめる → archive** (Codex のアプリの「最近の項目」 に済んだチャットが積もる = 実測)。 道具 = [`scripts/codex-thread-close.py`](../scripts/codex-thread-close.py) (`list` / `check` / `wrap` / `wait` / `archive` / `unarchive`。 照合の項目・見ないもの・台帳 = 冒頭)。 照合は上の Claude の子と同じ線 (動いていない・本人待ちの問いも話の途中も無い・掲示板の依頼が受け取り済みで次の依頼も無い・wrap の後に書いた分が無い・この thread の変えた file が commit + push 済み) を Codex の記録で引き、 題・idle・最後の一言だけでは終えたと数えない = 掲示板の受け取り済みの依頼に結び付かないチャットは、 指揮役が最後の報告を読んで `--evidence` に根拠を書く (台帳に残る)。 Codex に固有の実測: (a) 別の process (使い捨ての app-server) から読むと、 進行中の turn は `status=interrupted` で終了時刻 (`completedAt`) が無く、 終わると `completed` と終了時刻に変わる = 終わりは終了時刻で読む。 (b) wrap は共有の Codex daemon の `turn/start` に wrap skill を型つきの入力 (`{"type":"skill","name":"wrap","path":…}`) で渡す。 アプリがその thread を開いていれば `codex queue` の予約に回り (依頼文の頭の `$wrap`)、 アプリが次の turn として走らせる。 wrap の turn の model・effort は `turn/start` の `model`・`effort` で渡す (その turn から後を上書きする = app-server の schema の記述、 走らせては確かめていない。 道具 = `wrap --model / --effort`。 規則が wrap に安い model を決めていればそれを渡す = 上の [#wrap-model-before-ask](#wrap-model-before-ask) の Codex 版)。 予約 (`codex queue`) は文しか運ばない = model を指定した依頼は予約に回さず止まる (アプリで閉じて daemon で頼み直すか、 アプリで model を選んでから指定なしで予約する)。 (c) archive は使い捨ての app-server の `thread/archive` (状態 DB の印と rollout の `archived_sessions/` への移動、 model は呼ばない)、 戻しは `thread/unarchive` か Codex の CLI の `codex unarchive <id>` (往復を確かめた)。 開いているアプリの一覧には、 アプリが一覧を引き直すまで残る (外の process の archive はアプリに知らせが行かない)。 残って見える項目を開くと `thread/resume` が「archived なので先に unarchive」 と断る (中身は壊れない)。 (d) アプリか daemon がその thread を開いている (書き手の lock が握られている) 間は外から archive しない = 開いている書き手は古い rollout の場所を持ったままになる (アプリが手放すのを待つか、 アプリの中で畳む)。 (e) 封じた盲検の sandbox の reviewer ([`cold-eyes-isolation.md`](cold-eyes-isolation.md)) には wrap を頼まない: sandbox の規則が返送の後に公開層へ触ることを禁じ、 知見は起こした側の `collect` と締めの `codex-wrap-inventory.py` が回収する。 代わりに sandbox の台帳が「回収済みで回収の後に変わっていない」 ことを終えた根拠にする。 (f) Codex の `workspace-write` の sandbox は作業 dir の中の `.git` を読み取り専用にする = commit を頼む thread (wrap を含む) は git の dir を書き込み可の dir に名指して起こす ([`codex-desktop-triage.md#sandbox-git-dir-readonly`](codex-desktop-triage.md#sandbox-git-dir-readonly)、 実測: 名指さない thread は commit できずに終わり、 道具はその未 commit の file を残す理由に出した)。
+- <a id="bg-worker-blocked-on-permission"></a>**(d) の背景の worker は、 許可の確認を出すと誰にも知らせずに止まる** (実測): 自動の承認から外れた command (一時 dir での `rm -rf`、 一時 dir に `cd` して組む複合の command) を打つと確認を待って止まる。 背景の session なので承認できる人がいない。 待っている間は `SendMessage` も届かず、 依頼元の見張りが提出と終了だけを見ていると気づかない。 見分け方 = `CLAUDE_CONFIG_DIR=<起こしたときのフォルダ> claude agents --json` の背景の行が `status: waiting` / `state: blocked` / `waitingFor: permission prompt` を出す (依頼元の見張りは、 提出・終了と並べてこの state でも起きるようにする)。 戻し方 = `claude stop <id>` の後、 同じ会話を `claude --bg --resume <sessionId> --model … --effort … --settings …` で起こし直し、 最初の 1 文で避け方を渡す (依頼元が用意した表を使って組まない・複合の command を割る・避けられないものは「未確認」 と書いて先へ進む)。 起こし直すと job の id が変わる。 hand-off 文にも最初から「許可の確認が出る形の command を打たない」 と書いておく。
+- <a id="bg-subagent-blocked-on-permission"></a>**背景の subagent (Agent tool を `run_in_background` で起こしたもの) も、 許可の確認を出すと止まったままになる** (実測): 照合を頼んだ subagent が、 渡した file のある dir で interpreter の script を 1 本走らせ、 その確認に誰も答えないまま進まなかった。 掲示板の claim は生きたままで、 依頼元の見張りが提出だけを見ていると気づかない。 防ぎ方 = 照合・判定の subagent には、 依頼の文に「読むだけで照らす (Read と、 渡した file への grep。 interpreter や script を走らせない。 書くのは成果物の file 1 つ)」 と書く (実測: この段落を足して立て直した subagent は、 確認を出さずに最後まで回った)。 見分け方 = subagent の記録 (依頼元の session の記録の dir の `subagents/agent-<id>.jsonl`) の最後の行が、 結果の無い tool の呼び出しのまま進まない。 戻し方 = その agent を `TaskStop` で止め、 掲示板の claim を手放して ([#subagent-work-on-record](#subagent-work-on-record))、 同じ依頼に読むだけの段落を足した subagent を立て直す。
+- ⚠️ **chip (= 本人が押して起動する card。 `start_session` の own_initiative / offer、 旧 `spawn_task`) は、 起動後の model が (e) と同じ扱い** (呼び元より高い指定は捨てられる → 起動後に `set_session_model`)。 desktop の model は session ごと (実測: 同じ時刻に別の model の session が並んで動いた。 以前の「app 全体で 1 つ」 は今の app に当てはまらない)。 <a id="card-composer-model-on-first-open"></a>⚠️ **本人が起動中の card の窓を初めて開くと、 app の画面が入力欄の model をその窓に当て、 card の指定を上書きする** (実測: 本人が押した直後に開いた窓に、 card の指定と違う model が開いた瞬間に当たった。 当たった値は本人がその前に別の窓で選んだ model で、 押してから開くまでが長かった窓には起きなかった。 app の画面の code に、 記録に model がまだ無い起動中の窓には入力欄の model を返す分岐がある = 画面の作りとしての動きかもしれず、 不具合とは言い切れない)。 当たるのは最初の API の要求の前なので、 本人の切り替えか worker の step 0 (app の記録を読み、 違えば止まって依頼元に知らせる) が間に合う。 依頼元が card の押された知らせの turn に読む model は今の値だけで、 その前に変わって戻った分は見えない = 「もともと」「最初から」 と過去を書く前に履歴を読む: app のログ (`~/Library/Logs/Claude/main.log`) の `LocalSessions.setModel` の行は画面からの切り替え (本人の操作と、 この上書き) だけが残し、 エージェントの `set_session_model` は残さない。 相手の会話記録の `/model` の行は、 本人の切り替えでもエージェントの切り替えでも同じ形で出る = その行だけで本人が打ったと読まない。
+- <a id="chip-in-event-turns"></a>**別の session の message や自動の知らせ (子の turn の終わり・背景の Bash の終わり) で始まった turn では、 app は `start_session` で session を起こさせない** = 提案の card しか出せない (実測)。 断りの文は app の文でなく、 auto mode の classifier の拒否 (`Permission for this action was denied by the Claude Code auto mode classifier`、 理由の説明なし) の形で出ることがある (実測) = 引数や形を変えて打ち直さず、 本人に一言 (「起こして」) を頼んで本人の turn で起こすか、 card にする。 本人が打った turn では、 本人が頼んだ仕事は card 無しで直接起こせる。 前の worker の提出を受け取った turn で次の worker を起こす「1 本ずつ」 の進め方では、 次の 1 本はほぼ毎回 card になる (受け取りは worker の message で始まる turn だから)。 card を減らす道は 2 つ: 本人の turn の中で次を起こす (受け取りの後に本人が一言返した turn など)、 または本人が窓を見ない機械的な worker を (d) の背景の session で起こす (どの turn からでも起こせるが、 本人の左の一覧には出ない = [`#worker-surface-visibility`](#worker-surface-visibility))。 本人が card を押すと、 起こした側には「The user started your proposal … as session local_…」 の知らせが届くが、 押した瞬間には起こさず、 起こした側の次の turn に付いて届く (app の記録の `pendingSystemReminder` に積まれる、 実測) = 「押されたら独立させる」 と書いておくだけでは独立しない。 card で起きた session も app の記録では Claude の起こした子 (`spawnedFrom.sideSession`) = 起こした側の `detach_session(<その id>)` も、 起きた session 自身の `detach_session("self")` も app が受ける (判定の写し = [`scripts/lib/desktop_sessions.py`](../scripts/lib/desktop_sessions.py) の `lineage`) = 独立させる session は、 起きた側が最初の turn に自分の記録を読んで self で外す形にすると、 起こした側の記憶に頼らない。
+- <a id="pending-card-rollcall"></a>**card を出したら、 本人が見るまで、 最新の返事の終わりに押されていない card の点呼を 1 行書く** — card は出した時点の会話の中にだけ描かれ、 押されていない card を一か所に集めて本人に見せる場所は app に無い。 自動の知らせや別の session の message で始まる turn が続く session では、 本人の発言の無い間に返事が積もり、 card が最新の返事から上に流れて見落とされる (実測)。 締めの箱の問いは 1 つしか持てず、 次の締めの別件の問いで置き換わる (実測) ので、 そこだけに頼らない。
+  - **形**: `🃏 押されていない card N 枚: <仕事の名前>・… — 押すか「起こして」 の一言で全部起こします` (仕事の名前 = 題から頭の `[…]` の tag を外したもの)。 締めの箱を出す turn は、 要約の 1 文目も「押されていない card が N 枚あります」 にし (左の一覧の状態の行になる = 別の窓からも見える)、 問いが空いていれば「待っている card N 枚を起こしますか？」 + ボタン「N 枚とも起こして」「あとで」 にする。 本人が「起こして」 と答えた turn では、 `start_session` に `proposal_id` だけを渡して全部起こす (本人の turn なので起こせる)。 承認のボタンを足す形ではなく、 本人が押す操作 N 回を 1 回に減らす形。
+  - **いつ止めるか**: 点呼は本人がまだ見ていない card のためのもの。 最後の card を出した後に本人がその窓で最初に話した turn への返事まで書き、 そこで止める。 本人が見て押さなかった card は繰り返さない (毎回出す行は風景になる、 [`convention-design-principles.md#surfaced-not-consumed`](../docs/convention-design-principles.md#surfaced-not-consumed))。 本人が「あとで」 と答えた turn はその場で止める。 止めた後に新しい card を出したら、 その card だけで点呼を始め直す。 見送った card の依頼は掲示板に引受待ちとして残り、 掲示板の一覧が持ち続ける。
+  - **押された・片付いたの判定**: app の記録で card から起きた session (`spawnedFrom.taskId` がその card の id、 押した瞬間にできる = 実測) / 会話記録の「The user started your proposal …」 (起こした側の次の turn に遅れて届く = 実測) / `proposal_id` で起こした / `dismiss_task` の取り下げ / 出してから 7 日 (app の期限) / card の hand-off 文が名指す掲示板の request を誰かが引き受けた (別の窓が同じ依頼を起こし直して片付けたとき = 実測)。 本人の turn = 会話記録の user の行のうち `origin.kind` が `human` のもの (自動の知らせ・別の session の message・子の知らせ・Stop hook の差し戻しは本人の発言でない)。
+  - **こだまを止める**: card を出して押されていない依頼を、 見張りが「誰も引き受けていない」 として拾い直したり、 turn の終わりの検査が「まだ伝えていない」 として追記を求めたりすると、 押されていない card がそれ自体で返事を積もらせ、 card をさらに上に流す (実測)。 見張りと検査は、 その session が card を出して押されていない依頼を拾わない (点呼が伝えている)。 card が押されて worker が引き受けた後の動き (提出・確認待ち) はこれまでどおり拾う。
+  - **機械**: Stop hook [`hooks/pending-card-rollcall.py`](../hooks/pending-card-rollcall.py) が、 本人がまだ見ていない押されていない card があるのに最新の返事に点呼の行が無ければ、 書く 1 行を添えて 1 回止める。 述語 = [`scripts/lib/pending_cards.py`](../scripts/lib/pending_cards.py)、 見張りが拾い直さない依頼の照会と過去の会話記録の流し直し = [`scripts/pending-cards.py`](../scripts/pending-cards.py) (`--session` / `--replay`)。 ⚠️ 本人が窓に来ずに左の一覧の状態の行だけを見て見送った場合は点呼が続く (見たかを機械が知れない)。
+- **chip は本人が起動するので、 推奨を起票文面で運ぶ**: title か tldr 1 行目に `[model: <model> <effort>]` を worktree/local tag (§8) と並べて書く。 tag が無いと user は起動のたびに「この model でいい？」 を聞く羽目になる (= 判断が人間に落ちる)。 個人層の PreToolUse warn hook が tag の存在を検査する形もある (存在検査のみ、 中身の妥当性は起票者が持つ)。 ⚠️ この tag は card のためのもので、 起動済みの session ((e) の user_asked) の title には付けない ([`#worker-surface-visibility`](#worker-surface-visibility))。
+- 既知 bug のある最新 model を alias が掴む事故は (a) では構造的に避けられない (= alias は最新解決)。 bug 回避目的の delegate は必ず (b) / (c) で pin する。
+
+### 使い分け litmus
+
+- **model 保証 + 非 block + fresh context で足りる** → (b) の pinned custom agent、 または (c) の headless CLI で pin。 (b) は subagent = 結果を依頼元がそのまま使う仕事だけ (下の [#self-closing-delegate](#self-closing-delegate))。
+- **真の並列 session が要る** (= 人が途中で対話する / user が独立に steer する / 子が自分で締める = 成果物と知見が残る仕事、 下の [#self-closing-delegate](#self-closing-delegate)) → 本人が app の一覧で見る worker は (e) の `start_session` (掲示板の `request --surface desktop`、 起こした後に app の記録で model と effort を確かめて直す = [`#desktop-start-model-cap`](#desktop-start-model-cap))、 本人が見る必要の無い worker は (d) の `claude --bg` (窓は端末の `claude attach <id>`)。 どちらも真の並列と live steer が得られ、 model も揃えられる。
+- <a id="self-closing-delegate"></a>**成果物と知見が残る仕事 (方針・実装・RCA・規則の追記) は、 子が自分で締められる session に渡す。 振り分け役・調整役 (子に仕事を回す役の session) は、 user が話しかけない仕事でも (e) の一覧に出る worker で起こす。 subagent ((a)・(b)) は、 結果を依頼元がそのまま使う (受け取った turn の中で答えや判断に使い切る) 小さな調べもの・照合・検算だけ** — 理由:
+  1. **subagent は自分で締めを回さない**。 締め ([closing-sweep.md](closing-sweep.md)) は session が自分の会話を見て回す手順で、 subagent はそれを回せない。 報告に書かなかった知見 (捨てた案・途中で気づいたこと・確かめていないこと) は subagent の会話記録にしか残らず、 依頼元が自分の締めで記録から引き直すしかない ([closing-sweep.md#collect-from-delegates](closing-sweep.md#collect-from-delegates) の subagent の口、 道具 = [`scripts/subagent-reports.py`](../scripts/subagent-reports.py)。 実測)。
+  2. **依頼元の一時 dir (scratchpad) にだけ書いた file は、 依頼元の session の終わりに消える**。 subagent は作業の script や試しの写しを依頼元の一時 dir に書くことが多く、 依頼元の締めで repo に移さないと失われる (実測)。
+  3. **振り分け役の締めは手順が落ちやすい所**。 長く生きる振り分け役は文脈の圧縮を何度も経ていて、 圧縮の後に締めの手順の名が一般の語に畳まれ、 手順と網が発火しないことがある (実測)。 subagent の積み残しは、 その落ちやすい締めに集まる。
+  4. **自分で締められる子なら、 子が自分の締めを回してから畳まれる** ([#tidy-after-child-turn-ends](#tidy-after-child-turn-ends)) = 締めの記録が子ごとに残り、 畳む前に照合できる。 (e) の子は user も一覧で見て、 途中で話しかけられる。
+
+  代償 = 別の session の message や自動の知らせで始まった turn では (e) を起こせず、 user が押す card になる ([#chip-in-event-turns](#chip-in-event-turns))。 そのときも subagent に潰さず、 掲示板の request を出してから card にする (依頼が掲示板に残り、 押されて起きた worker がそれを claim する)。 user が窓を見る必要の無い機械的な仕事なら、 (d) の背景の CLI session も自分で締めを回せる (締めの手順を hand-off 文に書く。 user の一覧には出ない = [#worker-surface-visibility](#worker-surface-visibility))。
+- <a id="subagent-work-on-record"></a>**subagent に回す小さな照合 (返答書の批判役・検算・別の目の判定) も、 依頼と判定は記録に残す** — 掲示板 (§13) を使っていれば、 依頼を `request --surface agent` で出し、 subagent にその宛先で `claim`・`submit` させ、 依頼元が `accept` / `revise` する。 掲示板の無い repo では、 依頼の全文 (渡した file の名と指示の文) と判定の全文を、 その作業の記録の file に書く。 理由:
+  1. **subagent の依頼の文と返事は、 依頼元の会話記録の中にしか無い** = 検収する側 (振り分け役・user・後の session) は、 照合を本当に回したか・何を渡したか・判定が何だったかを読めない。 掲示板の役割 id で claim・submit させた subagent の照合は、 依頼・引き受け・提出・受け取りが 1 つの thread にそろって残った (実測)。 照合を頼む依頼書と repo の手順が「批判役を立てる」 とだけ書いて記録の置き場を書かないと、 残るかは書き手しだいになる。
+  2. **渡したものが読めると、 混ぜてはいけない物を混ぜていないかを確かめられる** = 批判役・盲検の目に書き手の方針のメモを渡していないかを、 依頼の全文で照らせる ([cold-eyes-isolation.md](../../ai-collaboration/conventions/cold-eyes-isolation.md))。
+  3. **依頼元の session が終わると、 会話記録の検索でしか出てこない**。 掲示板の依頼なら、 検収の判断と同じ thread に残り、 同じ照合をやり直すときに前の判定と比べられる。
+- <a id="session-focus-declared"></a>**user が session の主題を宣言したら (「この session は X に集中して、 ほかは投げて」)、 X の外の作業 (整備・環境・点検・規約・締めの sweep) はその session で手を動かさず、 別 session か background の agent に渡す** (成果物と知見が残る仕事 〔整備・規約・締めの sweep〕 は自分で締められる別 session、 結果をそのまま使う調べもの・点検は background の agent = [#self-closing-delegate](#self-closing-delegate)) — 戻ってきた結果は 1 行で伝え、 本人の判断が要る件だけを平文で聞く。 宣言はその session の残り全部に効く (締めの sweep も委ねる)。 委ねた先の報告は検証前の主張として、 記録に書く前に裏を取る ([closing-sweep.md#collect-from-delegates](closing-sweep.md#collect-from-delegates))。
+- <a id="side-work-to-handler"></a>**用事を受け持つ session ([`#designated-handler-session`](#designated-handler-session)) が登録されて生きている間は、 ほかの session は主題の宣言が無くても、 自分の仕事の外の用事を処理せず、 user にも並べず、 受け持つ session に渡す** — 用事 = 一覧や見張りの道具が出すメール・台帳の項目・掲示板の依頼・期限・道具の不調。 一覧に出た行は turn 終わりの検査が表示の台帳の上で渡すが、 台帳に載らない用事は渡らない: 検査に求められて手で回した道具の出力、 作業の途中で気づいた用事、 user が作業の途中でこの session に頼んだ、 この session の仕事の外の用事。 これらは受け持つ session に message 1 通で渡す (何か・項目の id・どこで見たか。 複数あれば 1 通にまとめる。 一覧に出た行は重ねて渡さない = 受け持つ session も同じ一覧を見ている)。 message の経路が無い session (別の vendor の agent など) は、 受け持つ session が拾う掲示板の依頼で渡す。 user には「受け持つ session に渡した」 の 1 行だけを書き、 用事の行を並べない (並べると、 user が読んで「渡して」 と言うまで動かず、 その指示を session ごとに繰り返すことになる = 実測)。 「任せる」 を「触らない」 と読まない: 触らないだけでは、 台帳に載らない用事は誰にも渡らない (実測: 受け持ちの用事だと分かっていて「手をつけない」 と user に書き、 渡さなかった)。 宛先は、 登録を読む道具と一覧の受け持ちの行が出す (session ごとに宛先を引かせない)。 **渡さないもの**: その用事がこの session の仕事そのもの (用事を片付けるために起こされた session が頼まれた用事。 道具の不調を渡すときも、 その道具がこの session の代わりにしていた規則の手順は渡さない = その場で手で果たしてから直しだけを渡す = [`../docs/convention-design-principles.md#fail-open-names-the-duty`](../docs/convention-design-principles.md#fail-open-names-the-duty))、 この session の仕事の記録 (自分の project の台帳の現在地・裁定の記録)、 user が「ここで」 と名指した用事、 無人の定期実行の用事。 受け持つ session が居ないときにどうするか (起こすか、 自分で扱うか) は運用の規約が決める。 [`#session-focus-declared`](#session-focus-declared) の、 主題を宣言の代わりに受け持つ session の登録から決める版。
+- <a id="owner-driven-window-no-funnel"></a>**user が直接話して仕事を進めている session (読みながら指摘を出す窓、 対話して書く窓) に、 調整役の session は自分の仕事を流し込まない** — 依頼書に無い仕事 (別の議題の分析、 他の session との調整の役、 窓の役の変更) を message や掲示板で足すと、 user の 1 件ずつの往復がその分だけ待たされる (実測)。 足す仕事は、 別の子を起こすか、 user と話していない既存の worker に回すか、 調整役が自分でやる。 窓に送るのは、 窓が今の仕事に要る事実だけにする (user の指示の写し、 同じ file を他の session が書く予定の知らせ)。 書き手を 1 つにするなどで役の変更が要るなら、 窓ではなく他の側を動かす (窓は user の指示を当てる役のまま)。 主題の宣言が無くても効く = 上の [`#session-focus-declared`](#session-focus-declared) の、 使われ方から主題が決まる版。 研究の対話係を置くときは [対話係と指揮所の分担](#research-dialogue-and-conductor) を読む。 見分け方 = 宛先の会話記録で、 user 本人の最後の発言が今の作業の中にある (別 session の message と、 起こした側が渡した最初の prompt は数えない = [hook-authoring.md#transcript-human-vs-peer-message](hook-authoring.md#transcript-human-vs-peer-message))。 機械 = PreToolUse hook [`../hooks/owner-window-notice.sh`](../hooks/owner-window-notice.sh) が、 送り先 (`SendMessage`・掲示板の note / request / handover) の user の最後の発言が 3 時間以内なら送る前に 1 行知らせる (止めない = 送る中身が依頼書に無い仕事か、 user の指示の写しかは機械に分からない。 判定・校正 = [`../scripts/owner-window-notice.py`](../scripts/owner-window-notice.py) の冒頭)。
+- <a id="orchestrator-drifts-into-work"></a>**振り分け役の session (受け持ちの用事を伝えて子に回す役) は、 放っておくと自分で作業を続ける** — 受け持ちの用事と user の問いを、 子に回さず自分で調べ (外の channel の走査)・記録し・手で merge し・道具を直す (実測。 振り分け役を何度起こし直しても同じ型だった)。 押す力は 3 つ: (1) 起こす側の引き継ぎ文が、 個々の用事の処理の手順 (記録の道具・merge の手順) を振り分け役に宛てて書く (2) session 開始の一覧や turn 終わりの検査が「同じ turn で処理する」 を求め、 振り分け役を登録するとその要求が振り分け役に集まる (3) 子に回すには user の承認 (card を押す) が要り、 自分でやる側にはその手間が無い = 費用が非対称。 止め方:
+  - **線を役の規則に書く** — 振り分け役が自分でやる = 一覧を読んで伝える・記録にあることから答える・依頼書と request・検収・決定の記録・伝えた用事 1 件の記録。 子に回す = 外の channel の走査が要る問い・まとめての記録・持ち主の居ない未 commit の引き取りと手での merge・道具や規約の直し・文面の起草。 引き継ぎ文には、 用事ごとの処理の手順でなくこの線を指す 1 行を書く
+  - **user の問いに答える調査は、 card を経ずに起きる経路で回す** — 結果を振り分け役に返す背景の subagent (掲示板の request は `--surface agent`) = (3) の非対称が消え、 振り分け役の窓は user と話せるまま残る。 この経路は答えを返す調べもののためのもの = 調べた先で直し・RCA・規則の追記が要ると分かったら、 その仕事は一覧に出る worker に回す ([#self-closing-delegate](#self-closing-delegate))。 user が途中で足した手がかりは振り分け役が subagent に渡す (user が調査の途中に直接 steer するなら、 上の「真の並列 session が要る」 の行の経路)
+  - **機械 = 1 turn の作業系の呼び出しを数えて、 しきい値に達したら 1 回知らせる hook** (止めない = user がその窓で頼んだ作業かは機械に分からない)。 しきい値は、 過去の会話記録を本番と同じ述語で流し直して決める (観察の期間を待たない。 知らせが turn の何回目の呼び出しの後に出るかも同じ道具で出す)。 ⚠️ 数え方は、 決定の台帳の書き換えや子の会話記録の検収といった振り分け役の正当な仕事と区別できないことがある (実測) = 当てる役を、 型が出て述語が合う役に絞る
+
+### 注意
+
+- **(a) の alias 解決 gotcha が最大の見落とし**: 「`opus` を指定したから 4.7 か 4.8 のどちらか安定な方が来る」 は幻想で、 alias は常に**最新**を返す。 特定 version で走らせたいなら (b) / (c)。
+- **(b) の frontmatter `model:` には alias でなく full ID** (= 例 `claude-opus-5[1m]`、 `[1m]` suffix 込み) を書く。 alias を書くと (a) と同じ「最新解決」 の穴が空く。 `effort:` も frontmatter で pin する (`low`/`medium`/`high`/`xhigh`/`max`)。
+- **(b) の registry load timing**: `.claude/agents/foo.md` を mid-session に追加しても当 session からは呼べず (`Agent type 'foo' not found`)、 次 session から効く。 起票時に「あるはず」 と assume して呼ぶ前に、 定義が session 開始前に配置済みかを確認する。
+- **(c) の headless run は auth を消費する**アカウントで CLI が login 済みでなければならない (= `~/.claude.json` の login と launchd job の`claude` 実体が同 account を指す)。 cron / launchd に組込むときの auth 経路の正本は [`multi-machine-state.md`](multi-machine-state.md#account-host-failover)。
+
+### <a id="model-fit-before-sending"></a>送る前に宛先の実際の model を読む — 仕事の難しさと合わせる
+
+宛先の model は送った後には変えられない (変えられるが context と cache を読み直す = 無駄なコスト) ので、 合わせる判断は**送る前**にしか効かない。 題名の `[model: …]` tag・chip の文面・起票時の記憶は model を決めない (tag は推奨、 desktop の picker はアプリ全体で途中でも変わる = 最初の応答と最後の応答で model が違う session が実測で在る)。 実際の model は transcript の**最後の応答**の `message.model` にしか無い。
+
+1. **読む**: 既存の session に送る前に `scripts/session-model.py <id | name | local_…>` (= 最後の応答の model と tier、 name は ListAgents に出る名前、 `local_…` は cross-session message の from-session)。 `list-live-sessions.py` は生きている兄弟の model を列に出す。 掲示板の `request` / `handover` は宛先の model を表示し、 `--expect-model <fable|opus|…>` を付ければ違うときに post を止める (model がこの機の記録に無ければ表示して通す)。 新しい宛先は経路ごとに model を明示する (上の 3 経路: Agent の `model` 引数は alias、 custom agent は full id、 headless は `--model`、 chip の tag は推奨のみ = 既定は起票元と同じ model)。
+2. **合わせる**: 下の目安で仕事の難しさを当て、 宛先の tier と違えば (a) 合う宛先に変える (別の生きている session / pinned custom agent / headless。 chip は起票元と同じ model で開くので、 tier を下げる経路にならない = 下位 tier に回すなら、 その tier で生きている session に掲示板の request を出して `SendMessage` で知らせる (実測)) (b) 自分でやる (c) 本人に 1 行で聞く。 **本人が宛先を名指ししたときも同じ** = 名指しは宛先の指定であって model の不一致を承知した判断ではない → 「その宛先は Fable、 この仕事は Opus で足りる」 と 1 行言ってから送る (本人が「それでいい」 と言えば送る)。 受け取る側も同じ: 自分の tier に合わない仕事 (簡単すぎる・難しすぎる) を受けたら、 やる前に 1 行で依頼元に返す (簡単すぎる = やってもよいが model を伝える、 難しすぎる = blocker)。
+3. **目安** (機械では決めない = 送る側が表で当てる。 迷ったら「仕様が固まっているか」 で分ける = 固まっていれば下位で足りる):
+
+   | 上位 tier (Fable) に回す | 下位 tier (Opus) で足りる |
+   |---|---|
+   | 設計判断 (何を守るか・どの形にするか・trade-off の材料づくり)、 複数文書にまたがる規約の設計 | 仕様どおりの起草 (文面・例・規則が与えられている) |
+   | 新しい推論・長い導出 (物理・数学の導出、 証明、 反例探し)、 検証読み (adversarial pass) | 機械的な編集 (rename・移設・索引の再生成・sweep・整形) |
+   | 曖昧な依頼書から仕様を作る (「考えてほしいこと」 の形) | 検証の実行 (selftest を回す、 patch を当てて hash を照合、 CI の赤を読む) |
+   | 長い文脈を保ったまま多段の工程を回す (1 session で数百応答) | 単発の調査 (grep して報告)、 定型の記録・起票、 確立した手順の運用 |
+   | 原因が構造にある失敗の RCA | 既知の型の RCA (手順が規約にある) |
+
+   料金の比 (Claude API の定価、 一次情報 = API の価格表): Fable 5.1 は Opus 5.5 の 2.5 倍、 Opus 5 の 2 倍 (入力・出力とも)。 定額の app でも premium の budget と 1 turn の時間 (Fable の turn は長い) を払う。
+4. **受け手も区切りで読み直す**: spec が model を指定している worker は、 開始時だけでなく commit と submit の前にも `scripts/session-model.py self` を読む (picker は途中でも変わる。 依頼元が上限を見て切り替えることもある)。 途中で変わっていたら、 submit (か返信の note) に、 どの成果物をどの model で作ったかを書く (依頼元はそれで検収できる = 実測)。 気づく手がかり = commit の attribution の system-reminder に出る model 名が変わる (実測)。
+5. **逆向きの兆候** (下位 tier に難しすぎた): 成果物が依頼書を言い換えて終わる / 節どうしが矛盾する / 「確認した」 に証拠が無い / 依頼書に答えのある blocker を何度も返す / 受領側で導出し直す羽目になる。 出たら上位 tier の session に回すか本人に聞く。
+
+<a id="premium-launch-reason"></a>**上位 tier と max は、 その仕事が要るものを 1 行で言えるときだけ頼む — 分野・repo・前の名指しで選ばない**:
+
+- **問うのは 1 つ**: worker 自身が中身 (導出・式の展開・議論が正しいか・どう述べるか) を決め、 生み出すか。 与えられた前後の文や明示の基準に照らして読む仕事 (他人の文の直しの検品・記法の置換・規則や道具の直し) は、 物理の repo の原稿の仕事でも一段下の model と effort で起こす。 分野 (物理)・repo (論文の repo)・成果物の種類 (原稿) はこの問いの答えにならない (実測: 「物理の repo の原稿の仕事 → 上位」 と分類で当て、 文の照合だけの検品を上位 × max で頼んだ)。
+- **写さない**: (a) 依頼元の自分の今の model・effort (実測: 直前まで上位 × max で動いていた依頼元が、 その値を worker に書いた。 掲示板の request も `--effort` が無いと依頼元の effort を継ぐ) (b) 人が前に別の仕事で名指した model・effort (名指しはその仕事に向けた選択であって、 似て見える次の仕事の型ではない)。
+- **語では判定しない**: 依頼の語 (計算・式・原稿など) から上位が要るかを当てる規則は、 人が選んだ model と合わない (実測: 人の選択を依頼の語の規則で当てると、 どの規則も外れた。 「式・数値・検算」 は「変えていない」 と書く検品の依頼にも出る)。 機械は仕事を判定せず、 理由を求める。
+- **機械**: [`scripts/session-launch-check.py`](../scripts/session-launch-check.py) の premium gate (opt-in = `~/.claude/session-launch-premium-gate.on`)。 上位 tier か max を頼む `start_session` (本人が押す card も。 引数・hand-off の run の行・title の `[model: …]` のどれかで) と、 そこへ上げる `set_session_model` / `set_session_effort` を、 本人の直近 3 回の発言の名指し (打ち消し・疑いの文は数えない) か理由 (`[model-reason: …]` / `[effort-reason: …]`、 掲示板の `--reason`、 後から残す `--note-reason`) が無いと止める。 掲示板は `request` / `launch --request` で、 上位か max を頼むと 1 行出す (理由が無ければそう言い、 理由があれば理由と問いを並べて出す = 問いの語で書いた「… を worker が判断する」 はどの仕事にも書けるので、 理由を書いても問いを消さない)。 掲示板の `board.json` が Opus 以外を本人の名指しでしか起こさない (`launch_model_allow`) なら、 掲示板は `--model-quote` の文を依頼元の会話記録と照らし、 本人が打った発言で、 本人の最後の入力の中にあるものだけを通す (前の依頼への名指しの使い回しは通さない = `ai-collaboration/board/CONTRACT.md#launch-model-allow`)。 その掲示板の上位の記録は、 起動の検査でも記録の理由の文だけでは通らず、 掲示板が確かめた名指し (記録の `model_quote`) を要る。
+- **本人が押す card を作ったら、 本人への返事に model・effort とその理由を 1 行で書く** (title の `[model: …]` だけでは押す前に気づけない、 実測)。
+- **相手側 (共同研究者の AI・別の機械) が役割 id に出した依頼の窓は `board.py launch --request <id>` で開く** = 起動の記録と引数がこの機械にでき、 起動の照合と claim の照合が効く (手で書いた card は何とも照合されない、 実測。 契約 = `ai-collaboration/board/CONTRACT.md#launch-existing-request`)。
+
+<a id="workflow-agent-model"></a>**Workflow の agent は親の model を継ぐ = 上位 tier の session からは agent ごとに model を書く。 週の切替の前に枠を使い切る workflow は、 切替時刻で止める**:
+
+- **model**: `agent()` の opts に `model` を書かない agent は、 起こした session の model で動く。 上位 tier の session で fan-out すると、 一段下の model が向く読み・照合・検品まで全部が上位 tier になる (実測)。 agent 1 体ごとに CLAUDE.md と道具の定義を最初から読み込み、 tool を呼ぶたびにそれを読み直すので、 費用は体数と呼び出しの回数にほぼ比例する (実測の内訳 = [§15 の #workflow-cost-model](#workflow-cost-model))。 agent ごとに model を書き、 上位 tier は agent 自身が導出し判断する仕事に使う。 1 本の workflow で起こす agent は 10 体未満にする (越える形は起動の前に本数と波数を見積もって script に書く = [§15 の #workflow-estimate-before-launch](#workflow-estimate-before-launch))。
+- **切替時刻**: 「リセットの前に残りを使い切る」 ために起こす workflow は、 切替時刻を過ぎても止まらない。 workflow の script は時刻を読めない (`Date.now()` が使えない)。 実測では、 切替の数分前に起こした fan-out が切替の後も走り続け、 消費のほとんどが次の週の枠に入った。 起こす前に切替時刻を確かめ (desktop = `get_usage` の `resetsAt`、 CLI = `/usage`)、 時刻までに終わらない大きさの fan-out は起こさない。 使い切りが目的でも、 上限が解けた後に自動で届く「続けて」 で新しい仕事を始めない。
+- **機械**: [`scripts/session-launch-check.py`](../scripts/session-launch-check.py) `--workflow-gate` (hook = `hooks/workflow-launch-check.sh`、 PreToolUse の全 tool、 premium gate と同じ opt-in)。 上位 tier の session からの `Workflow` は、 script の `agent()` が全部 `model` を書くまで止める。 本人の直近の発言が週の切替に触れていれば、 script に `// [stop-at: <ISO 時刻>]` を求める。 その時刻を過ぎると、 その session の subagent の tool 呼び出しを止め (hook の入力の `agent_id` で見分ける。 結果を親に返す tool は通す = 止めると手持ちの結果も届かない、 実測)、 本体には workflow を `TaskStop` で止めて本人に聞くよう 1 回知らせる。 記録した時刻を消す = `--clear-stop-at`。 使い切った後に、 どの session・どの workflow の run が枠を食ったかを数える = [`scripts/usage-window-report.py`](../scripts/usage-window-report.py) (時間帯 × model・session・時間ごと、 `--session` で 1 本の run ごとの内訳)。
+
+<a id="named-recipient-is-a-live-session"></a>**本人が model 名や session の呼び名で宛先を言ったら (「X に投げて」)、 まず今動いている session を探す**: 直前にその model・その名前で仕事を返した session が生きていれば、 本人が指しているのはたいていその session で、 新しい session ではない (続きを頼むなら文脈を持つ相手に渡すのが自然)。 送る前に `ListAgents` (と `scripts/session-model.py`) でその名前の session を探し、 居ればその session に頼む (掲示板の request は同じく立て、 宛先の role / session で claim してもらい、 `SendMessage` で 1 行)。 居ない・複数居て決まらない時だけ新しい session を前提にし、 そう言ってから貼る文面を出す。 実測: 前の仕事を返したばかりの session を指した依頼を、 新しい session に貼る文面として返して本人に聞き直させた。
+
+---
+
+### <a id="research-dialogue-and-conductor"></a>研究の対話係と指揮所の分担
+
+研究の対話係と指揮所を置くときは、対話係の窓を、最も能力の高い model に任せるべき仕事 = 研究と作文だけに使い、残りの仕事はすべて指揮所に渡す。対話係の turn は、研究者が待っている時間であり、最も高い model の時間でもある。
+
+- **対話係**は、研究と作文だけをする: 研究の判断、導出、先行研究との比較、原稿や返答書の具体的な文案（英文を含む）。文章の言い方が論旨・条件・帰属に関わる場合も、対話係が文案を作り、研究者と詰める。次の仕事は対話係の窓でしない: ファイルへの反映と Git (取り込みを含む)、記録や来歴の調べ (裁定の記録の有無・差分の出所・参照の棚卸し・過去の発言の検索)、組版と検査、共同研究者への発信、締めの記録と知見の書き込み。研究の途中で気づいたこれらは、自分で調べずに 1 行で指揮所に渡し、どちらに当たるか迷う仕事も指揮所に渡す (実測: 対話係の窓が原稿の当てと commit、記録の調べ、Git の配送、規則の文書への追記を受け持った回が重なり、研究者が分担の外れとして指摘した)。
+- **指揮所**は、確定した文案と判断を保ってファイルに反映し、組版・lint・既定の検査、Git、運用記録、実装担当と検収の手配を受け持つ。作業中に研究上の判断や文案の修正が必要になったら、該当箇所と理由を対話係に返す。対話係が議論に要る記録 (基準版・過去の決定・差分) を頼んだら、調べて短く返す。対話係の窓にファイルの移動・commit・push とその点検を頼まない: 対話係は置いた場所 (共有のメモの置き場か作業用の一時 dir の path) を渡すだけで、repo へ移して commit・push し、点検するのは指揮所 (共有のメモの置き場は session の家族の archive で消える = [#side-session-notes-deleted-on-archive](#side-session-notes-deleted-on-archive)。実測: 指揮所の頼みで対話係の窓が材料を repo に写して commit・push し、commit の後の点検の結果まで研究者に報告した)。
+- 引継ぎには、対象と基準版、確定した文案や判断の所在、未決の箇所、必要な検査を示す。差分が作業ツリーにある場合はその状態も伝える。著者の裁定と適用の記録は [原稿の編集権限](manuscript-claim-ownership.md#rule) に従う。モデルと effort は [仕事に合わせて選ぶ](#model-fit-before-sending)。
+- 対話係の窓で著者が答えた候補は、指揮所が別の窓の答えとして記録して当て、同じ窓で commit する ([manuscript-claim-ownership.md#owner-answer-in-another-window-manuscript](manuscript-claim-ownership.md#owner-answer-in-another-window-manuscript))。裁定を別の session に渡すときの形は [tool-call-robustness.md#ruling-belongs-to-the-editing-session](tool-call-robustness.md#ruling-belongs-to-the-editing-session) と [#worker-apply-requester-commits](tool-call-robustness.md#worker-apply-requester-commits)。
+- <a id="research-dialogue-setup"></a>**立てるとき**: 対話係を起こす依頼書には 6 つを書く: 役 (研究と作文だけ。指揮所としての登録をしない) / 最初に読むもの (基準版は起こす側が名指す) / 今ある材料 (研究者が取り上げると言うまで窓から始めない) / 窓でする仕事と指揮所に渡す仕事 (上の線) / 指揮所への渡し方 (上の引継ぎの中身を、決まったものごとに) / 完了条件 (窓を閉じるときは決まったことと未決の一覧を指揮所に渡し、記録は指揮所が書く)。依頼書の置き場は、その中身を読める人で決める: 共同研究者と共有の repo には研究者だけの判断や個人の記録の所在を書けないので、そのときは研究者の個人の層に置き、起動の hand-off が依頼書を名指す形で渡す (依頼の本文の文の中に path を書くだけでは、worker の手順に依頼書が載らない = 実測)。掲示板の道具で起こすなら、依頼に対話係の印 (`request --dialogue`) を付ける: 道具が worker に渡す起動の文から commit・push の行と「この窓で研究者に問わない」の行を外し、repo のファイルを書かず置いた場所を指揮所に渡す文に替える ([CONTRACT.md#dialogue-worker-handoff](../../ai-collaboration/board/CONTRACT.md#dialogue-worker-handoff))。役の名から対話係かを推さない = 印の無い依頼は、名が対話係に見えても道具は 1 行知らせるだけで、起動の文は他の worker と同じになる。
+
+## <a id="remote-handoff-constraints"></a>11. リモート session への hand-off — 物理不在で完了できない step の全分岐着地設計
+
+user がそのマシンの前に居ない session (= Remote Control 経由でスマホ / 別端末から操縦する session) に
+作業指示を渡すときは、 **「そのマシンの前でしか完了できない step」 を事前に洗い出し、 どの分岐でも
+安全に着地する指示文にする**。 リモートでも permission dialog は操縦側 UI (claude.ai/code) に出て
+承認できるし Bash / tool 実行は全部通る — 詰まるのは以下の類型だけ:
+
+| リモートで完了できない step | なぜ |
+|---|---|
+| ブラウザ対話 OAuth (`claude auth login` 等の localhost-callback 型) | 認可はそのマシンのブラウザで完了する必要がある (callback = localhost)。 操縦者は承認画面に到達できない |
+| chip (spawn_task) の click 起票 | chip の click 面は操縦側 client で制御できない (2026-08-29 user 観測)。 本人がリモートから動かしている間は、 `start_session` の own_initiative の提案そのものを app が出さない (「Nothing was proposed」 が返る、 実測) = 提案したい仕事は記録 (plan・TODO・結果の記録) に書いて残す |
+| 物理操作 (印刷物の回収・USB・電源・紙書類) | 自明だが checklist に 1 つ混ざっているだけで全体が中断する |
+
+設計原則 — **全分岐が「進む or 安全に戻して待つ」 に着地する**:
+
+- **成否が分かる probe を checklist の先頭に置く**: 現地でしか直せない前提 (認証・デバイス) は
+  最初の 1 コマンドで判定し、 途中で発覚して半端状態になるのを防ぐ。
+- **fallback 分岐を指示文に焼き込む**: 「probe 失敗なら <rollback コマンド> で元の構成に戻し
+  (関連 state は触らない)、 『現地で <対処> が必要』 と報告して終了」。 中途半端な状態
+  (半分だけ移行した設定・認証の切れた pin) で session を終わらせることを設計で禁じる。
+- **委譲を禁じる**: 「spawn_task / 別 session への委譲はせず、 全 step をこの session 内で直接実行」
+  と明記する (= chip がリモートで押せない上、 結果の受領面も物理不在)。
+
+実例 (genericized): 無人 launchd routine の消費 account を別 config dir に pin する移行を対象マシンへ
+リモートから指示。 headless 生成の 401 (= 現地 OAuth でしか直らない) を step 1 の probe に置き、
+401 なら「pin 解除 rollback + 台帳は触らず + 現地対処を報告して終了」 の分岐を指示文に焼いた
+(2026-08-29、 実施は成功分岐で完遂)。
+
+---
+
+## <a id="fanout-audit-resilience"></a>12. fan-out した調査は「子が直接返す」 形にすると親の事故に強い
+
+広い読み取り監査 (= N 個の doc を全文読んで finding を返す型) を委譲すると、 **親 agent が自分で分割して子に撒く**構成になることがある。 このとき **親の役目は統合だけ**で、 読解と finding 生成は子が持つ。
+
+**観察 (2026-09-02)**: 親 (= 監査の統括) が途中で停止した (= 人間の誤操作)。 だが **子は生き残って走り続け、 finding は起票元 session に直接届いた**。 失われたのは親が書く予定だった統合 file だけで、 **中身はゼロも失われなかった** (= 起票元が手で統合して復旧)。
+
+**設計含意**:
+
+1. **子の成果物を「親に返す」 だけにしない** — 子が report を**起票元に直接返す** (or 固定 path に書く) なら、 親は単なる scheduler になり、 その死は「統合の手間」 に縮む。
+2. **親に「唯一の書き出し役」 を持たせない**。 統合 file を親だけが書く設計だと、 親の死が全損に見える (= 実際は子の出力が生きているのに、 それを知る手段が無い)。
+3. ∴ 分割は **「読解 = 子 / 統合 = 誰でも引き取れる粒度」** に切る。
+
+⚠️ **子が親にしか返さない設計は避ける** (= 親が落ちると子の成果が到達しない)。 [`#spawn-handoff-token-return`](#spawn-handoff-token-return) の「機械が人間に自動で届ける」 と同じ思想を、 agent 階層の**内側**にも適用する。
+
+---
+
+## <a id="git-immutable-event-board"></a>13. Git immutable-event board — session 間の operational state を共有する
+
+複数の AI session が project と machine をまたいで継続的に動き、各 project の `SESSION.md`
+だけでは「誰が何を claim し、どの finding が未昇格か」を横断して見渡せない場合、専用の Git
+board を置ける。役割は、**どの session が、何を引き受け、誰の確認を待っているか**を残すこと。
+board は**研究・project 判断の正本ではない**。依頼・担当・提出・受領という operational state と、
+成果物の所在を扱う。本節がその一般則の正本であり、具体的な schema / CLI は各実装が定める
+(参照実装と運用の契約 = ai-collaboration [`board/CONTRACT.md`](../../ai-collaboration/board/CONTRACT.md))。
+
+### <a id="board-session-subject"></a>主体は session、vendor と host は属性
+
+「Claude が作業中」だけでは、同時に動く別の Claude session が誰の仕事か判断できない。
+責任と宛先の単位を **実在する session** にする。例えば、同じ vendor の session A が session B に
+依頼した場合も、A は確認側、B は作業側として区別する。
+
+| 概念 | 役割 |
+|---|---|
+| session identity | vendor / runtime の namespace と、その runtime が与える安定した native session ID |
+| vendor / model / host / surface / 表示名 | 実行環境や表示の属性。担当者や引継ぎ先を推測する材料にしない |
+| request identity | 依頼の一意 ID。session を引き継いでも依頼は同じ |
+| original requester | 誰が起票したかという履歴。引継ぎで書き換えない |
+| current assignee | 今、実作業を担当する session |
+| current reviewer | 今、提出を確認し、受領または差戻しを判断する session。初期値は起票 session |
+
+同じ native ID を保った再開・compaction・host 移動では同じ主体。新規 task / fork が別 ID を
+持つなら別主体であり、同じ vendor だからという理由で前任の権限を継承しない。
+native ID は実行環境または明示された引継ぎから取得する。transcript ID や表示名を
+配送可能な session ID と同一視しない。history にある宛先一覧は**既知の session**であって、
+現在稼働中の process 一覧ではない。
+
+**発見と命名 (2026-09-07)**: 宛先 ID は event 自身が運ぶ (全 actor が agent + session_id を持つ) ので、相互の可視性は投稿の時点で成立する。足りなくなるのは**発見** (誰が居るか) と**命名** (どの session が何か) で、history から導出した directory (名前 / host / 最終投稿 / 関与 project / 待たせている thread) を 1 コマンドで出す。名前は session が自分で付ける短い label で、summary を名前に流用しない。同一 vendor の複数 session は別々の宛先として並び、vendor 単位の継承は無い。**役割 identity**: session の寿命を越える機能 (review 窓口、常駐 poller) には owner が安定した id (`role-<project>-<function>` / `resident-<host>-<agent>`) を割り当て、担当 session はそれを宛先として名乗り、native id は名前欄に残す。役割 id は vendor を問わない宛先で、Claude 宛てに出した依頼も、その役割を名乗る Codex の session の受信箱に出て引き受けられる (照合は id だけ = [engine の契約](../../ai-collaboration/board/CONTRACT.md#role-any-agent)。実測: agent 欄まで照合していた間、Codex で作業する側に役割宛ての依頼が見えなかった)。役割の移動は owner の明示 handover であって vendor 継承ではない。session が note で名乗った役割は割り当てではない ([#board-role-claim-is-not-assignment](#board-role-claim-is-not-assignment))。presence (今動いているか) は board では表さない = 別 runner か人間の確認。
+
+session identity は記録上の責任主体であり、認証・ACL の代わりではない。別 session であることも
+検証の独立性を保証しない。独立性は [cold-eyes の隔離](cold-eyes-isolation.md) などで別途守る。
+
+### <a id="board-request-receipt"></a>提出と受領を分ける
+
+worker の「できた」で閉じると、確認していない成果が完了扱いになる。依頼には宛先と完了条件を
+持たせ、作業側と確認側を別 session にする。**提出によって、次に動く責任が確認側へ移る**。
+
+<a id="acceptance-items-with-values"></a>**完了条件に並べるのは、 合否の値 (0・同じ・上限) を書ける項目だけ** — 値の無い量 (頁数・語数の前後) を合否の項目と同じ並びに書くと、 受け手は前の報告の値を期待値と読み、 変わったら異常として調べる (実測)。 前の報告の値を、 次の依頼の期待値に写さない。 組版の例 = [`edit-intent-record.md#page-count-not-a-gate`](../../ai-collaboration/conventions/edit-intent-record.md#page-count-not-a-gate) (掲示板は値の無い頁数・overfull を書いた request に注意を 1 行出す = [`CONTRACT.md#acceptance-value-check`](../../ai-collaboration/board/CONTRACT.md#acceptance-value-check))。
+
+<a id="acceptance-after-owner-correction"></a>**依頼を出した後で本人が依頼の中身を訂正したら、 掲示板の同じ依頼に、 訂正した後の完了条件を note で書き、 受け手と検収役に 1 行知らせる** — 掲示板の完了条件 (`--acceptance`) は依頼の event に書いたまま後から変わらず、 依頼書の file を直しても掲示板には届かない。 検収役は完了条件で照らすので、 そのままだと訂正の前の条件で受け取る (実測: 依頼書の file は訂正の後の commit で直っていたが、 掲示板の完了条件は訂正の前の文のまま残り、 別の依頼の検収の途中で気づいた)。 検収役の側は、 依頼の後の note (受け取りの `--ack-newer` が名指す投稿) と依頼書の file の最新の版を完了条件と並べて読み、 食い違えば受け取る前に依頼元に確かめる。
+
+<a id="worker-watches-for-spec-changes"></a>**受け手 (worker) は、 依頼の作業の間もその依頼の thread を背景の `watch` で見張り続け (起きたら読んで張り直す)、 commit と submit の直前に `show --request <id> --sync` で読み直す** — 依頼元は作業の途中で指定を差し替えることがあり、 desktop の session への message は受け手の turn が終わるまで相手の側で待たされて届かない。 背景の `watch` の終わりの知らせだけが turn の途中に届く。 見張りを張らずに作業を続けると、 差し替えの前の指定のまま commit・提出し、 差し替えの message は提出の後にまとめて届く (実測: 同じ依頼で、 1 回目の差し替えは見張りの知らせで途中に拾えたが、 その後に張り直さなかったため 2 回目の差し替えを提出の後に知った)。 差し替えの前の形で出した後に気づいたら、 検収役に「その版は検収しない」 を note で知らせてから、 新しい commit で作り直して出し直す (古い commit は書き換えない)。 依頼元の側の同じ話 = 上の段落と [#queued-message-arrives-stale](#queued-message-arrives-stale)。
+
+| 遷移 | 記録する内容と次の責任 |
+|---|---|
+| request → claim | 宛先 session が期限付きで引受。横から別 session が奪わない |
+| claim → submit | 担当 session が成果物の所在と未解決点を提出。確認側の inbox に残す |
+| submit → accept | 指定された確認 session が完了条件と成果を照合し、確認根拠を記録して閉じる |
+| submit → revise → submit | 確認 session が不足を返し、担当 session が修正して再提出 |
+| claim → blocker → 回答 | 担当 session が障害を示し、確認 session の回答 (`update --reply-to <開いた blocker>`。 `note` は回答にならず依頼は blocked のまま = [`CONTRACT.md#note-never-answers`](../../ai-collaboration/board/CONTRACT.md#note-never-answers)) 後に再開 |
+| claim → release | 未提出の担当を返す。完了扱いにはしない |
+
+遷移は依頼 ID だけでなく、どの claim / submission に対する応答かを指定する。
+古い提出への承認や別依頼への返信で現行の依頼を閉じない。lease の失効は担当の再調整理由であり、
+提出済み成果の未受領を消す理由ではない。単なる `done` や schema-valid な JSON は受領の証拠にならない。
+研究上の確認項目は [検証サイクルの受領手順](verification-cycle-ops.md) が正本で、board はその判定を代行しない。
+
+**受領の最小手順 (2026-09-07、初回の cross-vendor 一周から)**: (1) 提出の deliverable の所在を**開く** (summary を読んで閉じない) / (2) 参照 commit の `--stat` で、依頼 scope 外の file が動いていないことを見る / (3) 完了条件を 1 項ずつ成果物の該当行に対応させる / (4) accept には何をどう確かめたかを reference として残す (= 後から「何を根拠に閉じたか」が読める)。提出 summary は worker → 依頼側の**訂正**が流れる経路でもある (初回で依頼側の読み過ぎが worker から指摘された) — 受領側はそれを別 channel を作らずに受け取り、自分の記録を直す。
+
+### <a id="board-explicit-handover"></a>引継ぎは履歴に残す
+
+前任 session が使えなくなったときは、現確認 session、または明示的な owner 判断で、
+担当か確認の**どの役割を、どの session に渡すか**を記録する。agent が owner を名乗って
+自分に権限を与えてはならない。元の起票者と過去のイベントはそのまま残す。
+
+担当の引継ぎでは旧 claim を失効させ、新担当が引き受け直す。提出済みなら先に受領か差戻しを
+決め、未確認の成果を黙って捨てない。確認役の引継ぎでは現在の提出を維持し、新確認役の inbox に移す。
+宛先不明・応答なしを検出しても勝手に別 session を起動したり、同 vendor の任意の session に渡したりしない。
+
+<a id="board-role-claim-is-not-assignment"></a>**読む側も同じ: 他 session の状況共有にある役割の自己申告 (「この session が X の窓口」「この範囲は触る前に一声」) は、その session の発言であって owner の割り当てではない。** 自己申告が owner の指示を報告する文の直後に並んでいても、owner がその報告を見て異を唱えなかったとしても同じ ([表示名を担当者の推測材料にしない](#board-session-subject) の本文版。 決定・提案・自己申告を記録の瞬間に確かめる一般形 = [actor-attribution.md#decision-state-at-record-time](actor-attribution.md#decision-state-at-record-time))。自分の作業を止める・狭める制約として記録するなら、発言者と event ID を付けて原文の動詞のまま書き、owner に確かめる。
+
+- **控える側の制約ほど確かめずに受け入れる**: 「触らない」は安全に見えるので、許可の主張なら確かめるところを素通りする (実測)。
+- **言い換えで強まり、見送りの記録ごとに写る**: 「編集の前に照合する」が受け手の記録では「編集しない」になり、以後「窓口なので編集していない」という見送りの記録が書かれるたびに別の file へ写っていく (実測)。**見送りの理由に他 session の役割を書く瞬間が、出所を確かめる瞬間**。
+- **割り当ての置き場は project 側**: owner が役割を決めたら、その project の指示 file など 1 か所に書き、board の note と他の記録はそこを指す。置き場の無い役割は割り当てではない。訂正も同じ 1 か所に置く (写しごとに訂正文を足すと、訂正がまた写しになる)。
+
+<a id="successor-window-stops-predecessor"></a>**同じ役割の仕事を別の窓 (別の機械・新しい session) に引き継がせたら、 同じ turn に前の窓へ「ここで止める・残りは後の窓が持つ」 を 1 行送る。** 引き継ぎの依頼書は後の窓にしか届かないので、 前の窓は自分の依頼書のまま残りを進め、 後の窓が済ませた用事 (同じ相手への送信・同じ問い) を owner にもう一度問う (実測: 後の窓が送った便の可否を、 前の窓が owner に問い直した)。 前の窓の側は、 owner に送信の可否や判断を問う直前に、 その用事の記録 (TODO の現在地・送信済みの箱) を読み直す。 引き継ぎの依頼書は「前の窓の済ませた分を記録から読んでから始める」 と書くが、 それは後の窓の二重を防ぐだけで、 前の窓の二重は止めの 1 行でしか防げない。
+
+### <a id="board-receipt-carrier"></a>1 義務 1 受領経路、配達と起動は別
+
+依頼時に受領を追跡する経路を一つ選ぶ。board-native な依頼では、その pending submission と
+accept / revise が受領経路になる。同じ義務を既存の完了 marker にも作り、両方で独立に閉じる
+設計にしない。既存 marker の義務は元の [返送 spine](#spawn-handoff-token-return) で閉じる。
+移行するなら対応関係を明記し、旧義務を消失・二重化させない。
+
+inbox は「次に誰が何をするか」の派生表示。pending を保存し、次回同期時に出せることが durable
+delivery である。**投稿成功 ≠ 相手が起動した ≠ 相手が読んだ ≠ 引受済み ≠ 受領済み**。
+即時通知・agent 起動・無人実行は別の runner の責任で、明示された実行許可・予算・停止条件・
+稼働確認が必要。board の存在からそれらを推論しない。
+
+<a id="board-watch-live-session"></a>**生きている session どうしは thread を見張って繋ぐ** (実測): 相手に直接 message を送れないとき (別の機械の session)、 依頼した側・引き受けた側はそれぞれ自分の session の中で、 その thread を見張る poll を background に置く。 相手が書くと poll が終わり、 それで session が起こされる。 既に動いている session への知らせであって agent の起動ではないので、 上の runner の許可は要らない。 見張りの command は投稿の出力に出しておくと、 受け手が自分で始められる。 実装 = 参照実装の `watch` (ai-collaboration `board/`)。 **同じ機械の相手は、 設定フォルダやアカウントが違って session 一覧 (ListAgents) に出なくても、 刻印の socket の宛先 (`uds:…`) で直接届く** = [multi-account-machine-surface.md #peer-discovery-across-config-dirs](multi-account-machine-surface.md#peer-discovery-across-config-dirs) (参照実装は投稿の後にその宛先を出す)。 **同じ機械の Codex の thread には SendMessage が無く、 `codex queue` の 1 行で届く** (参照実装が投稿の後に出す) = [multi-account-machine-surface.md #codex-peers](multi-account-machine-surface.md#codex-peers)。 **相手の役割の session が生きているかは、 投稿の出力の行で見る**: 動いている session の一覧を役割の名前で引いても当たらない (一覧に出るのは最初の prompt の先頭で、 役割の名前はその奥にある。 実測: 当たらないので「動いていない」 と報告し、 次の投稿の出力で生きていると分かった)。 投稿の出力は `tail` や `cut` で切らずに読む。
+
+<a id="note-in-closing-thread-gets-lost"></a>**別の session の依頼の thread に書いた頼みごとは、 その thread が閉じると埋もれる** (実測): 相手の request の thread に note で「この件も受けてほしい」 と書くと、 相手がその依頼を submit・accept で閉じたとき、 note は閉じた thread の中に残るだけで、 相手の inbox にも頼んだ側の見張りにも出ない。 相手の今の仕事と別の用事は、 独立の `request` (宛先 = 相手の session か役割 id、 長い中身は依頼資料の file) で出す。 note で頼んでしまったなら、 相手の反応を待たずに request に立て直し、 summary に「note で頼んだが thread が閉じたので立て直した」 と 1 行書く。
+
+<a id="review-where-evidence-lives"></a>**検収で読む証拠が別の機械にしか無いなら、 その機械の session に検収を頼む** (実測): 元の会話記録・機械の中の state (承認の記録・launchd の登録・一時 dir の成果物) は git で配られない。 読めない側で検収すると、 成果物に付いた検証の script を元の記録に当てる再現の検査を飛ばし、 数と参照の一致だけで受理することになる。 「照合していない範囲」 に書いても、 肝心の検査が抜けた受理は受理として残る。 受け手は依頼書の証拠の在りか (記録の path と、 それがある機械) を最初に確かめ、 読めない機械なら判定せずに、 読める機械の session へ request を出す。 既に受理してしまったものは、 読める機械で当て直す request を出す。
+
+### <a id="resident-board-runner"></a>常駐 runner — 配達を「起動」に変える最小の機構 (2026-09-07)
+
+board は pending を保存するだけで、相手 session が inbox を読むまで何も起きない (= [1 義務 1 受領経路](#board-receipt-carrier) の「配達と起動は別」)。常時稼働する host に **stable な resident identity** (例: `resident-<host>-<agent>`) で inbox を定期的に読む runner を置くと、依頼側はその identity を宛先に書けて、無人で回り続ける最小の形になる。設計原則:
+
+1. **poll と dispatch を分ける**。poll は決定的で LLM を使わない (`inbox --json` に行があるかだけ)。dispatch (LLM worker の起動) は kill switch (default OFF) の後ろ。空振り tick の費用はゼロ。
+2. **runner は board の一部ではない**。実行許可・予算 (1 tick 1 件 + 壁時計上限)・停止条件・稼働確認 (heartbeat、cron 失敗の surface) は runner 側の責任で、board の存在から起動を推論しない。
+3. **worker は claim → 作業 → submit まで**。accept / revise は起票 session か人間 (requester ≠ assignee を reducer が要求するので、resident が自分に出した依頼を自分で閉じる経路も無い)。無人層の契約 ([検証サイクルの無人層](verification-cycle-ops.md#autonomous-layer)) と同じく、対外 action・SoT 昇格・著者連絡は越えない。
+4. **identity は告知する**。`sessions` は history 由来の一覧なので、runner は初回に note で自分の identity と dispatch 状態を残す。
+5. **scope は許可 root で縛る**。request の references が許可外なら blocker で返す。source repo が dirty なら触らない。
+
+別 vendor の resident (例: `codex exec` を同じ pattern で) も同じ原則で置ける = runner の vendor 化は pilot 単位で。instance (poller script / config / dispatch skill) は owner の private layer。
+
+### <a id="chat-board-bridge"></a>chat bridge — 人間の入口を chat に置く (2026-09-08)
+
+resident runner は board に載った request しか起こさない。人間が依頼を出す面が「端末を開いて CLI で request を打つ」だけだと、常駐の意味 (人間が離れていても回る) が入口で切れる。chat tool (Discord / Slack 等) の message を board request に変換し、board の状態変化を chat に返す **bridge** を置くと、人間はスマホの一言で依頼でき、受領も chat 上の操作で済む。設計原則 (runner の 5 原則に足す形):
+
+1. **bridge は transport、判断しない**。message → request の写像は構文だけ (1 行目 = 題、以降 = 完了条件、`[project]` で source を選ぶ)。要約・翻訳・優先付け・worker の起動はしない (= poll/dispatch 分離をここでも守る、bridge が LLM を呼ばない)。
+2. **依頼者 identity は人間**。request の actor は `human / <chat>:<user id>` で、bridge 自身は identity を持たない。requester = reviewer なので、受領 (accept) も同じ人間 identity で post する。chat 上の ✅ reaction を accept に転記するのはこのため (= 「配達と起動は別」の受領側版: 受領の判断は人間、指を動かすのは機械)。
+3. **起票できる source は列挙**。bridge の config に owner が ordinary と分類した project だけを書く (= source-classification gate を config で先払い)。未登録 project は起票せず、その旨だけ返す。restricted source は bridge 経由で起票しない。
+4. **返信先も列挙**。chat への書込は外部発信なので、config に列挙した channel (自分宛て DM が最小) 以外へは書かない。列挙 = owner の standing OK。
+5. **履歴は取り込まない**。cursor 初期化は「今」から。過去 message を request 化すると同じ依頼が二重に立つ。
+6. **「AI 社員」は bot (token) の数ではなく、宛先と persona の数**。役割は組織図 (部 = category、課 = channel、係 = persona) と board の宛先 identity (resident) × source project で表し、返事の名義は webhook の username で切り替える (課長が受け、係長が進捗、課長が受領)。bot = token は 1 体のまま増やさない。役割ごとに本物の bot を立てるのは、それが要る理由 (@mention / DM / 別 token の被害分離) が出た時で、組織図はそのまま出口だけ差し替える。人間側の入口は「役割の部屋に書く」だけで、`[project]` タグは上書き手段に退く。
+
+runner と bridge は独立に ON/OFF できる (bridge だけ ON = request が board に溜まり surface される、害なし)。
+
+**実装 (層1 engine、config 駆動)**: [`scripts/discord-board-bridge.py`](../scripts/discord-board-bridge.py) (Discord ⇄ board の決定的 tick = cursor 取り込み / 課長 ack / 係長 進捗 / ✅ → accept、`--dry` / `--backfill-minutes` / `--setup-webhooks` / `--selftest`) + [`scripts/discord-org-build.py`](../scripts/discord-org-build.py) (組織図 YAML → category / channel / webhook)。Discord 側の機構 fact = [`discord-bot.md#webhook-personas`](discord-bot.md#webhook-personas) / [`#guild-creation-user-only`](discord-bot.md#guild-creation-user-only)。instance (config / 組織図 / ids / cron wrapper / shim) は owner の private layer。初回 live で踏んだ 2 点: (i) 初回 tick より前の投稿は「履歴」として捨てられる → `--backfill-minutes` で直近だけ拾う (ii) board schema は accept にも `references ≥ 1` を要求 → ✅ を付けた message の jump link を証跡に添える。
+
+### 発火条件と layer
+
+- 単一 project / 単一 session で足りる間は作らない。実際に cross-project / cross-machine の重複
+  作業や handoff loss が起きる、または常時発生することが trigger。
+- audience が owner だけなら layer 3。project collaborator も読む必要があるなら layer 2 = membership
+  がその audience と一致する repo に置く。既定は共同研究の repo 自身の `board/` (読む人 = repo の member、
+  招待が要らない)、project の履歴を board の commit から分けたいときは同じ member の companion repo。
+  1 board = 1 audience。1 repo 内の branch / thread ごとの ACL を擬似実装しない。Git の read boundary は
+  repository membership である。
+- <a id="board-engine-layer"></a>**engine は layer 1 に 1 つ、board は設定と event だけ**。layer-2 の board を
+  共同研究者の session が使うには、その人たちが engine を読めなければならない (engine が layer 3 に
+  あると layer-2 の board は作れない = 実測)。各 board は読む人の範囲・暗号化・投稿を受け付ける project を
+  board 自身の設定 file に持ち、engine の写しを置かない。参照実装 = ai-collaboration
+  [`board/`](../../ai-collaboration/board/CONTRACT.md#boards-and-audiences)。
+- collaborator board は、読む人が見てはいけないもの (他の checkout の名前・path・link、restricted な
+  source) を投稿の前に機械で止める。止めるのは名前と path で、文章の中身は書き手の判断に残る。
+  owner board に共同研究の話を書くのは漏れではない (読む人が狭いだけ) ので止めず、共同研究者にも
+  見せる話なら collaborator board があることを知らせる。
+- layer-2 project は owner-private board に依存しない。board を消しても project の durable knowledge
+  が失われないことを invariant にする。
+
+### データモデルと正本境界
+
+- 1 post = 1 uniquely named immutable event file = 1 commit。共有 mutable `BOARD.md` は置かない。
+  correction は旧 event の編集でなく、旧 ID を `supersedes` する新 event。
+- thread の authoritative order は `main` の commit order。wall-clock timestamp は表示・診断用で、
+  machine 間 clock drift を含むため conflict resolver にしない。
+- `claim` は hard lock でなく期限付き advisory lease。heartbeat を push せず、他 session の判断を
+  変える transition だけを書く。
+- event の actor field が「どの session の報告か」を表し、Git author は transport account を表す。
+  両者を同一視しない。
+- provisional finding は board に閉じ込めない。検証後に owning project の code / data / DESIGN / case
+  note へ書き、board には昇格先 pointer を新 event として残す。project-side artifact の無い `done`
+  は避ける。
+
+### concurrency
+
+同じ checkout の index は immutable event でも競合する。writer は post ごとに isolated temporary
+checkout を作り、latest `main` を fetch → event 1 件を schema validate → その path だけ stage / commit
+→ push する。non-fast-forward は最新履歴を取得し、**新状態でも遷移が合法か再検証してから**
+少回数だけ retry する。Git の競合がなくても二重 claim は不正になり得る。結果不明の投稿は同一
+event ID で照合・再送できるよう保持し、別 ID で同じ依頼を増やさない。失敗時は event を失わず停止する。
+
+### <a id="pending-item-claims"></a>同じ「用事」 の通知を並列 session が受け取る — 用事の claim
+
+session 開始時の一覧や turn 終わりの検査が「この session で処理せよ」 と各 session に別々に求めると、 同じ機械の並列
+session が同じ mail を読み、 同じ用事の記録を 2 つ作る (実測)。 file の宣言 (`touch`) は path の単位で、 依頼の `claim` は
+request の単位。 mail の thread・台帳の項目のような「用事」 はどちらでもない。
+
+1. **用事に鍵を決める**: mail id・台帳の項目 id・依頼 id。 同じ用事を別の道具が別の名で呼ぶ (返信の message と thread と、
+   結んだ台帳の項目) ので、 別名をまとめて 1 つの用事として claim する (全部取るか、 1 つも取らない)。
+2. **用事を求める側が求める前に claim する**: turn 終わりの検査は、 止める理由にする用事を先に claim し、 別の生きている
+   session が持つ用事では止めない (他の理由で止めるときだけ「誰が対応中か」 を 1 行添える)。 一覧はその行に「<session> が
+   対応中」 を付けるだけで、 行は消さない。 記録の道具も記録する用事を claim し、 別の session が処理中の用事への書き込みは
+   止める (読むだけは通す)。 claim には種類を持たせる = **処理** (読んで記録する) と **伝達** (user に伝えただけ)。 伝達の
+   claim は「二重に伝えない」 だけを求め、 他の session の処理は止めない (止めると、 伝えただけの session が lease の間ずっと
+   記録を塞ぐ)。 人やエージェントが思い出して claim する形にしない。
+3. **claim は lease と生死で切れる**: 先に取った session が持ち、 取り直せば lease が延びる。 lease が切れる・claim した
+   session が終わる・手放す、 のどれかで切れ、 用事は元どおり出る (= 黙って落ちない)。 生死は runtime の session の登録で
+   引く (claim した時に登録に居た session が今は居ない = 終わった)。 登録に現れない session は lease だけで切れる (無人の実行も
+   実行中は登録を書く runtime がある = 実測)。 ⚠️ **runtime の登録は機械ごと** = 別の機械で動く session は、 生きていても
+   この機械の登録に現れない。 拾う・待つの判定 (依頼元が自分で worker を起こす途中か、 受け持つ人が居るか) にこの生死を使うなら、
+   相手が別の機械の session かを先に見て、 「登録に居ない = 終わった」 と読まない (実測: 一方の機械の受け持ちの見張りが、
+   もう一方の機械で生きている依頼元が出したばかりの依頼を、 依頼元が終わったと読んで数分のうちに拾った)。 session の終わりの hook で手放せば、 用事は lease を待たずに戻る。
+   伝達の claim は別の寿命を持つ: user に伝えた事実は、 伝えた session が終わっても変わらない。 lease はその user の日の
+   終わりまでにし、 生死で切らず、 session の終わりの hook でも手放さない。 処理の claim と同じ短い lease で切ると、 伝え済みの
+   用事を後の session の検査がもう一度伝えさせ、 user には伝え漏れに見える (実測)。
+4. **台帳の項目の二重起票は claim と別の網で止める**: claim は「今どちらが手をつけているか」 しか言わない。 新しい項目を
+   作る前に、 同じ thread を指す open な項目を作業 tree の全部 (未 commit・untracked = 並列 session が書いたばかりの file を
+   含む) と upstream から引き、 あれば作らせない。 同じ thread の別の用事だと承知して分けるなら、 新しい項目から既存を
+   指す相互参照を書かせる (承知の記録が残る)。 項目を作る操作の入口で止め、 そこを通らない作り方 (shell・script) は commit の
+   時に同じ検査で警告する (その検査が他の repo の台帳を読むときの git の注意 = [`hook-authoring.md#hook-git-env-cross-repo`](hook-authoring.md#hook-git-env-cross-repo))。
+5. **台帳は同じ checkout を使う session に即時に見える手元の state に置く**: claim は分の単位で、 履歴は永続の event 用。
+   claim を event として post すると、 用事 1 件ごとに履歴が 1〜2 件増える。 別の機械との重なりは、 記録 (台帳の項目) の push と
+   4 の upstream の読みが網。 その網が別の機械の項目と重複を見つけた回を記録しておき、 実測で出てから claim を写すかを決める。
+6. <a id="designated-handler-session"></a>**用事を受け持つ session を 1 つに決める運用では、 受け持つ session を登録し、 ほかの session の検査は問わずに渡す**:
+   一覧の用事を 1 つの session が受け持ち、 ほかの session は別の仕事に専念する、 と分けることがある。 作業 dir では見分けられない
+   (どちらも同じ dir で動く = 実測) ので、 受け持つ session が自分を登録する (1 つの state file に session ごとの登録を並べ、
+   生きている登録を答える)。 後の登録が前の登録を置き換える形にしない: 受け持つ session が生きているのに別の session が登録し、
+   後の方が先に終わると、 生きている受け持ちが「居ない」 と読まれ、 新しい受け持ちが起こされる (実測)。 受け持つ session が
+   生きている間の別の登録は断って二重であることを言い、 引き継ぎは明示の置き換えで行う。 受け持つ session を起こす前の確かめも
+   道具に持たせる = 登録に生きている受け持ちが無く、 生きている session の題にも受け持ちらしいものが無いときに「居ない」 と答え、
+   題だけの受け持ち (登録が切れた session) が居れば起こさずに登録し直しを頼ませる。
+   二重を断る網は、 起こす経路 (session を起こす tool・人が押す card・CLI) のどれかでなく、 どの経路でも通る登録の 1 打に置く
+   (起こす tool の hook は 1 つの経路しか見ず、 起こす文面で見分けるので、 その道具を直す仕事の起票まで止める)。
+   生死は 3 と同じく runtime の session の登録で引き、 終わった session の登録は黙って効かなくなる
+   (消す操作を人に覚えさせない)。 生死が読めない・自分の id が分からないときは、 用事を渡す判定では登録が無いのと同じに扱う
+   (用事が宙に浮くより、 全 session に問う元の振る舞いに倒す)。 起こす前の確かめは逆に倒す = 生死が読めなければ「居ない」 と
+   言い切らない (起こさない側。 同じ登録でも、 読む用途ごとに安全な側が違う)。
+   - turn 終わりの検査は、 受け持つ session が別に生きていれば、 この session に伝達も処理も求めず、 **claim もしない**。
+     伝達の claim を付けると、 受け持つ session の一覧でその用事が「伝え済み」 になり、 実際はだれも扱わない (実測)。
+   - 代わりに、 この session の一覧に出た用事を、 表示の台帳の上で受け持つ session にも出たことにする (表示回数は増やさない)。
+     受け持つ session の次の turn 終わりの検査がそれを問う = 受け持つ session が起動した後に初めて出た用事も落ちない。
+     受け持たない session に、 一覧に出た用事を「受け持つ session へ message で渡したら完了」 と求める形にしない: その session に turn を使わせ、
+     受け持つ session が同じ一覧で見ている用事を重ねて渡させ、 渡したかを判定する新しい述語 (会話記録の送信先と中身) も要る。
+     一覧の外の用事の渡し方 = [`#side-work-to-handler`](#side-work-to-handler)。
+   - **道具を手で回させる検査も同じに分ける** (session 開始時の見張りが時間切れで抜けた分の取り直しなど): 受け持つ session が
+     別に生きていれば、 この session には回させず、 抜けたことを受け持つ session に渡し、 受け持つ session が回す。 読む状態が
+     全 session で共通の道具 (台帳と受信箱を読む見張り) なら、 1 回で全 session の分を覆う。 どの session にも回させると、 同じ
+     道具が session の数だけ回り、 同じ用事の行が session の数だけ user の画面に並び、 受け持つ session にも重ねて届く (実測)。
+     session 開始時の見張りが出す「時間切れ → 手で回して」 の案内の行も同じ = 受け持つ session が居れば「受け持つ session が回す」
+     と出す。 受け持つ session の側では、 渡された「抜けた」 を間隔の上限つきで問う (時間切れの続く日に、 受け持つ session が
+     session の数だけ止められないように)。 渡し先が回す経路を持たない見張り (その session の仕事に要る見張り) は、 今までどおり
+     その session に回させる。
+   - 一覧の file を全 session が読む 1 つの file にしているなら、 段を session ごとに畳めない (受け持つ session と通知の見張りも
+     同じ file を読む)。 頭に「受け持つ session = <id>。 この session がそれでなければ下の段は伝えない」 の 1 行を置き、 読む側が
+     自分の id と比べる。 行頭は通知の見張りが拾う印にしない。
+   - その turn に自分が出した問いの記録を求める網は残す (一覧の用事ではなく、 受け持つ session はその問いを知らない)。
+     無人の定期実行の分岐はこの判定より先に置く (無人の run の用事は受け持つ session に渡さない)。
+   - hook の test は登録の置き場を一時 path に向ける (向けないと、 本物の受け持ちが生きている間は伝達を問う既存の test が黙る)。
+   - <a id="handler-companion-at-start"></a>**受け持つ session に付く補助の窓 (受け持つ session の依頼の提出を検収する窓など) は、 受け持つ session の最初の動作の点で立てる**:
+     受け持つ session は登録の直後に、 溜まっていた用事を拾って自分の受け持ちにする。 補助の窓を「受け持つ session が最初の依頼を出すとき」 のような後の点で立てると、
+     その間に拾った用事 (補助の窓が受けるはずの検収) が受け持つ session に落ち、 引き受けの印 ([`CONTRACT.md#pickup`](../../ai-collaboration/board/CONTRACT.md#pickup)) で持たれて、
+     後から立った補助の窓は拾えない (実測: 受け持つ session の窓が替わるたびに登録から補助の窓まで数分から数時間空き、 その間に拾った分が受け持つ session に残った)。
+     登録の道具が、 補助の窓が居なければ立ててから拾う。 窓が替わる点を知るのは登録だけなので、 補助の窓の起こし直しを規則の文だけに置かない。
+     立てた補助の窓が受け付けを始めるまで (立てる依頼が引き受けられるまでか、 短い決まった時間) も、 その用事を受け持つ session に渡さない。
+     窓を起こす最後の 1 手 (道具からは打てない起動) が受け持つ session に残るなら、 起こし忘れを turn の終わりの網で 1 回止める。
+     依頼をほとんど出さない受け持ちは、 後の点で立てる形のままにする (窓を先に増やすと費用だけが残る) = 分ける線は、 最初の動作が補助の窓の仕事を生むか。
+   - <a id="lease-carousel"></a>**片づける務めの無い受け持ちに、 期限つきの引き受けの印で用事を拾わせると、 用事は窓を越えて回るだけになる**:
+     依頼元の窓が終わった確認待ちのように、 拾っても受け持つ session の務めの外 (検収は補助の窓の務め) の用事は、 印の期限が切れると次の窓がまた拾う
+     (実測: 同じ用事が受け持つ session の 4 つの窓に順に拾われ、 どの窓でも片づかなかった)。 拾う述語は「生きている受け手が居るか」 に加えて
+     「片づける務めを持つ受け手か」 で切る = 片づける務めを持つ窓に渡すか、 片づける受け手が居ないことを 1 回人に言う。
+     務めを持つ受け手でも、 掲示板がその受け手に書かせない用事 (番が終わった窓の id のままの検収 = その窓と人の明示の指示のほかは、 受け取りも番の移しも断られる) はその受け手に回さず、 人に言う側に入れる。
+     人に言う問いは用事ごとに決まる key で立てる = 窓が替わって拾い直しても問いが増えず、 同じ印で出る ([`CONTRACT.md#owner-asks`](../../ai-collaboration/board/CONTRACT.md#owner-asks))。
+     「問いが開いている間は拾わない」 で拾い直しを止めるのは、 開いた問いが人の一覧に出るときだけ (出なければ、 聞いた窓が終わったときに問いが黙って消える)。
+   - 残る穴: 渡すのは台帳の上だけで、 受け持つ session を起こさない (受け持つ session が次に turn を終えるまで問われない)。
+     表示の台帳に載らない用事 (自分が動く期限の行、 手で回した道具の出力、 作業の途中で気づいた用事) はこの網では渡らない
+     = 渡し方は [`#side-work-to-handler`](#side-work-to-handler)。
+
+7. <a id="reserve-before-work"></a>**別の機械の session とも重ねないなら、 作業の前に、 全体の順序がある場所へ予約を書く**:
+   二度目の書き込みを断る仕組み (claim や受領の二重を断る掲示板など) は記録の重複を防ぐが、 手間の重複は防がない。 断られるのは
+   書き込むときなので、 その手前までは両方の session が動く (2 つが同じ worker を起こす・同じ提出を読み通す = 実測)。 どの機械が
+   拾うかを規約で 1 台に決めても、 2 台目を止める物は無く、 その 1 台が止まると用事が待つ。
+   - 予約は worker を起こす・成果物を読み始める**前に**、 順序を決められる場所 (push の順で勝ち負けが決まる共有の履歴など) に書く。
+     上の claim の台帳は手元の file なので、 同じ機械の session しか分けない。
+   - 予約は次の状態遷移か時間切れで消える形にする (予約したまま止まった session が用事を塞がない)。
+   - 宛先の session が終わったかどうかは、 その会話記録を持つ機械でしか分からない。 ほかの機械からは「不明」 として扱い、
+     終わったものとして動かない。
+   - 背景の見張りで起きた turn は session を起こせない ([`#chip-in-event-turns`](#chip-in-event-turns)) ので、 受け持つ session (6) が
+     見張りで動く運用では、 worker は本人が押す card で出す。 検収や返事はその turn で書ける。
+   - 参照実装 = [`CONTRACT.md#pickup`](../../ai-collaboration/board/CONTRACT.md#pickup)。
+
+参照実装 = ai-collaboration [`board/board_items.py`](../../ai-collaboration/board/board_items.py)
+(CLI と台帳の置き場 = [`CONTRACT.md#item-claims`](../../ai-collaboration/board/CONTRACT.md#item-claims))。
+
+### privacy と source-classification gate
+
+private visibility は encryption ではない。機密を扱う board は default-encrypt を優先し、新規 file
+の暗号化指定漏れを構造的に防ぐ。`git-crypt` が守るのは file body だけで、repo / branch / path /
+commit subject / author / timestamp / size は metadata surface に残る
+([`sensitive-repo-patterns.ja.md`](../docs/sensitive-repo-patterns.ja.md) 参照)。post を組み立てる**前**に source を分類する:
+
+| source | board treatment |
+|---|---|
+| metadata を公開面に出してよい ordinary source | encrypted event body。意味のある project / thread path は metadata として安全な場合だけ可 |
+| encrypted / unpublished / sensitive source | opaque path + neutral commit subject + coarse event。識別 mapping が必要なら encrypted index 内にだけ置く |
+| local-only / remote-prohibited / credential・secret management | **no-post**。opaque event の存在自体も作らない |
+
+source scope と board audience が一致しない内容を forward しない
+([`sensitive-data-pass-through.md`](sensitive-data-pass-through.md))。password、token、cookie、private key、
+raw transcript、未公表本文の転載は encryption の有無にかかわらず board の data model から除外する。
+
+### 実装境界
+
+本節が主体・受領・引継ぎ・配送・privacy の一般則を持つ。schema、暗号鍵の選択、actual repo、
+owner 固有 registry は各 layer-2/3 instantiation が持つ。個別 board の `DESIGN.md` は採用理由・
+audience・移行と defer 判断、運用文書は CLI、schema は field 契約、単一 reducer は遷移の機械的
+判定を持つ。view ごとに別の状態機械を作らない。不一致は文書か実装の defect として直す。
+`SESSION.md` と入口の文書は現在地と正本への pointer に留める。
+
+旧形式の履歴から session ID や確認権限を推測で補わない。旧 thread を旧経路で閉じるか、
+明示的に移行し、新形式の受領済みと区別して表示する。writer / generated view / CI は、
+実際に必要になった保証を機械化するために導入する。
+
+
+## <a id="parallel-full-text-candidates"></a>14. 並行した worker が同じ file の全文の候補を作ったら、 共通の土台からの差分を合わせてから当てる
+
+保護された file を worker に「全文の候補」 として作らせる運用では、 2 人の worker が同じ file (hook の配線の一覧、 索引の CLAUDE.md など) の候補をそれぞれ作ることがある。 **全文の候補を順に当てると、 後から当てた方が先の変更を黙って消す** (どちらの候補も相手の変更を含まない)。 当てる前に:
+
+1. 各候補を、 それぞれの土台 (worker が見た版) と今の版の両方に対して diff する。 土台が今の版と違えば、 その候補は古い
+2. 同じ file の候補が 2 つ以上あれば、 今の版に各候補の差分 (追加だけなら挿入位置) を合わせた 1 つの候補を作り、 構文 (JSON / YAML / 行の数) を確かめてから当てる
+3. worker への依頼に「同じ file の候補を作る別の worker がいる」 と書き、 1 人に寄せられるなら寄せる
+4. <a id="full-text-candidate-vs-live-editor"></a>**人がエディタでその file を開いて直している最中なら、 相手は worker でなく人** — 候補を作ってから書くまでの間に人が保存した直しを、 全文の書き込みが黙って消す (実測: 人が TeX のエディタで原稿を直している最中に、 承認の道具で全文の候補を書き、 その間に保存された 1 文が元に戻った)。 候補は書く直前に今の file から作り、 書いた後に出る diff を読んで、 自分の候補に無い差分 (人の直しが元に戻った箇所) があれば同じ turn で戻す。 全文の候補が要らない変更は、 文字列を 1 か所ずつ置き換える編集 (Edit) にする (人の直しの隣を触らない)。 書いたことは人に伝え、 エディタで読み込み直してもらう (古い画面のまま保存すると、 今度はこちらの直しが消える)。 commit は人の未 commit の直しを避けて自分の分だけ ([#temp-index-commit](#temp-index-commit))
+5. <a id="prepare-while-another-writes"></a>**別の窓が同じ file を書いている間も、 書けないのは file だけ** — 案 (old と new の組)・本人の裁定・検査の台帳の直しを先に作り、 今の版の写しに空打ちして当たることを確かめて待つ。 書く番の合図の後は、 最新の版で 1 組ずつ空打ちしてから当て、 当たらない組だけを文で探し直す。 old は文の単位にしておくと、 同じ段落の別の文が直されても当たる (実測: 合図から数分で全部当たった)。 裁定の記録は session に結びつくので、 裁定を受けた窓自身が当てる (別の窓に渡せない)。 待つ間に前後の文が変わるので、 当てる前に前後を読み、 案が足す文が今の文と重ならないかを見る (実測: 案が足す理由を、 後の pass で直した隣の文がすでに言っていた)
+6. <a id="manuscript-copy-not-new-tex"></a>**原稿の全文の候補を、 repo の中の新しい .tex として commit させない** — 原稿の保護領域の guard ([`manuscript-claim-ownership.md`](manuscript-claim-ownership.md)) は新しい file の保護領域を全部「追加」 と数えるので、 中身が原稿と byte で同じ写しでも commit で止まり、 本人の裁定を求める (実測)。 原稿の文面の直しを複数の worker に並べて頼む依頼では、 成果物を共通の土台からの diff と (old, new) の組の file にし、 写しは作業ツリーに置いて commit しない (組の file を土台に当てれば 1 行で作り直せる形にする)。 合わせる側は 1〜2 のとおり共通の土台で重ねる。 repo の外に作った一時の git repo に写しを commit する command も、 同じ guard が止めた (実測) = 意図記録の骨組みを原稿の commit の前に作りたいときは、 読むだけの diff で作る ([`edit-intent-record.md#draft-before-commit`](../../ai-collaboration/conventions/edit-intent-record.md#draft-before-commit))。 diff が今の版に当たるか・行がどれだけずれるかは `git apply --verbose --check` で数える (macOS の `patch` は、 行がずれて当てても何も出さなかった = 実測)。 土台と 2 本の写しを変わった所ごとに並べ、 語の差と所ごとの選択を 1 頁にして採る所を決めるのは [`scripts/prose-pass-compare.py`](../scripts/prose-pass-compare.py) (`--picks` で選択と理由を残す。 当てるのは `git merge-file -p --diff3` の 3-way で、 両方が同じ行を変えた所だけが衝突として残る)
+7. <a id="overlapping-line-pair-candidates"></a>**別の worker の行の組 (old と new の組) の候補と old の行が重なっていないかを、 提出の前に確かめる** — 依頼の範囲が途中で広がると (1 文の言い直しの依頼が段落全体の書き直しになる、 など)、 その worker の old は別の worker の組が直す行まで含む。 どちらかを当てると、 もう片方の old は当たらなくなる (実測)。 提出の前に、 同じ file を直す他の worker の組の file (同じ project の依頼の成果物) を集め、 (1) 自分の old の行が相手の old に含まれないか (2) 両方の組を今の版にどちらの順で当てても全部当たり、 結果が同じか、 を確かめる。 重なる組は自分の組から外し、 その行に推す語を相手に送って同じ語にそろえる。 範囲の変更は依頼元が claim の後に note で書くことがある = 提出の直前に claim の後の投稿を読み直す ([掲示板の契約の #re-read-before-submit](../../ai-collaboration/board/CONTRACT.md#re-read-before-submit))
+8. <a id="stacked-pairs-base-applied-midway"></a>**まだ当てていない別の worker の組の上に自分の組を作るときは、 その土台の組が途中で当てられても同じ基を作れるようにする** — 依頼元は、 土台の組を作業の途中で file ごとに当てて commit することがある。 その版も作業の途中で何度か作り直される (実測: 土台の組の数が作業中に 2 回変わり、 その後で src に当てられて commit された)。 写しを作る道具は、 作業ツリーにすでに入っている土台の組を飛ばして基を作る。 当て済みと判定するのは、 new が現れ、 old が new の中にしか現れないとき (new が空の組は、 old が消えていること)。 old が無いことだけで判定すると、 new が old を含む組 (ある行の前後に行を足す組) は当て済みでも old が見つかるので、 二重に当たる。 飛ばした組は出力に出し、 作った基の SHA-256 が今の HEAD と同じかを見る。 同じなら、 自分の組は今の src にそのまま当たる。 提出の直前に、 土台の組の file と src の HEAD をもう一度読む (上の 7 と同じ確かめを、 土台が当てられた後の版で)
+9. <a id="dropped-pair-dependents"></a>**検収済みの組を 1 つの当てる形にまとめた後で 1 組を外すときは、 残る組の new に、 外した組が足したもの (定義の文・label・語) を指す所が無いかを探す** — 組は別々の worker が別々の依頼で作るので、 ある組の new が別の組の new を前提にしていても、 組の file にはそれが書かれない。 外した組の new から足した語・label・節の名を拾って残る組の new を grep し、 当たった組は一緒に外すか言い直すかを依頼元に 1 行で問う (残すと、 本文に無いものを指す参照が原稿に入る)。 問う間は両方の版を並べて示し、 決まったら当てる形を 1 版だけに減らす (並べたままだと、 どちらが本線かが受け取りの記録と食い違う)。 実測: 定義の文の組を外す指示の後、 その定義を指す参照の組が残り、 まとめた worker と検収係が別々に気づいた。
+
+## <a id="workflow-fan-out"></a>15. Workflow の fan-out — 起動の前に本数を見積もり、 同じ入力を読み直す割り方は独立が要るときだけにする
+
+Workflow の script は `agent()` を並べるほど網羅的に見えるが、 本数・波数・費用は書いた時点では見えない。
+前段の出力で後段の本数が決まる形 (項目ごとに検証役を起こす) では、 起動してから本数が数百に膨らむ (実測)。
+本節は、 起動の前に数を見る段と、 割り方の規律と、 止める・再開するときの規則を持つ。
+agent ごとの model の書き方は [§10 の #workflow-agent-model](#workflow-agent-model)。
+
+<a id="workflow-cost-model"></a>**費用と時間のしくみ (実測)**:
+
+- **同時実行の上限** = min(16, CPU 数 − 2) (Workflow の仕様)。 超えた分は待ち行列に入り、 枠が空くと始まる。 **待機中の agent は token を使わない** (agent の記録は枠に入った時刻から始まる = 実測)。
+- **時間** ≈ 波の数 (本数 ÷ 上限) × 1 本の所要。 前段の出力で本数が決まる形は、 波の数も起動の後に決まる。
+- **費用**: agent は 1 本ごとに起動時の文脈 (CLAUDE.md・道具の定義・skill の一覧・依頼文) を読み込み、 tool を呼ぶたびにそれを cache から読み直す。 実測: 起動時の文脈 ≈ 11 万 token (うち約 3.8 万は agent 間で cache を共有し、 残り約 7 万は 1 本ごとに書き込む)、 入力 token の 5〜6 割がその読み直し。 費用 ≈ Σ (呼び出しの回数 × 起動時の文脈) + 各 agent が読んだもの。
+- **本数を増やすと、 同じ向き付けを本数だけ繰り返す**: repo の状態を読む (`git log`・SESSION・CLAUDE.md)、 道具の使い方を確かめる (`--help`)。 実測: 同じ入力を確かめる 12 本の agent が `git log` を計 35 回打ち、 同じ道具の `--help` を 14 本が打った。
+- **「並べても小分けにしても総量は同じ」 ではない**: 同じ項目を「項目 1 件 × 観点 1 つ = 1 本」 で確かめた形は、 「入力 1 つ × 観点 1 つ = 1 本」 にまとめた形の 2.8〜4 倍の入力換算 token を使った (実測。 入力換算 = input + 1.25 × cache 書き込み + 0.1 × cache 読み + 5 × output)。 判定は 25 件中 21 件で一致し、 食い違った 4 件はまとめた形の方が反証した。 まとめた形は 1 件あたりの証拠の数が少ない (3〜6 件 対 10〜15 件) = 深さと費用の取引で、 「まとめると精度が落ちる」 とも「同じ」 とも言えない。
+
+<a id="workflow-estimate-before-launch"></a>**起動の前に本数と波数を見積もる**:
+
+1. script を書いたら、 起動の前に空回しする: `python3 scripts/workflow-estimate.py 〈script の file〉 --args '〈args の json〉'`。 agent は起こさない。 本数を前段の件数 k の式 (k = 1, 3, 10) で、 phase ごとの内訳・波数・観点の分割と一緒に出す。
+2. **目安は harness の既定 (medium = 10 本未満)**。 それを越える形 (この機械の上限が 10 より大きいなら 1 波を越える形) と、 本数が前段の出力で決まる形は、 script に注釈 `// workflow-size: <本数> — <理由>` を書く。 数を書く行為が、 上限と本数を見たことの記録になる。 理由には、 なぜこの本数が要るか (網羅の単位・独立が要るか) を書く。 宣言は起動の許可にならない: その機械で一度に走れる本数 (上限) を越える形と、 本数が前段の出力で決まる形は、 enforce の機械では宣言があっても起動の前に本人に聞く (宣言の理由は確認の画面に出る。 宣言で通すと agent が自分で許可できるため = 本人の裁定)。
+3. **前段の出力で本数が決まる fan-out は件数に上限を置き、 削った分を `log()` で言う** (書き方 = 下の [書き方の型](#workflow-script-patterns))。 上限の無い形は、 空回しで「前段 1 件ごとに約 S 本ふえる」 と出る。
+4. **workflow を既定にする設定 (ultracode) の「token の費用は制約ではない」 は、 見積もらずに起こす理由にならない**。 時間 (波の数) と、 長い待ち行列を見た人が途中で止める損 ([下](#workflow-stop-discards-in-flight)) は token の外にある。 網羅は「入力を全部覆う」 ことで、 「項目ごとに agent を起こす」 ことではない。 「全部やる」 と頼まれたときも同じ。
+
+<a id="workflow-split-by-shared-input"></a>**agent の単位は「同じ入力を読む塊」 — 観点は 1 本の prompt に並べる**:
+
+- **既定**: 1 本の agent = 1 つの入力のまとまり (1 repo・1 群の file・1 文書)。 その入力について確かめる観点と項目は、 1 本の prompt に節として並べ、 結果は観点ごとの field で返させる (schema)。
+- **観点・票を別の agent に分けるのは、 独立が要るときだけにする**: (1) 盲検・cold-eyes (相手の結論や依頼者の見立てを見せない = [`cold-eyes-isolation.md`](cold-eyes-isolation.md)) (2) 同じ問いへの独立の票 (誤りが相関しないことに価値がある反証の票) (3) 1 本の context に入らない量 (4) 並行して別の file を書き換える (worktree)。 分けるときは script に `// workflow-lenses: independent — <理由>` を書き、 票の数 × 項目数が何波になるかを見積もる。 同じ材料・同じ方針を渡した票は、 誤りが入力から来ると独立にならない = 掲示板の worker や子の session を並べて書かせる起草も同じ考えで設計する ([§17](#parallel-drafting))。
+- **実測**: 同じ項目を 2 つの観点 (今やれるか / 規則に触れないか) で別々に確かめた agent は、 読んだ file の約半分が重なった (file 名の Jaccard 0.47)。 打った command の重なりは 5% = 同じものを別の手順で読み直していた。 観点が別でも入力は同じなので、 独立が要らない観点は 1 本にまとめる。
+- **項目ごとに独立の票を回したいときは段で絞る**: まず入力ごとの 1 本で全項目を判定し、 疑わしい項目 (反証された・証拠が薄い) だけを次の段で独立に確かめる。 次の段の件数にも上限を置く。
+
+<a id="workflow-read-only-agent-type"></a>**読むだけの段は起動時の文脈を小さくできる**: `agentType: 'Explore'` は CLAUDE.md を載せない (Workflow の仕様 = 組み込みの Explore・Plan は CLAUDE.md を載せない)。 Agent tool での実測 = 起動時の文脈 ≈ 2.8 万 token (既定の agent ≈ 11 万)。 費用の半分以上が読み直しなので、 呼び出しの多い読むだけの段で効く。 ⚠️ 取引: Explore は file を抜粋で読む癖があり、 CLAUDE.md の規則が載らない (hook は効く)。 読む深さが要る段・規則で判断する段には向かない。 使うなら要る規則を prompt に名指しする。 workflow の中での実測はまだ無い。
+
+<a id="workflow-stop-discards-in-flight"></a>**途中で止めると、 走っている agent の分は捨てる**: `TaskStop` で止めると、 走っていた agent の途中の成果は残らない (journal に result が無い)。 実測: 止めた時点で走っていた 8 本が、 その run の入力換算の 7%。 長い待ち行列を見て止めたくなる形は、 起動の前の見積もりで避ける。 止めるなら、 済んだ結果を書き出してから次の run に渡す ([下の 2](#workflow-resume-prefix))。
+
+<a id="workflow-resume-prefix"></a>**再開の cache は前から順に変わっていない呼び出しだけ — 呼び出しの順を変えたら再開しない**:
+
+- **仕様と実測**: `resumeFromRunId` での再開は、 再開した run の呼び出しの順に前の run の結果を引き、 最初に結果の無い呼び出しが来たら、 そこから後ろは結果があっても全部走らせる。 呼び出しの key は (prompt, opts) と、 `parallel` / `pipeline` の中の位置で決まる (tool の説明は「(prompt, opts) が同じなら cache から」 とだけ書くが、 位置も入る = 実測)。 args は key に入らない (実測)。
+- **parallel / pipeline は thunk の呼び出しを後回しにする** = その後ろで同期に呼んだ `agent()` が先に始まる (実測 = `parallel` の後ろの単発の agent が、 並列の分より先に始まった)。 したがって `await pipeline(…)` の await を外して後の段の agent を並行に回す編集は、 その段の新しい呼び出しを先頭に出し、 済んだ前段を全部走り直させる (実測: 済んでいた読み手が、 同じ key のまま全部走り直した)。
+- **規則**: (1) 再開は「同じ script を続ける」 ときだけ使う。 (2) script の呼び出しの順・数・prompt を変えたら (`parallel` / `pipeline` に渡す項目の並べ替え・途中への追加・削除も含む)、 再開せず、 済んだ結果を file に書き出し (`python3 scripts/workflow-run-stats.py 〈run の dir〉 --export-results 〈file〉`)、 その file を読む新しい run を起こす。 **前段だけでなく後段の済んだ結果も渡す** (渡さなかった後段は、 新しい run が同じ仕事をやり直す = 実測)。 (3) 再開する前に cache が返る本数を見る: `python3 scripts/workflow-estimate.py 〈script の file〉 --resume-dir 〈前の run の dir〉` (前の run の journal と agent の記録から prompt を読み、 空回しの呼び出しの順に照合する)。
+- **実測 (小さな試験の workflow、 4 項目 × 2 段の `pipeline`)**: (a) 前の run が後段の途中で止まった再開 = 前の run の終わった順とは関係なく、 再開の呼び出しの順 (cache はすぐ返るので項目の順) に引く。 最初の新しい呼び出しより前の後段は cache から返り、 後ろの後段は結果があっても走り直した (= 見積もりの道具の数え方どおり)。 (b) 項目の並びだけを入れ替えた再開 = prompt が同じでも 1 本も cache から返らず全部走り直した。 元の並びに戻した再開は全部返った (token 0)。 見積もりの道具は、 前の run の最初の波 (最初の結果より前に始まった呼び出し = 項目の順) と空回しの順を比べて並べ替えを見つける (最初の波より後ろの並べ替えは見えない)。
+
+<a id="workflow-script-patterns"></a>**書き方の型**: 入力ごとに 1 本、 観点は schema の field で返させる。
+
+```js
+// workflow-size: 18 — 8 入力を 1 本ずつ読み、 入力ごとに 1 本で全項目を 2 観点で判定、 拾い出し 1 + 批評 1
+const VERDICTS = { type: 'object', required: ['items'], properties: { items: { type: 'array', items: {
+  type: 'object', required: ['title', 'doable_ok', 'rules_ok', 'evidence'],
+  properties: { title: { type: 'string' }, doable_ok: { type: 'boolean' }, rules_ok: { type: 'boolean' },
+                evidence: { type: 'array', items: { type: 'string' } } } } } } }
+const verified = await pipeline(INPUTS,
+  inp => agent(readPrompt(inp), { label: `read:${inp}`, phase: 'Read', schema: TASKS }),
+  (r, inp) => (r && r.tasks.length)
+    ? agent(verifyAllPrompt(inp, r.tasks), { label: `verify:${inp}`, phase: 'Verify', schema: VERDICTS })
+    : null)
+```
+
+前段の出力で件数が決まる段には上限を置き、 削った分を言う (黙って削ると「全部見た」 と読まれる):
+
+```js
+const MAX = 8
+const suspects = verified.filter(Boolean).flatMap(v => v.items.filter(x => !x.doable_ok || x.evidence.length < 2))
+const picked = suspects.slice(0, MAX)
+if (suspects.length > MAX) log(`疑わしい ${suspects.length} 件のうち ${MAX} 件だけを独立に確かめた。 残り: ${suspects.slice(MAX).map(s => s.title).join(', ')}`)
+```
+
+script を直した後は、 前の run の結果を file で渡す新しい run にする (再開しない):
+
+```js
+// args = { previous: '<workflow-run-stats.py --export-results で書いた file>' }
+const v = await agent(`${args.previous} を Read で全部読み、 label が read: の結果を前提に …`, { label: 'verify:…' })
+```
+
+<a id="workflow-fan-out-machine"></a>**機械**:
+
+- **起動の前**: [`scripts/workflow-estimate.py`](../scripts/workflow-estimate.py) (空回し。 本数 = 前段の件数 k の式・波数・観点と票の分割・宣言の有無・再開の見込み)。 当たり方 (実測): 手元の 4 本の script で、 起動した本数と見積もりが一致した (前段の件数で本数が決まる 1 本は、 実際の平均件数を k に入れると一致)。 静的に分からないのは前段の件数だけ = k の式で出す。 `filter` で絞る形は boolean を true として数えるので多めに出る。 PreToolUse(Workflow) の hook = [`hooks/workflow-fanout-check.sh`](../hooks/workflow-fanout-check.sh) (engine = `--hook`、 `hooks/settings-entries.json` で `^Workflow$` に配線) が、 起動のたびに数を出す。 enforce の印 (`~/.claude/workflow-fanout-enforce.on` か env `WORKFLOW_FANOUT_ENFORCE=1`) がある機械では、 一度に走れる本数を越える形と本数が前段の出力で決まる形は、 宣言があっても起動の前に本人に聞き (本数・波数・待ちを確認の画面に出す)、 宣言の無い観点や票の分割と cache が 0 本の再開は起動の前に止めて、 数と直し方を見せる。 無人の run (`claude -p`) では聞く相手がいない = 上限を越える Workflow を無人の run から起こさない。 印の無い機械では数が出るのは起動の直後 (PreToolUse の context は tool の結果と一緒に届く = [`hook-authoring.md#build-dependent-docs-drift`](hook-authoring.md#build-dependent-docs-drift) の表、 実測) = 走り出した後に気づく形なので、 止めたい機械は印を置く。 試験 = `hooks/workflow-fanout-check.test.sh`。
+- **起動の後**: [`scripts/workflow-run-stats.py`](../scripts/workflow-run-stats.py) (本数・結果の無い本数・同じ key の走り直し・同時に走った最大数・phase ごとの token と所要・起動時の文脈と読み直しの割合・3 本以上が読んだ file と打った command・`--export-results`)。 run の dir = `<config>/projects/<cwd>/<session>/subagents/workflows/<runId>/`。
+- **機械で止められないもの**: 観点を 1 本にまとめたときに prompt が長くなりすぎないか、 独立が本当に要るかの判断。 宣言の理由を読むのは人と review。
+
+## <a id="ruling-while-another-holds-writer-turn"></a>16. 原稿の書き手の番が別の session にある間に著者の裁定が出たら
+
+原稿を書く session を一度に 1 つに絞っていると、 番を持たない session に著者の答えが届く。 発言はその場で guard に記録し、 当てる文を作業ノートに全文で残して push し、 原稿には番が戻ってから当てる。 記録を適用まで待たない理由 = guard が引ける本人の発言は記録の時点で最新の 1 つだけ ([`agent-rule-ownership.md#approval`](agent-rule-ownership.md#approval)) で、 待つ間に本人が別のことを言うと引けなくなる。 待つ間に番の持ち主が同じ file を変えるので、 当てるときは file を読み直し、 当てた後にノートの文が file に逐語で入ったかを script で確かめる (編集の tool の成功は、 承認した文と同じことの確認にならない)。
+
+<a id="writer-turn-table"></a>**書き手が 2 つ以上あるときは、 番の表を最初に file に書く** — 順番を message で継ぎ足すと、 依頼元自身の伝え方が食い違う (実測)。 表 (何を・誰が・どの順で) を repo の plan に書いて SESSION から指し、 番を動かすときは表を直してから掲示板と message で出す。 「いま止まっているのは誰で、 誰の番か」 に表から答えられる形にする。 受け取りの文で次の作業に触れるときは、 「合図を待つ」 か「いま始める」 かを言い切る (実測: 受け取りの記録の未来形の 1 文を合図待ちと読んで、 worker が止まった)。
+
+## <a id="parallel-drafting"></a>17. 何人かの worker を並べて書かせる前に、 何の誤りを減らすために並べるかを書く
+
+同じ仕事 (方針・文の起草・判定) を何人かの worker に互いの成果を見せずに書かせ、 比べて 1 本を選ぶ・組み合わせると、 並べた数だけ確かになったように見える。 確かになるのは、 何本かの誤りが互いに独立で、 比べると誤りが浮くときだけ。 本節は [§15 の #workflow-split-by-shared-input](#workflow-split-by-shared-input) の「独立の票」 (誤りが相関しないことに価値がある反証の票) の考えを、 掲示板の worker や子の session を並べる起草に広げる。 同じ設計の仕事を並べて互いに合わない解が出る問題は [§6](#pilot-single-brain) で、 向きが逆 (あちらは解が散る、 こちらは誤りが揃う)。
+
+本節の語: **答える先** = 返答書が答える相手 (referee・編集者)。 **共著者** = 草稿を最初に読み、 送る前に誤りを突く人。
+
+<a id="parallel-drafting-why"></a>**なぜ (実測)**: 2 つの vendor の worker を混ぜて並べ、 方針の段と起草の段を続けて担わせた返答書で、 共著者が誤りとした点は、 どれも並べた全部の版に共通にあったか、 worker を畳んだ後に入った。 版どうしの比べで拾えた直しは、 どれも一部の版にだけある違いだった。 壊れ方は 5 つ:
+
+1. **独立だったのは書き手だけ** — 互いの file を読ませなくても、 渡した材料・方針・自己点検の基準が同じなら、 違うのは言い回し・長さ・組み方だけで、 中身の誤りは全部の版に共通に入る。 材料の置き方が割り付け (どのメモがどの問いへの答えか) を示していると、 同じ割り付けが人数分出る。 中身を方針で固めた後の起草 (方針と食い違う文を書かせない・方針に無いことを足させない、 と縛った起草) では、 なおさら言い回ししか違わない。 自己点検も同じ形で、 見たのは方針の各項に答えが 1 つずつあるか・共著者の文が字面で同じか・引用が原文の部分文字列か・語数で、 答えが答える先の問いに噛み合うかは、 方針の表にも起草の点検にも検収の項目にも無かった。 vendor を混ぜても、 誤りが入力から来ると散らない。
+2. **比べは違う所しか拾わない** — 版どうしの比べで目に映るのは、 一部の版にだけある中身。 全部に共通の中身は、 方針と合う、 の 1 行で通る。 方針に合うことは、 方針が答える先の問いに答えていることを示さない。 選ぶ基準を簡潔さにすると、 共通の誤りを持ったまま一番短い版が残る。
+3. **少数意見が集約で落ちた** — 1 本だけが書いた警告や「決めてもらうこと」 は、 比べの表では違いの 1 行にしかならず、 採否の記録なしに落ちた (実測: 共著者が自分で書くと言った部分を誰が書くかの問いを子が挙げたが、 本人への問いに入らなかった。 起草者の 1 人が書いた並べ替えの危険を、 集約者は一度は採り、 後で前の判断も警告も引かずに逆にした)。
+4. **最後の変更のとき、 書いた者でない目がいなかった** — 並べた子を締めて畳んだ後に、 集約者が自分で直しを当てて送ると、 並べた意味が最後の 1 手で消える。 これは送る前の照合票の 3 で塞がる ([`rebuttal-letter.md#pre-send-verification-sheet`](rebuttal-letter.md#pre-send-verification-sheet)) ので、 本節では扱わない。
+5. **照合の役が、 役の形を変えたときに消えた** — 1 人が書き、 もう 1 人は書かずに照合する案が、 照合に回す予定の人にも書かせる、 という本人の答えで起草の人数の話に置き換わり、 照合の役が無くなることも、 同じ時に推していた、 文を書く前に方針を共著者に見せる段に答えが無いことも、 依頼元は言わなかった。 本人の答えは人数の話で、 照合の役もその段も退けたわけではない。
+
+加えて**時間**: N 本を読むには N 倍の時間が要る。 集約者と本人の時間が増えないなら、 並べるほど 1 本あたりの読みが薄くなる (実測)。
+
+<a id="parallel-drafting-rule"></a>**規則**:
+
+1. **並べる前に、 何の誤りを減らすために並べるかを依頼書に書く** — 書けないなら並べない。 言い回しの選択肢がほしいだけなら、 そう書き、 中身を確かめた数には数えない (中身が決まった後の文面の直しを並べて頼む手順 = [§14 の 6](#manuscript-copy-not-new-tex))。
+2. <a id="write-one-doubt-one"></a>**中身 (方針) が決まった後の文の起草は、 1 人が書き、 もう 1 人 (書き手と別の vendor) は書かずに疑う、 を既定にする** — 書く人を増やしても誤りは散らないので、 増やすなら疑う目に回す。
+   - 疑う役に渡すもの = 答える先の原文 (referee の報告など)、 共著者の原文 (チャットの発言を含む)、 確定した方針の各項。
+   - 順序 = 疑う役の方針への判定は、 英文を書く前に出させる。 書き手は、 判定で直した方針から書く。 書き手の草稿は、 判定の後に疑う役に渡す (先に渡すと、 草稿の読みで方針を読む)。
+   - 問いは 3 つで、 方針の項目ごとに 1 行で返させる: 方針の各項は答える先の文 (問い・指摘) への答えになっているか / 共著者の文をどう扱うか (間に文を入れる・置き換える・共著者が自分でやると言った部分) / 共著者と答える先はどこを突くか。
+   - これは書き終えた草稿への照らし ([`rebuttal-letter.md#answer-fit-check`](rebuttal-letter.md#answer-fit-check) の批判役) と同じ問いを、 文を書く前の方針に当てる段。 草稿の後の照らしは今のまま別に立てる: 疑う役は方針を読んでいるので、 方針を知らない批判役の代わりにならない。
+   - 別の vendor にするのは、 同じ model の盲点を減らすため。 入力から来る誤りは vendor では減らないので、 独立は渡す物と問いでつくる。 別の vendor を使えない環境では、 別の session に同じ物と問いを渡す。 未公開の文を別 vendor の CLI に渡す command は、 auto mode が止めることがある = 止められたら迂回せず本人に聞く ([`peer-review-workflow.md#ai-on-confidential-manuscript`](peer-review-workflow.md#ai-on-confidential-manuscript) の 5)。
+3. **独立に書かせて並べるのは、 中身が決まっていない段 (方針の段) で、 各自に違う問い・違う材料を持たせるときにする** — 例 (架空): 1 人は答える先の文から、 1 人は共著者のメモから、 1 人は原稿から答えを組む。 依頼書を人数分書く手間がかかるので、 全体の方針のような大きい仕事に使う。 同じ材料で並べるなら、 1 のとおり何の違いを見るために並べるかを書く。
+4. <a id="parallel-collation-table"></a>**集約の表に 3 つを置く** (方針の段・起草の段とも): (a) 何本にも共通の中身 (「共通 = 比べでは確かめていない」 の印を付ける) (b) 違い (c) 子が挙げた「決めてもらうこと」「決まっていない点」 の全件と、 採否とその理由。 本人への問いを絞るときも、 (c) から落とした項目には理由を 1 行書く。 採った警告を後で逆にするなら、 前の判断と警告を引いて書く。 選ぶ基準は、 答える先の問いへの答えになっているか (2 の問い) を先にし、 簡潔さは後。
+5. **本人が人数・役の形を変えたら、 消える役と段を 1 行で言い、 残すなら誰が持つかを推してから従う** — 本人の指示が人数の話でも、 それで消える役 (照合・疑う役) と、 答えの無いまま残る段 (文を書く前に方針を共著者に見せる、 など) は、 依頼元が言わないと誰も言わない。 言うのは消えるものだけで、 本人の指示には従う。
+6. **共著者が自分でやると言った部分は、 作る前に共著者に聞く** — 並べた子がこの問いを挙げたら 4 の (c) に残す。 返答書での形 = [`rebuttal-letter.md#coauthor-will-rebuild`](rebuttal-letter.md#coauthor-will-rebuild)、 既存部分を直す了解の一般則 = [`shared-repo.md#primary-author-consent`](shared-repo.md#primary-author-consent)。
+
+**費用**: 起草の段の窓が減る (並べた人数 → 2)。 集約者が読む草稿は 1 本、 疑う役の表は 1 枚。 疑う役の 1 段の分だけ遅くなる。 集約の表は 1 回ごとに数分の手間。 共著者に聞く間、 その部分の案は止まる。
+
+**捨てた案**: 並べる人数を増やす・vendor を混ぜる (入力から来る誤りは、 人数でも vendor でも散らない) / 並べるのをやめて 1 人で全部 (疑う役まで消える) / 起草者の自己点検の項目を足す (共通の入力から来る誤りは、 同じ点検を何人に足しても共通のまま) / 会議の最中は起草させない (時間は原因の一部だが、 会議の後でも同じ設計なら同じ誤りが入る。 共著者がその場にいる間は、 共著者にしか答えられない問いを先に聞くほうが効く)。
+
+**選べる案 (推さない)**: 並べた子を送るまで締めさせない (文脈を持つ子に最後の変更を見せられるが、 窓が開いたままになる。 書いた者でない目は照合票の 3 で別に立てられる) / 何人かの起草を残し、 集約の表だけを入れる (言い回しの選択肢は残るが、 共通の誤りは残る = なぜの 1・2 が手つかず)。
+
+**検算・実装を並べるときも問いは同じ** = 誤りがどの軸で出るか (実装・入力・規約) を先に言い、 その軸で違えられる並べ方にする (別 vendor の独立の実装 = [`physics-verification-cycle.md#cross-vendor-red-team`](../../ai-collaboration/conventions/physics-verification-cycle.md#cross-vendor-red-team))。
+
+## 関連
+
+- cross-session operational board の generic pattern: §13
+- リモート操縦 session への hand-off (物理不在で完了できない step の分岐設計): §11 (RC 機構自体は [`remote-control-server.md`](remote-control-server.md))
+- worker task の切り方 (sizing 述語 + orientation 前払い) = spec author 宛の規律: §9 (output 側の死機構は [`output-cap-death-loop.md`](output-cap-death-loop.md))
+- delegate を main と別 model で走らせる選択 (alias 不能 / custom agent / headless CLI): §10 (bug 回避のみを目的にした model 切替は [`tool-call-robustness.md`](tool-call-robustness.md))
+- worktree (隔離) か ローカルか = 並列変更の隔離 vs live 反映のトレードオフ: §8
+- 何人かを並べて書かせる前に何の誤りを減らすかを書く・1 人が書き別 vendor が疑う・集約の表: §17
+- collaborator (= 他 user) との Git race / branching: [`shared-repo.md`](shared-repo.md)
+- 4 軸 sweep + sweep goal alignment (= 「✓ pass」 closure を禁じる規律): [`CONVENTIONS.md` §3](../CONVENTIONS.md)
+- review / audit の goal は error 発見 規律: 同上 §3 「sweep / review / audit の goal alignment」
+- prev session の `[x]` を信頼するか自分で実装するかの境界判断: 個人層 (`<your>-prefs/`) の work-discipline に machine-local な reflex-trap として記録するのが筋 (= machine-dependent な作業 mode 切替)

@@ -1,0 +1,64 @@
+---
+name: claude-config-conventions
+description: Apply or maintain the shared claude-config operational conventions in Codex, including its Codex installer and workspace instructions. Use for Codex convention setup, synchronization, audits, or extensions; not for ordinary project work.
+---
+
+# claude-config conventions for Codex
+
+This skill maintains the Codex integration shipped by the `claude-config`
+repository. Keep the Claude and Codex layers separate: never alter
+`~/.claude/`, Claude Code settings, or the existing `setup.sh` merely to
+configure Codex.
+
+## Locate the source of truth
+
+This installed skill is a symlink to
+`claude-config/codex/skills/claude-config-conventions`. Resolve the containing
+repository from this file's path; the repository root is three directories
+above it. Read `CONVENTIONS.md` before changing the integration. For a
+task-specific convention, route through `conventions/README.md` and load only
+the relevant document. Then read
+`codex/PARITY.md#codex-integration-sot`: it is the single durable source for
+the Codex architecture, layer boundaries, platform scope, and Hook contract.
+Before editing an `AGENTS.md` entry point, also read
+`codex/PARITY.md#instruction-entrypoint-kernel`; retain trigger + imperative
+source pointers and leave rule bodies in their owning documents.
+
+## Installation and updates
+
+Use `scripts/setup-codex.sh` from the repository root. Select Git provenance
+targets explicitly with repeatable `--repo` or `--repo-root`; a clone has no
+effect on another user's home directory or repositories until that user runs
+the installer. Follow the installer contract in
+`codex/PARITY.md#codex-integration-sot` rather than copying its technical
+details into this skill.
+
+Validate with `scripts/setup-codex.test.sh`,
+`scripts/audit-codex-integration.sh`, and the repository's standard checks.
+Confirm that no file below `~/.claude/` changed. Commit and push only after
+normal repository review and the user's authorization. Immediately before
+reporting the integration change complete, apply
+`CONVENTIONS.md#completion-git-gate`; use the Codex forcing-function contract
+at `codex/PARITY.md#completion-git-gate-hook` rather than treating a clean
+local build as delivery.
+
+## Scope boundaries
+
+Use only the Codex hook schema and the selected, product-neutral policies in
+`codex/hooks/`; do not point Codex at Claude hook scripts or configuration.
+Keep Git-side protections authoritative for committed public content. Treat
+configuration, logic, and Hook trust as separate checks.
+
+Do not confuse a shared project (layer 2) with an owner-private personal
+layer (layer 3): the former is for collaborators, the latter is cross-machine
+only for one owner. The installer never creates, discovers, or populates
+either. An owner may explicitly select a short layer-3 `codex/AGENTS.md`
+overlay; only the generated local layer-4 composite consumes it.
+
+## Session handoff
+
+For session closure, knowledge placement, or resume preparation, follow
+`CONVENTIONS.md#auto-update-protocol` and
+`CONVENTIONS.md#session-no-durable-record` in the containing repository.
+Codex entry points and their regression checks are owned by
+`codex/PARITY.md#session-handoff-contract`; do not restate the procedure here.

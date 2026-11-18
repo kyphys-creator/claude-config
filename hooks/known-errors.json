@@ -1,0 +1,223 @@
+{
+  "_comment": "既知の壊れ方のエラー文 → その壊れ方を書いた規約の節。 hooks/known-error-nudge.py が Bash の出力・エラー文と archive_session の結果の文と突き合わせる。 規約に壊れ方を書いたら、 そのエラー文の変わらない部分を 1 件足す (match は部分一致、 \"regex\": true で正規表現)。 doc は本 repo からの path + #anchor (anchor の無い doc は path だけ)。 match の文字列は doc の本文にも書く = --check が doc・anchor の実在と、 match が doc にあることを確かめる。 hint は 1 文 (原因と最初の一手)",
+  "entries": [
+    {
+      "match": "Text line contains an invalid character",
+      "doc": "conventions/shell-env.md#zsh-echo-backslash",
+      "hint": "zsh の echo が `\\e` を ESC に変えた疑い。 TeX の行を echo で足していないかを見て、 `printf '%s\\n' '...'` か Write tool で書き直す"
+    },
+    {
+      "match": "Non-UTF-8 code starting with",
+      "doc": "conventions/batch-text-edits.md#system-python-long-multibyte-line",
+      "hint": "macOS 付属の python 3.9 の既知の不具合 (1023 byte を超える多バイト行)。 file は UTF-8 のままで、 1・2 行目に `# -*- coding: utf-8 -*-` を書けば通る"
+    },
+    {
+      "match": "Xcode license agreements",
+      "doc": "conventions/shell-env.md#system-python3-is-xcode-gated",
+      "hint": "/usr/bin/python3 は Xcode に従う shim で、 ライセンスに同意していないと python を起動する全部が exit 69 で落ちる"
+    },
+    {
+      "match": "died of signal 9",
+      "doc": "conventions/hook-authoring.md#killed-hook-stub",
+      "hint": "macOS に kill された git hook。 scripts/heal-hook-stubs.sh で同じ中身の新しい file に作り直す"
+    },
+    {
+      "match": "Bad CPU type in executable",
+      "doc": "conventions/macos-cpu-arch.md#migration-intel-to-apple-silicon",
+      "hint": "別の arch (Intel) 用の binary。 Apple Silicon 用に入れ直すか、 Rosetta を入れる"
+    },
+    {
+      "match": "forkpty: Device not configured",
+      "doc": "conventions/macos-claude-app-pty-leak.md",
+      "hint": "pty の上限を Claude.app が使い切っている"
+    },
+    {
+      "match": "Remote Control is not enabled for your account",
+      "doc": "conventions/remote-control-server.md#ts-version-mismatch",
+      "hint": "組織の設定でなく、 CLI が古い (v2.1.139 未満) ことが多い"
+    },
+    {
+      "match": "Remote Control requires claude.ai subscription auth",
+      "doc": "conventions/remote-control-server.md#ts-api-key-conflict",
+      "hint": "env に ANTHROPIC_API_KEY が混ざっている"
+    },
+    {
+      "match": "You must be logged in to use Remote Control",
+      "doc": "conventions/remote-control-server.md#requirements-and-selfheal",
+      "hint": "その config dir の claude.ai の login が無い・切れた (直るとサーバーは 60 秒以内に自分で戻る)"
+    },
+    {
+      "match": "Workspace not trusted",
+      "doc": "conventions/remote-control-server.md#ts-workspace-trust",
+      "hint": "新しい config dir の headless 起動で、 作業 dir の trust が未承認"
+    },
+    {
+      "match": "sed: can't read s#",
+      "doc": "conventions/hook-authoring.md#tmp-path-not-absence-marker",
+      "hint": "BSD 版の sed -i '' を GNU の sed で走らせた形 (空の引数を script、 script を file 名と取る)。 一時 file に書いて mv する"
+    },
+    {
+      "match": "read error while indexing",
+      "doc": "conventions/dropbox-placeholder-diagnosis.md#git-repo-online-only",
+      "hint": "Dropbox の中の git repo で、 作業ツリーや .git の中身がまだ手元に届いていない (online-only)。 dir ごとオフラインで使用可能にしてから git を打ち直す"
+    },
+    {
+      "match": "Paragraph ended before \\makesm@sh was complete",
+      "doc": "conventions/latex.md#smash-parbox-into-ruled-box",
+      "hint": "\\smash の引数に段落区切り (\\par・空行) がある。 改行は \\\\ に、 中央寄せは \\hspace*{\\fill} で挟む"
+    },
+    {
+      "match": "inspection unavailable (blob-unreadable",
+      "doc": "conventions/manuscript-claim-ownership.md#non-utf8-tex-blocks-repo",
+      "hint": "原因の 1 つ = HEAD に UTF-8 でない古い .tex がある。 範囲の設定 (disabled / exclude) で外す、 設定の変更には著者の発言の記録が要る"
+    },
+    {
+      "match": "ParseFatalException: Unknown symbol",
+      "doc": "conventions/matplotlib-figure-qa.md#mathtext-unsupported-commands",
+      "hint": "matplotlib の mathtext は LaTeX の部分集合 (例 = \\tfrac が無い)。 \\frac か 3/2 に書き換えるか、 rcParams['text.usetex'] = True"
+    },
+    {
+      "match": "Missing \\endcsname inserted",
+      "doc": "conventions/batch-text-edits.md#regex-into-label-keys",
+      "hint": "\\label / \\ref の鍵に制御綴 (一括置換で足した macro など) が入っていないかを grep で見る"
+    },
+    {
+      "match": "but no such ref was fetched",
+      "doc": "conventions/multi-session-coordination.md#pull-fetch-head-race",
+      "hint": "同じ clone で別の fetch (並列 session・session の開始の同期・手で打った fetch) が .git/FETCH_HEAD を書き換えたか、 remote に branch が無い。 走り直して通れば前者 = pull をやめて git fetch && git merge --ff-only @{u} (手元に未 push の commit があれば scripts/commit-from-origin-worktree.py。 未 commit の変更がある tree で stash・autostash はしない = #autostash-foreign-wip)"
+    },
+    {
+      "match": "Cannot fast-forward to multiple branches",
+      "doc": "conventions/multi-session-coordination.md#pull-fetch-head-race",
+      "hint": "同じ clone で別の fetch が .git/FETCH_HEAD を書き換えた疑い。 tree は変わっていない = そのまま git merge --ff-only @{u} で続ける"
+    },
+    {
+      "match": "cannot lock ref 'HEAD': is at",
+      "doc": "conventions/multi-session-coordination.md#temp-index-commit",
+      "hint": "git commit の最中 (hook が走る間) に並列の session が commit して HEAD が動いた。 commit は入っていない = 関門の拒否ではない。 親を取り直してやり直す (git-commit-own-hunk.py は中でやり直す)。 無人の書き手なら落ちた変更を控えて拾い直す = #unattended-writer-pending-retry"
+    },
+    {
+      "match": "Missing number, treated as zero.",
+      "doc": "conventions/latex.md#enumerate-vs-enumitem-option-syntax",
+      "hint": "原因の 1 つ = enumerate package の下で enumitem の書き方 [label=(\\roman*)] を書いた。 エラーの行が \\begin{enumerate}[...] ならそれ (直し方 = [(i)] の雛形)。 別の行なら長さ・数値の引数の書き損じを疑う"
+    },
+    {
+      "match": "ProjectPermissionDenied",
+      "doc": "conventions/google-classroom-api.md#grade-ui-created-coursework",
+      "hint": "Classroom の画面で作った課題の点・返却は API で書けない (scope があっても 403)。 点は画面で付けるか、 API で作った課題に限る"
+    },
+    {
+      "match": "configured for Git LFS but 'git-lfs' was not found on your path",
+      "doc": "conventions/shell-env.md#snapshot-fix-per-config-dir",
+      "hint": "git-lfs が入っていないか、 入っているのに Bash の PATH に無い (設定フォルダを分けた session の snapshot が直っていないと Homebrew の bin が落ちる)。 LFS の pre-push はこの diff に LFS の file が無くても push 全体を止める。 その場しのぎ = command の頭に PATH=<brew の bin>:$PATH"
+    },
+    {
+      "match": "require a different python version",
+      "doc": "conventions/python-env.md#python-env-pins-dont-install",
+      "hint": "固定した依存がこの Python の版を受け付けない。 版を外して入れ直さず、 repo の宣言の版 (.python-version) を入口の tools/py で揃える"
+    },
+    {
+      "match": "Could not find a version that satisfies the requirement",
+      "doc": "conventions/python-env.md#python-env-pins-dont-install",
+      "hint": "固定した版の wheel がこの Python の版か arch に無い。 版を外して入れ直さず、 repo の宣言の版を入口の tools/py で揃える"
+    },
+    {
+      "match": "ensurepip is not available",
+      "doc": "conventions/python-env.md#python-env-venv-create-fails",
+      "hint": "venv の部品 (ensurepip) が無い python で venv を作ろうとした (依存や版の問題ではない)。 Debian・Ubuntu なら python3.X-venv の package を入れるか、 uv を入れる (uv は ensurepip を使わずに venv を作る)"
+    },
+    {
+      "match": "This background session hasn't isolated its changes yet",
+      "doc": "conventions/multi-session-coordination.md#bg-worktree-isolation",
+      "hint": "CLI の背景 session の既定 (worktree.bgIsolation) が、 今の cwd の中の Edit/Write を EnterWorktree まで断った。 依頼が worktree を求めていないなら EnterWorktree を呼ばず、 起動に --settings '{\"worktree\": {\"bgIsolation\": \"none\"}}' を付けて起こし直す (起動行の環境変数は job に届かない)。 呼べば作業は main でなく branch に入る"
+    },
+    {
+      "match": "auto-fixed non-LaTeX characters and re-staged",
+      "doc": "conventions/latex.md#autofix-with-pathspec-commit",
+      "hint": "pre-commit が tex の文字を直して re-stage し、 commit は通った (普通の commit・-a・--include)。 `git commit -- <path>` (pathspec) では今の hook はこの文を出さずに止める。 pathspec commit の後に status が MM なら、 判定の前の古い hook の写し = git diff HEAD -- <path> が空なら git restore --staged <path>"
+    },
+    {
+      "match": "pathspec commit — stopped so that the main index does not keep the pre-fix version",
+      "doc": "conventions/latex.md#autofix-with-pathspec-commit",
+      "hint": "pathspec commit (git commit -- <path>) で、 hook が tex の文字を作業木だけ直して止めた (直して re-stage すると main の index に直す前の版が残るため)。 同じ commit をそのまま打ち直す (直す文字はもう無いので通る)"
+    },
+    {
+      "match": "unsupported operand type(s) for |: 'type' and 'NoneType'",
+      "doc": "conventions/python-env.md#new-syntax-on-old-python",
+      "hint": "3.10 からの型注釈 (X | None) を 3.9 の python で読んだ (script の誤りでなく版の問題)。 3.10 以上の python で回し、 依存が要るなら新しい python で作業用の venv を作る"
+    },
+    {
+      "match": "encountered in matmul",
+      "doc": "conventions/scientific-computing.md#cas-library-traps",
+      "hint": "macOS の Accelerate に繋いだ numpy が複素行列の積で出す偽の警告のことがある。 消す前に答えの分かっている量を 1 つ再現して確かめ、 確かめたら積を np.einsum で書き直す (警告を握り潰さない)"
+    },
+    {
+      "match": "object has no attribute '__dict__'",
+      "doc": "conventions/data-pipeline-automation.md#importlib-dataclass",
+      "hint": "importlib (module_from_spec → exec_module) で読んだ script の @dataclass が、 sys.modules に登録されていないために落ちていることがある (Python 3.9)。 借りる側で exec の前に sys.modules に入れるか、 借りられる側の class を素の class にする"
+    },
+    {
+      "match": "Invalid access token, does not contain scopes",
+      "doc": "conventions/zoom-meetings.md#s2s-oauth-route",
+      "hint": "Zoom の Server-to-Server OAuth app に、 その操作の scope が無い (code 4711)。 エラーが要る scope 名をそのまま出すので、 app の Scopes に足し、 一覧にその名前が並んだのを確かめてから token を取り直す (token に付いた scope の一覧で確かめられる)"
+    },
+    {
+      "match": "User does not exist: me",
+      "doc": "conventions/zoom-meetings.md#presence-from-process",
+      "hint": "Zoom の report の API は userId に me を受け付けない (code 1001)。 GET /users/me の id を userId に使う"
+    },
+    {
+      "match": "a worktree-isolated session's git operations must target its own worktree",
+      "doc": "conventions/claude-code-permissions.md#worktree-session-refuses-complex-command",
+      "hint": "worktree に入った session では本体が行き先を読めない command を拒否する。 path を書き下し、 処理は file に書いて回し、 git は 1 回に 1 つずつ打つ"
+    },
+    {"match": "MBLOCKRIGHTBRACE", "doc": "conventions/latex.md#latexdiff-eqtree", "hint": "latexdiff の fine が波括弧の途中まで一致させた跡。 1 式なら #latexdiff-fine-markup の表で直し、 繰り返すなら式を latexdiff に渡さない"},
+    {"match": "Command \\mc already defined", "doc": "conventions/latex.md#macro-block-name-clashes", "hint": "jsclasses 系 (ltjsarticle など) は \\mc を明朝の切り替えとして定義済み。 和文の文書では macro の一揃いから \\mc の定義を外す (上書きしない)"},
+    {"match": "I do not know the key '/tcb/", "doc": "conventions/latex.md#macro-block-name-clashes", "hint": "tcolorbox の title などに , を含む引数が入り、 key の並びが切られた疑い。 引数の入る値を波括弧で包む: title={…#1}"},
+    {
+      "match": "no writeable cache path",
+      "doc": "conventions/latex.md#latex-pdf-audit",
+      "hint": "LuaLaTeX のキャッシュを確認する。source と依存ファイルを新しい作業 directory に写し、その中で相対キャッシュを指定して再ビルドする。診断は scripts/latex-sandbox-cache-probe.py。"
+    },
+    {
+      "match": "still has live work",
+      "doc": "conventions/multi-session-coordination.md#tidy-after-child-turn-ends",
+      "hint": "archive が相手の背景の作業 (見張り・Monitor・計算) か配達待ちの message で断られた疑い。 同じ turn に打ち直さず、 `child-wrap-check.py <相手>` が名指したものに合わせて動く (その節の (7))"
+    },
+    {
+      "match": "write error: Broken pipe",
+      "doc": "conventions/shell-env.md#pipefail-grep-q-sigpipe",
+      "hint": "pipefail の下で grep -q が早く読み終え、 書き手 (printf / echo) が閉じた pipe に書いて一致を黙って落とした疑いなので、 here-string (grep -q … <<< \"$x\") か -q を外して >/dev/null に直す (check-pipefail-grep-q.py --paths <file> で形を探す)"
+    },
+    {
+      "match": "SyntaxWarning: invalid escape sequence",
+      "doc": "conventions/debugging-discipline.md#runner-image-vs-commit",
+      "hint": "python 3.12 以上が無効な escape に出す警告で、 古い python は黙るので、 その文字列を raw にするか、 他の escape を持つならその文字だけを `\\\\` にする"
+    },
+    {
+      "match": "in _translate_newlines",
+      "doc": "conventions/hook-authoring.md#blob-read-git-crypt",
+      "hint": "subprocess の text=True が出力を UTF-8 として厳しく読んで落ちた。 git の blame・show の出力なら暗号化された file の暗号文なので、 bytes で受け、 版は scripts/lib/git_blob.py の read_blob で読む"
+    },
+    {
+      "match": "unable to open database file",
+      "doc": "conventions/debugging-discipline.md#reading-live-app-sqlite",
+      "hint": "他の app が開いている WAL の SQLite を読み取り専用 (?mode=ro) で開いた疑い (書き手が全部閉じると -wal・-shm が消え、 読み取り専用では開けない)。 path と権限を確かめ、 WAL の DB なら ?mode=rw に PRAGMA query_only = ON をかけて開き直す"
+    },
+    {
+      "match": "unknown field(s)",
+      "doc": "conventions/multi-machine-state.md#config-field-needs-reader-first",
+      "hint": "設定 file (掲示板の board.json など) に、 この機械の engine が知らない欄が足された疑い (設定の repo が engine の repo より先に届いた)。 engine の repo (掲示板なら ai-collaboration) を git pull してから打ち直す"
+    },
+    {
+      "match": "grep: invalid option -- P",
+      "doc": "conventions/shell-env.md#bsd-grep-no-pcre",
+      "hint": "macOS の BSD grep は -P (PCRE) を持たない。 同じ command の `| wc -l` などが出した 0 は一致 0 件ではない = 数え直す。 先読み・後読みが要るなら python の re で数える"
+    },
+    {
+      "match": "dependency_file_not_evaluatable",
+      "doc": "conventions/github-security-automation.md#dependency-graph-text-named-manifest",
+      "hint": "Dependabot か依存グラフが依存の file を読めなかった。 run 名が Graph Update で、 落ちた file が依存の file でない text (名前に requirements を含む web 頁の写しなど) なら、 名前から manifest の語を外す"
+    }
+  ]
+}

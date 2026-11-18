@@ -1,0 +1,596 @@
+#!/usr/bin/env bash
+# setup-codex.sh — claude-config の共有規約を Codex に安全に導入する
+#
+# Claude Code の setup.sh とは独立している。`~/.claude/`、Claude の hooks、
+# settings、LaunchAgent には一切触れない。
+#
+# Usage:
+#   scripts/setup-codex.sh [--replace] [--set-default-effort <level>] [--configure-safe-local]
+#                          [--personal-layer <path>] [--repo <path>]... [--repo-root <path>]...
+#
+# Installs layer-4 Codex entry points that link to public layer-1 instructions,
+# three skills, and the Codex-native hook bundle. Explicit --repo/--repo-root
+# targets also receive the agent/session/model/effort Git provenance hook. When
+# an owner explicitly opts in with --personal-layer, it instead renders an
+# L4-only global instruction composite from the public source and that layer's
+# short Codex overlay.
+# Existing user-managed targets are refused unless --replace is supplied.
+# The default refusal mode preflights every target before making any change;
+# replacement preserves a timestamped backup.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+USER_HOME="${HOME:?HOME must be set}"
+CODEX_USER_DIR="${CODEX_USER_DIR:-$USER_HOME/.codex}"
+CODEX_WORKSPACE_ROOT="${CODEX_WORKSPACE_ROOT:-$USER_HOME/Documents/Codex}"
+REPLACE=0
+EFFORT=""
+CONFIGURE_SAFE_LOCAL=0
+PERSONAL_LAYER=""
+PERSONAL_AGENTS=""
+PERSONAL_AGENTS_MAX_BYTES=4096
+REFRESH_PERSONAL_LAYER=0
+REQUESTED_REPOS=()
+REPO_ROOTS=()
+GIT_REPOS=()
+REQUESTED_REPO_COUNT=0
+REPO_ROOT_COUNT=0
+GIT_REPO_COUNT=0
+
+usage() {
+  cat <<'EOF'
+Usage: setup-codex.sh [--replace] [--set-default-effort <level>] [--configure-safe-local]
+                      [--personal-layer <path>] [--repo <path>]... [--repo-root <path>]...
+
+Install local Codex entry points that consume claude-config's public
+instructions, skills, and hook bundle through symlinks. An explicitly selected
+personal layer is consumed only through an L4-generated global-instruction
+composite; its contents never enter this repository.
+
+  --replace                     Back up and replace an existing non-managed target.
+  --set-default-effort <level>  Set model_reasoning_effort in Codex config.toml.
+                                Allowed: minimal, low, medium, high, xhigh.
+  --configure-safe-local        Let Codex autonomously perform safe local work in
+                                the workspace, while preserving approvals for
+                                external or out-of-scope actions.
+  --personal-layer <path>       Explicitly bind one marked layer-3 directory.
+                                Requires <path>/codex/AGENTS.md, a concise
+                                Codex-specific private overlay (maximum 4 KiB).
+                                A local
+                                post-merge refresh is installed when safe.
+  --repo <path>                 Install the Agent-Session Git trailer hook in
+                                exactly this repository. Repeatable.
+  --repo-root <path>            Install that hook in this directory when it is
+                                a repository and in its immediate child repos.
+                                Repeatable; no recursive discovery.
+  --refresh-personal-layer [path]
+                                Refresh an existing managed personal composite.
+                                Internal post-merge entry point; it never
+                                creates a new binding.
+  -h, --help                    Show this help.
+
+Environment overrides for testing or nonstandard installs:
+  CODEX_USER_DIR, CODEX_WORKSPACE_ROOT
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --replace) REPLACE=1 ;;
+    --set-default-effort)
+      shift
+      [ "$#" -gt 0 ] || { echo "--set-default-effort requires a value" >&2; exit 2; }
+      EFFORT="$1"
+      ;;
+    --configure-safe-local) CONFIGURE_SAFE_LOCAL=1 ;;
+    --personal-layer)
+      shift
+      [ "$#" -gt 0 ] || { echo "--personal-layer requires a directory" >&2; exit 2; }
+      PERSONAL_LAYER="$1"
+      ;;
+    --repo)
+      shift
+      [ "$#" -gt 0 ] || { echo "--repo requires a path" >&2; exit 2; }
+      REQUESTED_REPOS+=("$1")
+      REQUESTED_REPO_COUNT=$((REQUESTED_REPO_COUNT + 1))
+      ;;
+    --repo-root)
+      shift
+      [ "$#" -gt 0 ] || { echo "--repo-root requires a path" >&2; exit 2; }
+      REPO_ROOTS+=("$1")
+      REPO_ROOT_COUNT=$((REPO_ROOT_COUNT + 1))
+      ;;
+    --refresh-personal-layer)
+      REFRESH_PERSONAL_LAYER=1
+      if [ "$#" -gt 1 ] && [ "${2#--}" = "$2" ]; then
+        shift
+        PERSONAL_LAYER="$1"
+      fi
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# Codex config reference の実在値のみ (2026-09 時点 verify 済)。 無効値を config.toml に
+# 書くと Codex 側の起動 error になるため、 whitelist は製品の受理集合に一致させる。
+case "$EFFORT" in
+  ""|minimal|low|medium|high|xhigh) ;;
+  *) echo "invalid effort: $EFFORT (allowed: minimal, low, medium, high, xhigh)" >&2; exit 2 ;;
+esac
+
+if [ "$REFRESH_PERSONAL_LAYER" -eq 1 ] && { [ -n "$EFFORT" ] || [ "$CONFIGURE_SAFE_LOCAL" -eq 1 ]; }; then
+  echo "--refresh-personal-layer cannot change Codex configuration" >&2
+  exit 2
+fi
+
+if [ "$REFRESH_PERSONAL_LAYER" -eq 1 ] && [ "$REPLACE" -eq 1 ]; then
+  echo "--refresh-personal-layer cannot replace an existing binding" >&2
+  exit 2
+fi
+
+if [ "$REFRESH_PERSONAL_LAYER" -eq 1 ] \
+  && { [ "$REQUESTED_REPO_COUNT" -gt 0 ] || [ "$REPO_ROOT_COUNT" -gt 0 ]; }; then
+  echo "--refresh-personal-layer cannot install repository hooks" >&2
+  exit 2
+fi
+
+canonical_directory() {
+  (cd "$1" && pwd -P)
+}
+
+add_git_repo() {
+  local requested="$1"
+  local repo existing
+  if ! repo="$(git -C "$requested" rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "not a git repo: $requested" >&2
+    return 1
+  fi
+  repo="$(canonical_directory "$repo")"
+  for existing in "${GIT_REPOS[@]+"${GIT_REPOS[@]}"}"; do
+    [ "$existing" != "$repo" ] || return 0
+  done
+  GIT_REPOS+=("$repo")
+  GIT_REPO_COUNT=$((GIT_REPO_COUNT + 1))
+}
+
+resolve_git_repos() {
+  local requested root candidate candidate_physical candidate_repo
+  for requested in "${REQUESTED_REPOS[@]+"${REQUESTED_REPOS[@]}"}"; do
+    add_git_repo "$requested"
+  done
+  for requested in "${REPO_ROOTS[@]+"${REPO_ROOTS[@]}"}"; do
+    if ! root="$(canonical_directory "$requested" 2>/dev/null)"; then
+      echo "repo root is not a directory: $requested" >&2
+      return 1
+    fi
+    if [ -e "$root/.git" ] || [ -L "$root/.git" ]; then
+      add_git_repo "$root"
+    fi
+    for candidate in "$root"/*/; do
+      [ -e "$candidate/.git" ] || [ -L "$candidate/.git" ] || continue
+      candidate_physical="$(canonical_directory "$candidate")"
+      case "$candidate_physical/" in
+        "$root"/*/)
+          candidate_repo="$(git -C "$candidate_physical" rev-parse --show-toplevel 2>/dev/null || true)"
+          [ -n "$candidate_repo" ] || continue
+          candidate_repo="$(canonical_directory "$candidate_repo")"
+          case "$candidate_repo/" in
+            "$root"/*/) add_git_repo "$candidate_repo" ;;
+            *) echo "NOTE: skipping Git root outside --repo-root: $candidate" ;;
+          esac
+          ;;
+        *) echo "NOTE: skipping repo symlink outside --repo-root: $candidate" ;;
+      esac
+    done
+  done
+}
+
+session_hook_path() {
+  local repo="$1"
+  local hooks_dir
+  hooks_dir="$(git -C "$repo" config --get core.hooksPath 2>/dev/null || true)"
+  if [ -z "$hooks_dir" ]; then
+    hooks_dir="$(git -C "$repo" rev-parse --git-path hooks 2>/dev/null)"
+  fi
+  if [ "${hooks_dir#/}" = "$hooks_dir" ]; then
+    hooks_dir="$repo/$hooks_dir"
+  fi
+  printf '%s/prepare-commit-msg\n' "$hooks_dir"
+}
+
+preflight_session_hook() {
+  local repo="$1"
+  local hook
+  hook="$(session_hook_path "$repo")"
+  if { [ -e "$hook" ] || [ -L "$hook" ]; } \
+    && ! grep -qF 'prepare-commit-msg-session.sh' "$hook" 2>/dev/null \
+    && [ "$REPLACE" -ne 1 ]; then
+    echo "refusing to replace existing prepare-commit-msg hook: $hook (rerun with --replace)" >&2
+    return 1
+  fi
+}
+
+personal_skills() {
+  [ -n "$PERSONAL_LAYER" ] || return 0
+  python3 "$SCRIPT_DIR/codex_personal_skills.py" \
+    --personal-layer "$PERSONAL_LAYER" --user-dir "$CODEX_USER_DIR" "$@"
+}
+
+configure_personal_layer() {
+  local personal_agents_bytes
+  [ -n "$PERSONAL_LAYER" ] || return 0
+  if [ ! -d "$PERSONAL_LAYER" ]; then
+    echo "personal layer is not a directory: $PERSONAL_LAYER" >&2
+    exit 2
+  fi
+  PERSONAL_LAYER="$(canonical_directory "$PERSONAL_LAYER")"
+  if [ ! -f "$PERSONAL_LAYER/.claude-personal-layer" ]; then
+    echo "personal layer marker is missing: $PERSONAL_LAYER/.claude-personal-layer" >&2
+    exit 2
+  fi
+  PERSONAL_AGENTS="$PERSONAL_LAYER/codex/AGENTS.md"
+  if [ ! -s "$PERSONAL_AGENTS" ]; then
+    echo "personal Codex overlay is missing or empty: $PERSONAL_AGENTS" >&2
+    exit 2
+  fi
+  personal_agents_bytes="$(LC_ALL=C wc -c < "$PERSONAL_AGENTS")"
+  if [ "$personal_agents_bytes" -gt "$PERSONAL_AGENTS_MAX_BYTES" ]; then
+    echo "personal Codex overlay exceeds ${PERSONAL_AGENTS_MAX_BYTES} bytes: $PERSONAL_AGENTS" >&2
+    echo "keep trigger + imperative source pointers here; move rule bodies to their source of truth" >&2
+    exit 2
+  fi
+}
+
+public_global_agents() {
+  printf '%s\n' "$CONFIG_ROOT/codex/HOME-AGENTS.md"
+}
+
+managed_personal_header() {
+  local public_source
+  public_source="$(public_global_agents)"
+  printf '%s\n' '<!-- claude-config-codex: global-personal-composite -->'
+  printf '<!-- public-source: %s -->\n' "$public_source"
+  printf '<!-- personal-source: %s -->\n' "$PERSONAL_LAYER"
+  printf '%s\n' '<!-- Generated local state. Re-run setup-codex.sh; do not edit. -->'
+}
+
+is_managed_public_global_agents() {
+  local target="$CODEX_USER_DIR/AGENTS.md"
+  [ -L "$target" ] && [ "$(readlink "$target")" = "$(public_global_agents)" ]
+}
+
+is_managed_personal_global_agents() {
+  local target="$CODEX_USER_DIR/AGENTS.md"
+  local public_source
+  public_source="$(public_global_agents)"
+  [ -f "$target" ] && [ ! -L "$target" ] \
+    && grep -qxF '<!-- claude-config-codex: global-personal-composite -->' "$target" \
+    && grep -qxF "<!-- public-source: $public_source -->" "$target" \
+    && grep -qxF "<!-- personal-source: $PERSONAL_LAYER -->" "$target"
+}
+
+personal_layer_from_managed_global_agents() {
+  local target="$CODEX_USER_DIR/AGENTS.md"
+  [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  sed -n 's/^<!-- personal-source: \(.*\) -->$/\1/p' "$target" | sed -n '1p'
+}
+
+render_personal_global_agents() {
+  local target="$CODEX_USER_DIR/AGENTS.md"
+  local temporary
+  mkdir -p "$CODEX_USER_DIR"
+  temporary="$(umask 077; mktemp "${target}.tmp.XXXXXX")"
+  {
+    managed_personal_header
+    printf '\n'
+    cat "$(public_global_agents)"
+    printf '\n\n<!-- owner-private Codex overlay follows; source remains layer 3 -->\n\n'
+    cat "$PERSONAL_AGENTS"
+  } > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$target"
+}
+
+preflight_global_agents() {
+  local target="$CODEX_USER_DIR/AGENTS.md"
+  if [ -z "$PERSONAL_LAYER" ]; then
+    preflight_link "$(public_global_agents)" "$target"
+    return
+  fi
+
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    return
+  fi
+  if is_managed_public_global_agents || is_managed_personal_global_agents; then
+    return
+  fi
+  if [ "$REPLACE" -ne 1 ]; then
+    echo "refusing to replace existing global AGENTS.md: $target (rerun with --replace)" >&2
+    return 1
+  fi
+}
+
+install_global_agents() {
+  local target="$CODEX_USER_DIR/AGENTS.md"
+  if [ -z "$PERSONAL_LAYER" ]; then
+    install_link "$(public_global_agents)" "$target"
+    return
+  fi
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if ! is_managed_public_global_agents && ! is_managed_personal_global_agents; then
+      local backup="${target}.bak-$(date +%Y%m%d-%H%M%S)"
+      mv "$target" "$backup"
+      echo "Backed up: $target -> $backup"
+    fi
+  fi
+  render_personal_global_agents
+  echo "Installed: managed local global AGENTS.md composite"
+}
+
+append_post_merge_dispatcher() {
+  local post_merge="$1"
+  if grep -qF '# claude-config post-merge extensions' "$post_merge" 2>/dev/null; then
+    return
+  fi
+  cat >> "$post_merge" <<'EOF'
+
+# claude-config post-merge extensions
+# Local extension scripts are optional and must never make git pull fail.
+POST_MERGE_EXTENSION_DIR="$(dirname "$0")/post-merge.d"
+for POST_MERGE_EXTENSION in "$POST_MERGE_EXTENSION_DIR"/*.sh; do
+  [ -x "$POST_MERGE_EXTENSION" ] || continue
+  "$POST_MERGE_EXTENSION" "$@" || \
+    echo "[claude-config] WARNING: post-merge extension failed: $POST_MERGE_EXTENSION" >&2
+done
+EOF
+}
+
+write_post_merge_dispatcher() {
+  local post_merge="$1"
+  cat > "$post_merge" <<'EOF'
+#!/usr/bin/env bash
+# managed-by: claude-config setup-codex-personal-dispatch
+# Dispatch optional local post-merge extensions without failing git pull.
+
+# claude-config post-merge extensions
+# Local extension scripts are optional and must never make git pull fail.
+POST_MERGE_EXTENSION_DIR="$(dirname "$0")/post-merge.d"
+for POST_MERGE_EXTENSION in "$POST_MERGE_EXTENSION_DIR"/*.sh; do
+  [ -x "$POST_MERGE_EXTENSION" ] || continue
+  "$POST_MERGE_EXTENSION" "$@" || \
+    echo "[claude-config] WARNING: post-merge extension failed: $POST_MERGE_EXTENSION" >&2
+done
+EOF
+  chmod +x "$post_merge"
+}
+
+install_personal_refresh_hook() {
+  local hooks_dir="$PERSONAL_LAYER/.git/hooks"
+  local post_merge extension_dir extension
+  [ -d "$hooks_dir" ] || {
+    echo "NOTE: personal layer is not a Git checkout; automatic refresh after pull is unavailable."
+    return
+  }
+  post_merge="$hooks_dir/post-merge"
+  if [ ! -e "$post_merge" ]; then
+    write_post_merge_dispatcher "$post_merge"
+  elif grep -qF '# managed-by: claude-config setup-dropbox-refs' "$post_merge" 2>/dev/null; then
+    append_post_merge_dispatcher "$post_merge"
+  elif ! grep -qF '# claude-config post-merge extensions' "$post_merge" 2>/dev/null \
+    && ! grep -qF '# managed-by: claude-config setup-codex-personal-dispatch' "$post_merge" 2>/dev/null; then
+    echo "NOTE: existing personal-layer post-merge hook is user-managed; automatic Codex refresh was not attached."
+    return
+  fi
+
+  extension_dir="$hooks_dir/post-merge.d"
+  extension="$extension_dir/claude-config-codex-personal-layer.sh"
+  mkdir -p "$extension_dir"
+  if [ -e "$extension" ] \
+    && ! grep -qF '# managed-by: claude-config setup-codex-personal-layer' "$extension" 2>/dev/null \
+    && [ "$REPLACE" -ne 1 ]; then
+    echo "NOTE: existing personal-layer refresh extension is user-managed; leaving it unchanged."
+    return
+  fi
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' '# managed-by: claude-config setup-codex-personal-layer'
+    printf '%s\n' '# Refresh only an already selected L4 Codex personal composite.'
+    printf 'CODEX_USER_DIR=%q CODEX_WORKSPACE_ROOT=%q %q --refresh-personal-layer %q\n' \
+      "$CODEX_USER_DIR" "$CODEX_WORKSPACE_ROOT" "$SCRIPT_DIR/setup-codex.sh" "$PERSONAL_LAYER"
+  } > "$extension"
+  chmod 700 "$extension"
+  echo "Installed: personal-layer post-merge refresh extension"
+}
+
+configure_personal_layer
+resolve_git_repos
+
+if [ "$REFRESH_PERSONAL_LAYER" -eq 1 ]; then
+  if [ -z "$PERSONAL_LAYER" ]; then
+    PERSONAL_LAYER="$(personal_layer_from_managed_global_agents || true)"
+  fi
+  if [ -z "$PERSONAL_LAYER" ]; then
+    echo "SKIP: no managed Codex personal-layer binding to refresh."
+    exit 0
+  fi
+  configure_personal_layer
+  if ! is_managed_personal_global_agents; then
+    echo "SKIP: managed Codex global instructions no longer select this personal layer."
+    exit 0
+  fi
+  personal_skills --preflight
+  render_personal_global_agents
+  personal_skills
+  echo "Refreshed: managed local global AGENTS.md composite and declared skill links"
+  exit 0
+fi
+
+install_link() {
+  local source="$1"
+  local target="$2"
+  local parent
+  parent="$(dirname "$target")"
+  mkdir -p "$parent"
+
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$source" ]; then
+    echo "OK: $target -> $source"
+    return
+  fi
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if [ "$REPLACE" -ne 1 ]; then
+      echo "refusing to replace existing target: $target (rerun with --replace)" >&2
+      exit 1
+    fi
+    local backup="${target}.bak-$(date +%Y%m%d-%H%M%S)"
+    mv "$target" "$backup"
+    echo "Backed up: $target -> $backup"
+  fi
+
+  ln -s "$source" "$target"
+  echo "Installed: $target -> $source"
+}
+
+preflight_link() {
+  local source="$1"
+  local target="$2"
+
+  if [ ! -e "$source" ]; then
+    echo "missing managed source: $source" >&2
+    return 1
+  fi
+
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$source" ]; then
+    return 0
+  fi
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if [ "$REPLACE" -ne 1 ]; then
+      echo "refusing to replace existing target: $target (rerun with --replace)" >&2
+      return 1
+    fi
+  fi
+}
+
+remove_legacy_managed_home_agents() {
+  local legacy_target="$USER_HOME/AGENTS.md"
+  local managed_source="$CONFIG_ROOT/codex/HOME-AGENTS.md"
+  if [ -L "$legacy_target" ] && [ "$(readlink "$legacy_target")" = "$managed_source" ]; then
+    rm "$legacy_target"
+    echo "Migrated: removed legacy managed home instruction link: $legacy_target"
+  fi
+}
+
+update_codex_config() {
+  local config="$CODEX_USER_DIR/config.toml"
+  mkdir -p "$CODEX_USER_DIR"
+  if [ -f "$config" ]; then
+    cp "$config" "${config}.bak-$(date +%Y%m%d-%H%M%S)"
+  fi
+
+  python3 - "$config" "$EFFORT" "$CONFIGURE_SAFE_LOCAL" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+effort = sys.argv[2]
+configure_safe_local = sys.argv[3] == "1"
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+
+def set_top_level(key: str, value: str) -> None:
+    global text
+    line = f"{key} = {value}"
+    pattern = rf"^{re.escape(key)}\s*=.*$"
+    table = re.search(r"^\[", text, flags=re.M)
+    if table:
+        top_level, remainder = text[:table.start()], text[table.start():]
+    else:
+        top_level, remainder = text, ""
+    if re.search(pattern, top_level, flags=re.M):
+        top_level = re.sub(pattern, line, top_level, flags=re.M)
+    else:
+        top_level = top_level.rstrip() + (chr(10) * 2 if top_level.strip() else "") + line + chr(10)
+    text = top_level + remainder
+
+if effort:
+    set_top_level("model_reasoning_effort", f'"{effort}"')
+if configure_safe_local:
+    set_top_level("approval_policy", '"on-request"')
+    set_top_level("sandbox_mode", '"workspace-write"')
+path.write_text(text, encoding="utf-8")
+PY
+}
+
+personal_skills --preflight
+preflight_global_agents
+preflight_link "$CONFIG_ROOT/codex/AGENTS.md" "$CODEX_WORKSPACE_ROOT/AGENTS.md"
+preflight_link \
+  "$CONFIG_ROOT/codex/skills/claude-config-conventions" \
+  "$CODEX_USER_DIR/skills/claude-config-conventions"
+preflight_link \
+  "$CONFIG_ROOT/codex/skills/claude-config-operations" \
+  "$CODEX_USER_DIR/skills/claude-config-operations"
+preflight_link \
+  "$CONFIG_ROOT/codex/skills/codex-automation-routing" \
+  "$CODEX_USER_DIR/skills/codex-automation-routing"
+preflight_link \
+  "$CONFIG_ROOT/codex/hooks" \
+  "$CODEX_USER_DIR/claude-config-hooks"
+preflight_link \
+  "$CONFIG_ROOT/codex/hooks/hooks.json" \
+  "$CODEX_USER_DIR/hooks.json"
+for repo in "${GIT_REPOS[@]+"${GIT_REPOS[@]}"}"; do
+  preflight_session_hook "$repo"
+done
+
+remove_legacy_managed_home_agents
+install_global_agents
+install_link "$CONFIG_ROOT/codex/AGENTS.md" "$CODEX_WORKSPACE_ROOT/AGENTS.md"
+install_link \
+  "$CONFIG_ROOT/codex/skills/claude-config-conventions" \
+  "$CODEX_USER_DIR/skills/claude-config-conventions"
+install_link \
+  "$CONFIG_ROOT/codex/skills/claude-config-operations" \
+  "$CODEX_USER_DIR/skills/claude-config-operations"
+install_link \
+  "$CONFIG_ROOT/codex/skills/codex-automation-routing" \
+  "$CODEX_USER_DIR/skills/codex-automation-routing"
+install_link \
+  "$CONFIG_ROOT/codex/hooks" \
+  "$CODEX_USER_DIR/claude-config-hooks"
+install_link \
+  "$CONFIG_ROOT/codex/hooks/hooks.json" \
+  "$CODEX_USER_DIR/hooks.json"
+
+for repo in "${GIT_REPOS[@]+"${GIT_REPOS[@]}"}"; do
+  if [ "$REPLACE" -eq 1 ]; then
+    "$SCRIPT_DIR/install-session-trailer.sh" "$repo"
+  else
+    "$SCRIPT_DIR/install-session-trailer.sh" --refuse-existing "$repo"
+  fi
+done
+[ "$GIT_REPO_COUNT" -eq 0 ] || echo "Installed Agent-Session hooks in $GIT_REPO_COUNT repo(s)."
+
+if [ -n "$EFFORT" ] || [ "$CONFIGURE_SAFE_LOCAL" -eq 1 ]; then
+  update_codex_config
+  [ -z "$EFFORT" ] || echo "Set Codex default reasoning effort: $EFFORT"
+  [ "$CONFIGURE_SAFE_LOCAL" -eq 0 ] || echo "Configured safe local autonomy."
+fi
+
+if [ -n "$PERSONAL_LAYER" ]; then
+  personal_skills
+  install_personal_refresh_hook
+fi
+
+# 誰でも使う skill (claude-config の skills/<name>/ = 例 wrap)。 個人層の宣言の後に回す = 同じ名前を個人層が宣言していれば
+# そちらを残す (install-shared-skills.sh が個人層の state を読んで飛ばす)。 失敗しても他の配線は止めない
+bash "$SCRIPT_DIR/install-shared-skills.sh" --codex-only --codex-dir "$CODEX_USER_DIR" \
+  || echo "warning: shared skills were not linked (scripts/install-shared-skills.sh --codex-only --codex-dir $CODEX_USER_DIR)" >&2
+
+echo "Codex layer-4 integration installed. Claude Code files were not modified."

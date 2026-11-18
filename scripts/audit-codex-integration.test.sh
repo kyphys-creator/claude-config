@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# audit-codex-integration.test.sh — Codex integration audit の fixture test
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Report the failing line and command instead of a silent exit 1.
+. "$SCRIPT_DIR/lib/test-err-trap.sh"
+CONFIG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TEMP_ROOT"' EXIT
+
+TEST_HOME="$TEMP_ROOT/home"
+TEST_CODEX_DIR="$TEST_HOME/.codex"
+TEST_WORKSPACE="$TEST_HOME/Documents/Codex"
+mkdir -p "$TEST_CODEX_DIR/skills" "$TEST_WORKSPACE"
+# <base> (= repo を並べた dir) の fixture。 既定 (この checkout の親) は CI では AGENTS.md を持たないので env で差す
+TEST_BASE="$TEMP_ROOT/base"
+mkdir -p "$TEST_BASE"
+cp "$CONFIG_ROOT/templates/root-AGENTS.md.default" "$TEST_BASE/AGENTS.md"
+export CLAUDE_BASE_DIR="$TEST_BASE"
+ln -s "$CONFIG_ROOT/codex/HOME-AGENTS.md" "$TEST_CODEX_DIR/AGENTS.md"
+ln -s "$CONFIG_ROOT/codex/AGENTS.md" "$TEST_WORKSPACE/AGENTS.md"
+ln -s "$CONFIG_ROOT/codex/skills/claude-config-conventions" \
+  "$TEST_CODEX_DIR/skills/claude-config-conventions"
+ln -s "$CONFIG_ROOT/codex/skills/claude-config-operations" \
+  "$TEST_CODEX_DIR/skills/claude-config-operations"
+ln -s "$CONFIG_ROOT/codex/skills/codex-automation-routing" \
+  "$TEST_CODEX_DIR/skills/codex-automation-routing"
+ln -s "$CONFIG_ROOT/codex/hooks" "$TEST_CODEX_DIR/claude-config-hooks"
+ln -s "$CONFIG_ROOT/codex/hooks/hooks.json" "$TEST_CODEX_DIR/hooks.json"
+printf 'approval_policy = "on-request"\nsandbox_mode = "workspace-write"\n' \
+  > "$TEST_CODEX_DIR/config.toml"
+
+HOME="$TEST_HOME" \
+CODEX_USER_DIR="$TEST_CODEX_DIR" \
+CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" >/dev/null
+
+# <base> に AGENTS.md が無ければ MISSING を出して落ちる (fixture で意図どおり止まることを見る = 検出能力の対照)
+EMPTY_BASE="$TEMP_ROOT/empty-base"
+mkdir -p "$EMPTY_BASE"
+if HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  CLAUDE_BASE_DIR="$EMPTY_BASE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" > "$TEMP_ROOT/empty-base.out" 2>&1; then
+  echo "expected audit to fail for a missing workspace-root AGENTS.md" >&2
+  exit 1
+fi
+grep -q "MISSING: workspace-root AGENTS.md" "$TEMP_ROOT/empty-base.out"
+
+python3 "$SCRIPT_DIR/setup-codex-git-push.py" --install \
+  --codex-dir "$TEST_CODEX_DIR" >/dev/null
+HOME="$TEST_HOME" \
+CODEX_USER_DIR="$TEST_CODEX_DIR" \
+CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" > "$TEMP_ROOT/push-rule-audit.out"
+grep -q "OK: opt-in prompt-free normal Git push rule" "$TEMP_ROOT/push-rule-audit.out"
+
+TEST_REPO="$TEMP_ROOT/repo"
+mkdir -p "$TEST_REPO/.claude" "$TEST_REPO/.hooks"
+git -C "$TEST_REPO" init -q
+git -C "$TEST_REPO" config core.hooksPath .hooks
+printf '%s\n' '# Agent instructions' 'Read CLAUDE.md and SESSION.md before work.' > "$TEST_REPO/AGENTS.md"
+printf '# project instructions\n' > "$TEST_REPO/CLAUDE.md"
+printf '# current state\n' > "$TEST_REPO/SESSION.md"
+git -C "$TEST_REPO" add AGENTS.md CLAUDE.md SESSION.md
+touch "$TEST_REPO/.claude/public-repo.marker"
+printf '%s\n' 'public-precommit-runner.sh' > "$TEST_REPO/.hooks/pre-commit"
+printf '%s\n' 'commit-msg-leak-guard-runner.sh' > "$TEST_REPO/.hooks/commit-msg"
+printf '%s\n' 'prepare-commit-msg-session.sh' > "$TEST_REPO/.hooks/prepare-commit-msg"
+
+SHARED_REPO="$TEMP_ROOT/shared-repo"
+mkdir -p "$SHARED_REPO/.hooks"
+git -C "$SHARED_REPO" init -q
+git -C "$SHARED_REPO" config core.hooksPath .hooks
+printf '%s\n' '# Agent instructions' 'Read CLAUDE.md and SESSION.md before work.' > "$SHARED_REPO/AGENTS.md"
+printf '# project instructions\n' > "$SHARED_REPO/CLAUDE.md"
+printf '# current state\n' > "$SHARED_REPO/SESSION.md"
+git -C "$SHARED_REPO" add AGENTS.md CLAUDE.md SESSION.md
+printf '%s\n' 'pre-commit-bib' > "$SHARED_REPO/.hooks/pre-commit"
+printf '%s\n' 'prepare-commit-msg-session.sh' > "$SHARED_REPO/.hooks/prepare-commit-msg"
+
+HOME="$TEST_HOME" \
+CODEX_USER_DIR="$TEST_CODEX_DIR" \
+CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$TEST_REPO" >/dev/null
+
+HOME="$TEST_HOME" \
+CODEX_USER_DIR="$TEST_CODEX_DIR" \
+CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$SHARED_REPO" \
+  > "$TEMP_ROOT/shared-audit.out"
+grep -q "OK: shared LaTeX/conflict pre-commit gate" "$TEMP_ROOT/shared-audit.out"
+
+git -C "$TEST_REPO" rm -q --cached AGENTS.md
+if HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$TEST_REPO" >/dev/null 2>&1; then
+  echo "expected audit to fail for an untracked root AGENTS.md" >&2
+  exit 1
+fi
+git -C "$TEST_REPO" add AGENTS.md
+
+python3 - "$TEST_REPO/AGENTS.md" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text(
+    "Read CLAUDE.md and SESSION.md before work.\n" + "x" * 4097,
+    encoding="utf-8",
+)
+PY
+if HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$TEST_REPO" \
+  > "$TEMP_ROOT/oversized-agents.out" 2>&1; then
+  echo "expected audit to reject a root AGENTS.md above 4 KiB" >&2
+  exit 1
+fi
+grep -q "OVERSIZED: root AGENTS.md" "$TEMP_ROOT/oversized-agents.out"
+printf '%s\n' '# Agent instructions' 'Read CLAUDE.md and SESSION.md before work.' > "$TEST_REPO/AGENTS.md"
+
+rm "$TEST_REPO/.hooks/commit-msg"
+if HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$TEST_REPO" >/dev/null 2>&1; then
+  echo "expected audit to fail for a missing public Git-side gate" >&2
+  exit 1
+fi
+
+printf '%s\n' 'commit-msg-leak-guard-runner.sh' > "$TEST_REPO/.hooks/commit-msg"
+rm "$TEST_REPO/.hooks/prepare-commit-msg"
+if HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" --repo "$TEST_REPO" >/dev/null 2>&1; then
+  echo "expected audit to fail for a missing Agent-Session hook" >&2
+  exit 1
+fi
+printf '%s\n' 'prepare-commit-msg-session.sh' > "$TEST_REPO/.hooks/prepare-commit-msg"
+
+rm "$TEST_CODEX_DIR/skills/codex-automation-routing"
+if HOME="$TEST_HOME" \
+  CODEX_USER_DIR="$TEST_CODEX_DIR" \
+  CODEX_WORKSPACE_ROOT="$TEST_WORKSPACE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" >/dev/null 2>&1; then
+  echo "expected audit to fail for a missing managed skill" >&2
+  exit 1
+fi
+
+# --- composite mode: public-layer pull refresh coverage ---
+PERSONAL_LAYER="$TEMP_ROOT/personal-layer"
+mkdir -p "$PERSONAL_LAYER/codex"
+: > "$PERSONAL_LAYER/.claude-personal-layer"
+printf '# test overlay\n' > "$PERSONAL_LAYER/codex/AGENTS.md"
+git -C "$PERSONAL_LAYER" init -q
+COMPOSITE_HOME="$TEMP_ROOT/home-composite"
+COMPOSITE_CODEX="$COMPOSITE_HOME/.codex"
+COMPOSITE_WS="$COMPOSITE_HOME/Documents/Codex"
+mkdir -p "$COMPOSITE_HOME"
+HOME="$COMPOSITE_HOME" \
+CODEX_USER_DIR="$COMPOSITE_CODEX" \
+CODEX_WORKSPACE_ROOT="$COMPOSITE_WS" \
+  "$SCRIPT_DIR/setup-codex.sh" --personal-layer "$PERSONAL_LAYER" >/dev/null
+
+GOOD_POST_MERGE="$TEMP_ROOT/post-merge-with-refresh"
+printf '%s\n' 'setup-codex.sh --refresh-personal-layer' > "$GOOD_POST_MERGE"
+BAD_POST_MERGE="$TEMP_ROOT/post-merge-without-refresh"
+printf '#!/bin/sh\n' > "$BAD_POST_MERGE"
+
+HOME="$COMPOSITE_HOME" \
+CODEX_USER_DIR="$COMPOSITE_CODEX" \
+CODEX_WORKSPACE_ROOT="$COMPOSITE_WS" \
+CLAUDE_CONFIG_POST_MERGE="$GOOD_POST_MERGE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" >/dev/null
+
+if HOME="$COMPOSITE_HOME" \
+  CODEX_USER_DIR="$COMPOSITE_CODEX" \
+  CODEX_WORKSPACE_ROOT="$COMPOSITE_WS" \
+  CLAUDE_CONFIG_POST_MERGE="$BAD_POST_MERGE" \
+  "$SCRIPT_DIR/audit-codex-integration.sh" > "$TEMP_ROOT/audit-stale.out" 2>&1; then
+  echo "expected audit to fail when the public-layer post-merge lacks the refresh" >&2
+  exit 1
+fi
+grep -q "public-layer pull refresh" "$TEMP_ROOT/audit-stale.out"
+
+echo "audit-codex-integration tests passed"

@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# public-leak-guard.sh — 公開リポ leak 防止 — PreToolUse(Edit|Write|MultiEdit) Tier A 構造制約 regex
 # public-leak-guard.sh — 公開リポへの構造的 leak の検出 (Tier A regex only)
 #
 # 正本: claude-config/hooks/public-leak-guard.sh
@@ -32,6 +33,11 @@
 #                      private range / 169.254.*  link-local を allowlist)
 #   4. token_prefix — ghp_[A-Za-z0-9]{30,} / github_pat_[A-Za-z0-9_]{30,}
 #                     / sk-[A-Za-z0-9]{30,}
+#   5. discord_mention — <@&?[0-9]{17,20}>
+#                     Discord snowflake user/role mention. Config field
+#                     names like "mention_target" look innocent but carry
+#                     persistent cross-server PII — see
+#                     `conventions/identity-in-config.md`.
 
 set -uo pipefail
 
@@ -58,7 +64,13 @@ while [ "$dir" != "/" ] && [ -n "$dir" ]; do
     REPO_ROOT="$dir"
     break
   fi
-  dir="$(dirname "$dir")"
+  # 不動点検出で上り詰めを止める。 Windows (MSYS/Git Bash) の drive root は
+  # `/` でなく `C:` で、 `dirname C:` は `C:` を返す = 上の `!= "/"` guard に
+  # 永久に到達せず無限 loop になる (= PreToolUse hook が Edit/Write を無限に
+  # block する)。 POSIX でも `dirname /` は `/` なので同じ不動点で安全に閉じる。
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
 done
 
 [ -z "${REPO_ROOT:-}" ] && exit 0
@@ -89,11 +101,17 @@ HITS=""
 
 # --- 1. email ---
 # GNU grep 拡張に依存しないため `grep -oE` を使う。
-# allowlist: grep -v で除外。
+# allowlist: grep -v で除外。 ⚠️ commit 時の gate (scripts/public-precommit-runner.sh の
+# Tier A-1) と同じ allowlist にする — RFC 2606 の例示 domain (@example.com / .org / .net /
+# .invalid) は実在 address になり得ないので leak ではない。 2026-09-12 まで本 hook だけ
+# 例示 domain を拾い、 test fixture の Write ごとに確認 dialog を出していた (commit gate は通すのに)。
+# 両者の一致は scripts/public-precommit-runner.test.sh が検査する。
+# ssh remote の user 部 (git@<code host>:owner/repo の github.com・gitlab.com・bitbucket.org) も
+# remote URL の一部であって個人の address ではないので allowlist (2026-09-12)。
 EMAIL_HITS="$(
   printf '%s' "$CONTENT" \
     | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' 2>/dev/null \
-    | grep -vE '^(noreply@anthropic\.com|noreply@github\.com|support@github\.com)$' \
+    | grep -vE '^(noreply@anthropic\.com|noreply@github\.com|support@github\.com|git@(github\.com|gitlab\.com|bitbucket\.org)|[A-Za-z0-9._%+-]+@example\.(com|org|net|invalid)|[A-Za-z0-9._%+-]+@[23]x\.[A-Za-z0-9]+)$' \
     || true
 )"
 if [ -n "$EMAIL_HITS" ]; then
@@ -162,6 +180,23 @@ if [ -n "$TOKEN_HITS" ]; then
 [token_prefix] $TOKEN_REDACTED"
 fi
 
+# --- 5. discord_mention ---
+# Discord snowflake user (`<@NNN>`) or role (`<@&NNN>`) mention.
+# Fields like mention_target / notify_user 等は application config の顔
+# をしていても中身は persistent cross-server PII (dox 素材になりうる)。
+# allowlist を設けない: `<@USER_ID>` のような placeholder は数字部分が
+# 17 桁以上にならないため regex に hit しない。
+DISCORD_HITS="$(
+  printf '%s' "$CONTENT" \
+    | grep -oE '<@&?[0-9]{17,20}>' 2>/dev/null \
+    | sort -u \
+    || true
+)"
+if [ -n "$DISCORD_HITS" ]; then
+  HITS="${HITS}
+[discord_mention] $(printf '%s' "$DISCORD_HITS" | head -3 | tr '\n' ' ')"
+fi
+
 # ----------------------------------------------------------------------
 # 判定と出力
 # ----------------------------------------------------------------------
@@ -186,6 +221,9 @@ hit pattern(s):$HITS
   - /Users/<name>/ → \`\$HOME/\` or \`~/\` 相対 path へ
   - IPv4 → 0.0.0.0 / 127.0.0.1 / RFC1918 の汎用例示 IP へ
   - token → 即 revoke + secret manager へ移動
+  - discord_mention → layer 3 (collaborator registry) に canonical を置き、
+    config は \`mention_target_env: DISCORD_MENTION_<NAME>\` で env 変数名のみ保持
+    (詳細: \`conventions/identity-in-config.md\`)
 EOF
 
 jq -n '{

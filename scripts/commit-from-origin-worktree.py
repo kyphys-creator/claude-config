@@ -1,0 +1,633 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""自分の変更を origin/<branch> から切った使い捨て worktree で commit・push する (live checkout の未 commit 変更・未 push commit・index に一切触れず、 相手の未 push commit を巻き込んで公開しない)。 git-crypt repo も復号済みで扱い、 push 直前の再 fetch + rebase、 衝突時は push せず worktree を残す。--selftest 内蔵。
+
+手順の正本 = [`conventions/multi-session-coordination.md#foreign-wip-scratch-worktree`](../conventions/multi-session-coordination.md#foreign-wip-scratch-worktree)。
+Codex で default branch へ送る `HEAD:<branch>` refspec の execution-permission 正本は
+[`codex/PARITY.md#normal-git-push-rule`](../codex/PARITY.md#normal-git-push-rule)（非 default branch まで blanket allow しない）。
+本 script はその機械化。 手で踏むと毎回 7 コマンド + git-crypt の 3 行 + 後始末で、 省略が起きる
+(2026-09-12〜13: live checkout から push した回の多くは behind が 0 であることしか確かめず、 ahead の中身が
+自分の commit だけかは見ていなかった。 相手の未 push commit が local に居れば一緒に公開する構造だった。
+事後監査 = [`audit-push-provenance.py`](audit-push-provenance.py) で、 その 40 回の push 範囲に他 session の commit は
+0 件 = 実害なしの near-miss。 防いでいたのは偶然で、 本 script では構造的に起きない)。
+
+使い方:
+
+    python3 commit-from-origin-worktree.py --repo ~/Claude/claude-config -m msg.txt \\
+        --copy /path/to/edited.md:conventions/edited.md \\
+        --check 'bash scripts/run-all-checks.sh'
+    python3 commit-from-origin-worktree.py --repo R -m msg.txt --apply 'python3 "$LIVE/../x.py" conventions/a.md'
+    python3 commit-from-origin-worktree.py --selftest
+
+- `--copy SRC:DST` (複数可) = SRC の中身を worktree の DST (repo 相対) に置く。 SRC は scratchpad でも live の
+  tree でもよいが、 **file 全体が自分の変更であるときだけ**使う (相手の hunk が混ざった live の file を写すと、
+  相手の未 commit 変更を公開する。 その場合は `--apply` に pair を渡すか、 手元の HEAD に commit するなら
+  [`git-commit-own-hunk.py`](git-commit-own-hunk.py) = 一時 index の手順の道具)。
+  既定では、 DST の live HEAD 版と origin 版が違う (= upstream が変えた / live の未 push commit が触った) と拒否する
+  (丸ごと置換は前者を黙って巻き戻し、 後者を公開する)。 `--apply` で origin 版に編集をやり直すか、 意図した置換なら
+  `--allow-overwrite`。 新しい file は SRC の実行 bit を保つ (既にある DST は DST の mode のまま)。
+- ⚠️ **規則保護の guard の対象の file はこの道具では commit できない**: 承認の記録は repo の絶対 path に結びつき、 使い捨ての
+  worktree の path は毎回違うので、 commit の gate が照合できずに止まる (実測)。 live が最新に追いつける状態で live に当てて commit する
+  ([`conventions/hook-authoring.md#new-hook-protected-bundle`](../conventions/hook-authoring.md#new-hook-protected-bundle))。
+- `--apply CMD` = worktree を cwd に bash で走らせる変更 command。 環境変数 `LIVE` (live の top) と `WT` を渡す。
+- `--check CMD` = stage 後・commit 前に worktree で走らせる検査。 非 0 なら commit しない。
+- `--remove-live-copies` = push 後、 live の tree に在る**未追跡**の SRC を、 `origin/<branch>:<DST>` と一致を
+  確かめてから消す (残すと相手の pull が untracked overwrite で止まる)。 比べるのは平文 (`git cat-file --filters` =
+  git-crypt の file も復号して比べる。 `git show` は暗号文を返すので、 同じ中身でも「differs」 になっていた = 実測)。 live で**追跡中の file を直接編集**して
+  出した場合は消さずに、 origin と一致していれば追いつき方を出す: 同じ中身の変更が unstaged のままだと
+  `merge --ff-only` は「would be overwritten」 で止まり、 `git add -- <path>` で index を揃えると fast-forward が通って
+  clean になる (2026-09-13 実測)。
+- push の後、 push した変更と同じ変更が live の作業 tree の追跡中の file に未 commit で残っていれば (= live で書いてから
+  `--apply` で当て直した形。 台帳を書く道具は live に書く) `[live] <path>: … UNCOMMITTED` の 1 行で知らせる (live には触らない)。
+  残すと live は upstream の同じ file の変更と重なり、 session 開始の同期が最新化を止める (実測 = 共有の clone に live copy が
+  溜まり、 人が揃えるまで遅れたままだった)。 規約 = [`conventions/multi-session-coordination.md#origin-worktree-live-copy`](../conventions/multi-session-coordination.md#origin-worktree-live-copy)。
+- 新しい file を `--copy` で出し、 `--remove-live-copies` を付けなかったときは、 live の元の file が **untracked** のまま残る。
+  これには `checkout --` が効かず、 upstream に同じ path が入った後は、 中身が同じでも live の fast-forward・rebase・`reset --keep` が
+  止まる (実測 = 毎時の無人の書き手が rebase できず、 commit が手元に積もった)。 その場合の知らせは `[live] <path>: … UNTRACKED` で、
+  origin と bytes が同じで live が fast-forward できるときだけ消して同じ command で追いつく 1 行を出す (道具は live に触らない。
+  規約 = [`#origin-worktree-untracked-copy`](../conventions/multi-session-coordination.md#origin-worktree-untracked-copy))。
+
+exit: 0 = push 済 / 1 = commit 前に止めた (変更なし・検査失敗・hook 拒否) / 2 = rebase 衝突 (push せず、
+worktree を残して path を出す) / 3 = push が retry 後も失敗。
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def git(repo: Path, *args: str, check: bool = True, binary: bool = False, env=None):
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=not binary, env=env)
+    if check and r.returncode != 0:
+        err = r.stderr if not binary else r.stderr.decode("utf-8", "replace")
+        raise RuntimeError(f"git {' '.join(args)} failed: {err.strip()}")
+    return r
+
+
+def fetch(repo: Path) -> None:
+    """fetch, retrying once on the ref-lock race of two concurrent fetches (#concurrent-fetch-ref-lock)."""
+    r = git(repo, "fetch", "-q", "origin", check=False)
+    if r.returncode != 0 and "cannot lock ref" in r.stderr:
+        time.sleep(1)
+        r = git(repo, "fetch", "-q", "origin", check=False)
+    if r.returncode != 0:
+        raise RuntimeError(f"git fetch failed: {r.stderr.strip()}")
+
+
+def default_branch(live: Path) -> str:
+    """origin/HEAD の指す branch。 指す先が remote に無い (default branch の改名後に古い origin/HEAD が残った clone、
+    実測: master → main の後も origin/HEAD が origin/master のままで、 全 file が「live と origin が違う」 で止まった) なら、
+    今の branch の upstream、 それも無ければ今の branch の名前。"""
+    exists = lambda name: git(live, "rev-parse", "-q", "--verify", f"refs/remotes/origin/{name}", check=False).returncode == 0
+    r = git(live, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
+    if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
+        name = r.stdout.strip()[len("origin/"):]
+        if exists(name):
+            return name
+    up = git(live, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", check=False)
+    if up.returncode == 0 and up.stdout.strip().startswith("origin/") and exists(up.stdout.strip()[len("origin/"):]):
+        return up.stdout.strip()[len("origin/"):]
+    return git(live, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+
+def names_z(repo: Path, *args: str) -> list[str]:
+    out = git(repo, *args, binary=True).stdout
+    return [n for n in out.decode("utf-8", "surrogateescape").split("\0") if n]
+
+
+def add_worktree(live: Path, wt: Path, branch: str, log) -> None:
+    crypt = git(live, "config", "--get", "filter.git-crypt.smudge", check=False).returncode == 0
+    if not crypt:
+        git(live, "worktree", "add", "-q", "--detach", str(wt), f"origin/{branch}")
+        return
+    # git-crypt: the key lives in the COMMON git dir; a worktree's own git dir cannot see it and the
+    # smudge filter fails on checkout. Create without checkout, link the key dir, then check out.
+    git(live, "worktree", "add", "-q", "--no-checkout", "--detach", str(wt), f"origin/{branch}")
+    common = Path(git(live, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip())
+    wt_gitdir = Path(git(wt, "rev-parse", "--path-format=absolute", "--git-dir").stdout.strip())
+    if (common / "git-crypt").exists() and not (wt_gitdir / "git-crypt").exists():
+        os.symlink(common / "git-crypt", wt_gitdir / "git-crypt")
+    git(wt, "checkout", "-q")
+    log("[worktree] git-crypt repo: key dir linked, checked out decrypted")
+
+
+def remove_worktree(live: Path, tmp: Path, wt: Path) -> None:
+    git(live, "worktree", "remove", "--force", str(wt), check=False)
+    git(live, "worktree", "prune", check=False)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _plain(repo: Path, rev: str, path: str):
+    """rev の path の平文 (暗号化 file も filter を通す)。 無ければ None。"""
+    r = git(repo, "cat-file", "--filters", f"{rev}:{path}", check=False, binary=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def live_copy_paths(live: Path, wt: Path, head: str, files) -> list[str]:
+    """push した commit (wt の head) が変えた file のうち、 live の作業 tree に同じ変更が未 commit で残っているもの (= live copy)。
+    判定 = push した変更で足した行 (空白だけの行を除く) が全部 live の作業 tree の file に在り、 そのうち 1 行でも live の HEAD の版に無い。
+    暗号化 file も平文で比べる。 読むだけ (live には触らない)。"""
+    out = []
+    for f in files:
+        after = _plain(wt, head, f)
+        lp = live / f
+        if after is None or not lp.is_file():
+            continue
+        before = _plain(wt, f"{head}^", f) or b""
+        added = {ln for ln in after.splitlines() if ln.strip()} - set(before.splitlines())
+        if not added:
+            continue
+        try:
+            cur = set(lp.read_bytes().splitlines())
+        except OSError:
+            continue
+        live_head = set((_plain(live, "HEAD", f) or b"").splitlines())
+        if added <= cur and not added <= live_head:
+            out.append(f)
+    return out
+
+
+def commit_from_origin_worktree(live: Path, message: str, copies=(), apply_cmd: str | None = None,
+                                check_cmd: str | None = None, branch: str | None = None,
+                                remove_live_copies: bool = False, retries: int = 3,
+                                before_push=None, log=print, allow_overwrite: bool = False) -> int:
+    live = Path(git(live, "rev-parse", "--show-toplevel").stdout.strip())
+    branch = branch or default_branch(live)
+    snap_head = git(live, "rev-parse", "HEAD").stdout
+    snap_status = git(live, "status", "--porcelain=v1", "-z", binary=True).stdout
+    fetch(live)
+    # A copy replaces the whole file. It is only safe when the version the edit started from (live HEAD)
+    # is the version origin has now: otherwise it silently reverts a change someone pushed, or publishes
+    # a foreign UNPUSHED commit's hunk that sits in the live base.
+    blob = lambda ref, p: (lambda r: r.stdout.strip() if r.returncode == 0 else None)(
+        git(live, "rev-parse", "-q", "--verify", f"{ref}:{p}", check=False))
+    stale = [d for _s, d in copies if blob("HEAD", d) != blob(f"origin/{branch}", d)]
+    if stale and not allow_overwrite:
+        for d in stale:
+            log(f"[stop] {d}: live HEAD and origin/{branch} hold different versions; a whole-file copy would "
+                f"revert an upstream change or publish an unpushed one. Redo the edit on the origin version "
+                f"(--apply), or pass --allow-overwrite if replacing it is intended")
+        return 1
+    tmp = Path(tempfile.mkdtemp(prefix="origin-worktree-"))
+    wt = tmp / live.name
+    keep = False
+    try:
+        add_worktree(live, wt, branch, log)
+        for src, dst in copies:
+            d = wt / dst
+            d.parent.mkdir(parents=True, exist_ok=True)
+            is_new = not d.exists()
+            shutil.copyfile(src, d)
+            if is_new:  # copyfile drops the exec bit; a tracked DST keeps its own mode
+                shutil.copymode(src, d)
+        if apply_cmd:
+            env = dict(os.environ, LIVE=str(live), WT=str(wt))
+            r = subprocess.run(["bash", "-c", apply_cmd], cwd=wt, env=env, capture_output=True, text=True)
+            if r.returncode != 0:
+                log(r.stdout + r.stderr)
+                log("[stop] --apply failed; nothing committed")
+                return 1
+        git(wt, "add", "-A")
+        staged = names_z(wt, "diff", "--cached", "-z", "--name-only")
+        if not staged:
+            log("[stop] the change set is empty (vacuous); nothing committed")
+            return 1
+        log("[staged] " + "  ".join(staged))
+        if check_cmd:
+            r = subprocess.run(["bash", "-c", check_cmd], cwd=wt, capture_output=True, text=True,
+                               env=dict(os.environ, LIVE=str(live), WT=str(wt)))
+            if r.returncode != 0:
+                log((r.stdout + r.stderr)[-3000:])
+                log("[stop] --check failed in the worktree; nothing committed")
+                return 1
+        r = subprocess.run(["git", "-C", str(wt), "commit", "-q", "-F", "-"], input=message,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            log(r.stdout + r.stderr)
+            log("[stop] git commit failed (a hook refused?); nothing committed")
+            return 1
+        for attempt in range(1, retries + 1):
+            if before_push:
+                before_push(attempt)
+            fetch(wt)
+            if git(wt, "merge-base", "--is-ancestor", f"origin/{branch}", "HEAD", check=False).returncode != 0:
+                rb = git(wt, "rebase", "-q", f"origin/{branch}", check=False)
+                if rb.returncode != 0:
+                    conflicted = names_z(wt, "diff", "-z", "--name-only", "--diff-filter=U")
+                    git(wt, "rebase", "--abort", check=False)
+                    keep = True
+                    log(rb.stdout + rb.stderr)
+                    log(f"[conflict] origin/{branch} moved and the rebase conflicts; NOT pushed. worktree kept at {wt}\n"
+                        f"  conflicted: {'  '.join(conflicted) or '(not listed)'}\n"
+                        f"  the rebase was aborted, so the worktree holds your commit on the old base. To finish:\n"
+                        f"    cd {shlex.quote(str(wt))} && git rebase origin/{branch}\n"
+                        f"    generated files: git checkout --ours -- <file> (during a rebase, --ours is upstream), regenerate, git add\n"
+                        f"    other files: resolve by content, git add\n"
+                        f"    GIT_EDITOR=true git rebase --continue, re-run the --check command, git push origin HEAD:{branch}\n"
+                        f"    git -C {shlex.quote(str(live))} worktree remove {shlex.quote(str(wt))}"
+                        + ("  (--remove-live-copies does not run on this path: compare and remove the live copies after the push)"
+                           if remove_live_copies else ""))
+                    return 2
+            p = git(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}", check=False)
+            if p.returncode == 0:
+                break
+            log(f"[retry {attempt}] push rejected: {p.stderr.strip()[:200]}")
+        else:
+            keep = True
+            log(f"[stop] push failed {retries} times; worktree kept at {wt}")
+            return 3
+        head = git(wt, "rev-parse", "HEAD").stdout.strip()
+        fetch(wt)
+        published = git(wt, "merge-base", "--is-ancestor", head, f"origin/{branch}", check=False).returncode == 0
+        files = names_z(wt, "show", "-z", "--name-only", "--format=", head)
+        log(f"[pushed] {head[:10]} -> origin/{branch} ({len(files)} file(s))" + ("" if published else "  ⚠ not visible on origin yet"))
+        if remove_live_copies:
+            for src, dst in copies:
+                s = Path(src).absolute()
+                if live not in s.parents:
+                    continue
+                rel = os.path.relpath(s, live)
+                # compare PLAIN text: `git show` returns the stored blob, which for a git-crypt file is the ciphertext
+                # and never equals the live copy (measured: identical copies were kept as "differs")
+                origin_plain = _plain(live, f"origin/{branch}", dst)
+                same = origin_plain is not None and s.exists() and s.read_bytes() == origin_plain
+                if git(live, "ls-files", "--error-unmatch", "--", rel, check=False).returncode == 0:
+                    # tracked in live: never delete or revert. If it now equals origin, say how to catch
+                    # live up: with the identical change UNSTAGED `merge --ff-only` aborts ("would be
+                    # overwritten"); once the index holds the same blob the fast-forward goes through clean.
+                    if rel == dst and same:
+                        log(f"[live] {rel} is tracked and now equals origin/{branch}; to catch live up: "
+                            f"git -C {live} add -- {shlex.quote(rel)} && git -C {live} merge --ff-only origin/{branch}")
+                    continue
+                if same:
+                    s.unlink()
+                    log(f"[live] removed untracked copy {rel} (identical to origin/{branch}:{dst})")
+                elif origin_plain is None:
+                    log(f"[live] kept {rel}: could not read origin/{branch}:{dst} as plain text "
+                        f"(not on origin yet, or the decrypting filter failed in this clone)")
+                else:
+                    log(f"[live] kept {rel}: differs from origin/{branch}:{dst}")
+        # the same change left UNCOMMITTED in a tracked live file (you edited live, e.g. a ledger tool wrote there, then
+        # redid the edit here): it now duplicates origin, and the session-start sync will not fast-forward live while it
+        # is there (the file overlaps the upstream change). Say so; never touch live from here (measured: such copies
+        # piled up in a shared clone until a person reconciled it).
+        # A NEW file is different: its live original is UNTRACKED, `checkout --` cannot remove it ("pathspec did not
+        # match"), and once origin has the path the live clone's fast-forward / rebase / reset --keep stop on it even with
+        # identical bytes (measured: an hourly unattended writer could not rebase and its commits piled up locally). Give
+        # the recipe that removes it only when it equals origin and live can fast-forward, and catches live up in the
+        # same command (a reader of that file in the lagging live never sees it missing).
+        hinted = {d for s_, d in copies if remove_live_copies}
+        for f in live_copy_paths(live, wt, head, files):
+            if f in hinted:
+                continue
+            if git(live, "ls-files", "--error-unmatch", "--", f, check=False).returncode != 0:
+                lq, up = shlex.quote(str(live)), f"origin/{branch}"
+                log(f"[live] {f}: the live tree still holds this new file UNTRACKED (the original of what was just "
+                    f"pushed). `checkout --` does not apply to an untracked file, and while it is there the live clone "
+                    f"cannot fast-forward / rebase / reset --keep onto {up}. Remove it and catch live up in one command: "
+                    f"git -C {lq} cat-file --filters {shlex.quote(up + ':' + f)} | cmp -s - {shlex.quote(str(live / f))} && "
+                    f"git -C {lq} merge-base --is-ancestor HEAD {up} && rm -- {shlex.quote(str(live / f))} && "
+                    f"git -C {lq} merge --ff-only {up} (stops before removing if the bytes differ or live has unpushed "
+                    f"commits; then remove it while aligning: "
+                    f"conventions/multi-session-coordination.md#origin-worktree-untracked-copy)")
+                continue
+            log(f"[live] {f}: the live tree still holds this change UNCOMMITTED (a live copy of what was just pushed). "
+                f"Remove your hunk from the live file (no other session's change in it: git -C {shlex.quote(str(live))} "
+                f"checkout -- {shlex.quote(f)}), so that live can fast-forward to origin/{branch} "
+                f"(conventions/multi-session-coordination.md#origin-worktree-live-copy)")
+        if git(live, "rev-parse", "HEAD").stdout != snap_head:
+            log("⚠ live HEAD moved during the run (another session?); this script did not touch it")
+        elif git(live, "status", "--porcelain=v1", "-z", binary=True).stdout != snap_status and not remove_live_copies:
+            log("⚠ live status changed during the run (another session?); this script did not touch it")
+        return 0
+    finally:
+        if not keep:
+            remove_worktree(live, tmp, wt)
+
+
+# ---------------------------------------------------------------- selftest
+
+
+def selftest() -> int:
+    ok = True
+
+    def check(label, cond):
+        nonlocal ok
+        print(f"[{'PASS' if cond else 'FAIL'}] {label}")
+        ok = ok and cond
+
+    quiet = lambda *_a, **_k: None
+    with tempfile.TemporaryDirectory() as td:
+        T = Path(td).resolve()
+        sh = lambda repo, *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True)
+        src = T / "src"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+        for rp in (src,):
+            sh(rp, "config", "user.email", "t@t"); sh(rp, "config", "user.name", "t")
+        (src / "a.md").write_text("base\n", encoding="utf-8")
+        (src / "§ 記録.md").write_text("記録\n", encoding="utf-8")
+        sh(src, "add", "-A"); sh(src, "commit", "-q", "-m", "base")
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(T / "remote.git")], check=True)
+        live, other = T / "live", T / "other"
+        for c in (live, other):
+            subprocess.run(["git", "clone", "-q", str(T / "remote.git"), str(c)], check=True)
+            sh(c, "config", "user.email", "t@t"); sh(c, "config", "user.name", "t")
+        remote = T / "remote.git"
+        # a stale origin/HEAD (points at a branch the remote no longer has) falls back to the upstream
+        sh(other, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+        check("stale origin/HEAD → upstream branch", default_branch(other) == "main")
+        sh(other, "remote", "set-head", "origin", "-a")
+        # foreign state in live: a dirty tracked file, a staged file, and an UNPUSHED commit
+        (live / "foreign.md").write_text("foreign unpushed\n", encoding="utf-8")
+        sh(live, "add", "foreign.md"); sh(live, "commit", "-q", "-m", "foreign unpushed commit")
+        (live / "a.md").write_text("foreign dirty edit\n", encoding="utf-8")
+        (live / "staged-foreign.md").write_text("x\n", encoding="utf-8")
+        sh(live, "add", "staged-foreign.md")
+        head0 = sh(live, "rev-parse", "HEAD").stdout
+        status0 = sh(live, "status", "--porcelain=v1").stdout
+        edited = T / "scratch-new §.md"
+        edited.write_text("my change\n", encoding="utf-8")
+
+        def other_pushes(attempt):
+            if attempt == 1:
+                (other / "b.md").write_text("other session\n", encoding="utf-8")
+                sh(other, "add", "b.md"); sh(other, "commit", "-q", "-m", "other"); sh(other, "push", "-q")
+
+        rc = commit_from_origin_worktree(live, "add note\n", copies=[(edited, "docs/new §.md")],
+                                         check_cmd='test -f "docs/new §.md"', before_push=other_pushes, log=quiet)
+        tree = sh(remote, "ls-tree", "-r", "--name-only", "-z", "main").stdout.split("\0")
+        check("the change is pushed, non-ASCII path included", rc == 0 and "docs/new §.md" in tree)
+        check("origin moved before the push and the commit was rebased onto it", "b.md" in tree)
+        check("the foreign UNPUSHED commit was not published  [foil: a push from live would publish it]",
+              "foreign.md" not in tree and "foreign unpushed commit" in sh(live, "log", "--format=%s", "origin/main..main").stdout)
+        check("live HEAD, dirty file and index are untouched",
+              sh(live, "rev-parse", "HEAD").stdout == head0 and sh(live, "status", "--porcelain=v1").stdout == status0
+              and (live / "a.md").read_text() == "foreign dirty edit\n")
+        check("the worktree is removed", len(sh(live, "worktree", "list").stdout.strip().splitlines()) == 1)
+
+        before = sh(remote, "rev-parse", "main").stdout
+        rc = commit_from_origin_worktree(live, "x\n", copies=[(edited, "docs/other.md")], check_cmd="false", log=quiet)
+        check("a failing --check commits and pushes nothing", rc == 1 and sh(remote, "rev-parse", "main").stdout == before)
+        rc = commit_from_origin_worktree(live, "x\n", apply_cmd="true", log=quiet)
+        check("an empty change set is refused (vacuous)", rc == 1 and sh(remote, "rev-parse", "main").stdout == before)
+        tool = T / "tool.sh"
+        tool.write_text("#!/bin/sh\n")
+        tool.chmod(0o755)
+        plain = T / "plain.md"
+        plain.write_text("plain\n")
+        tracked = T / "tracked.md"
+        tracked.write_text("記録\n", encoding="utf-8")
+        tracked.chmod(0o755)
+        rc = commit_from_origin_worktree(live, "modes\n", log=quiet,
+                                         copies=[(tool, "bin/tool.sh"), (plain, "docs/plain.md"), (tracked, "§ 記録.md")])
+        modes = sh(remote, "-c", "core.quotepath=off", "ls-tree", "-r", "main").stdout.splitlines()
+        mode = lambda name: next(ln.split()[0] for ln in modes if ln.endswith(name))
+        check("--copy keeps the exec bit of a new file  [foil: copyfile alone gives 100644]",
+              rc == 0 and mode("bin/tool.sh") == "100755")
+        check("--copy keeps a new plain file at 100644", mode("docs/plain.md") == "100644")
+        check("--copy does not change the mode of a tracked DST", mode("§ 記録.md") == "100644")
+
+        conflict_src = T / "a-mine.md"
+        conflict_src.write_text("mine\n", encoding="utf-8")
+
+        def other_conflicts(attempt):
+            if attempt == 1:
+                sh(other, "pull", "-q")
+                (other / "a.md").write_text("theirs\n", encoding="utf-8")
+                sh(other, "commit", "-qam", "theirs"); sh(other, "push", "-q")
+
+        msgs = []
+        rc = commit_from_origin_worktree(live, "mine\n", copies=[(conflict_src, "a.md")], before_push=other_conflicts,
+                                         log=lambda m: msgs.append(m))
+        kept = next((m.split("worktree kept at ")[1].split("\n")[0] for m in msgs if "worktree kept at" in m), "")
+        check("a rebase conflict stops before the push and keeps the worktree",
+              rc == 2 and "theirs" in sh(remote, "show", "main:a.md").stdout and kept and Path(kept).is_dir())
+        check("the conflict message names the conflicted file and gives the --ours (= upstream) recipe",
+              any("conflicted: a.md" in m and "--ours is upstream" in m and "rebase --continue" in m for m in msgs))
+        if kept:
+            subprocess.run(["git", "-C", str(live), "worktree", "remove", "--force", kept], capture_output=True)
+            shutil.rmtree(Path(kept).parent, ignore_errors=True)
+
+        # an untracked copy placed in live is removed only when origin holds the same bytes
+        (live / "notes").mkdir()
+        mine = live / "notes" / "mine.md"
+        mine.write_text("mine exactly\n", encoding="utf-8")
+        rc = commit_from_origin_worktree(live, "notes\n", copies=[(mine, "notes/mine.md")],
+                                         remove_live_copies=True, log=quiet)
+        check("--remove-live-copies deletes the untracked live copy once origin has identical bytes",
+              rc == 0 and not mine.exists())
+        check("the tracked foreign dirty file in live is still there", (live / "a.md").read_text() == "foreign dirty edit\n")
+
+        # my change edited IN live on a tracked file: pushed from the worktree, live is left untouched and
+        # gets the catch-up recipe; the recipe works, and the unstaged form really aborts (foil)
+        probe = T / "probe"
+        subprocess.run(["git", "clone", "-q", str(remote), str(probe)], capture_output=True, check=True)
+        sh(probe, "config", "user.email", "t@t"); sh(probe, "config", "user.name", "t")
+        (probe / "tracked.md").write_text("v1\n", encoding="utf-8")
+        sh(probe, "add", "tracked.md"); sh(probe, "commit", "-q", "-m", "tracked v1"); sh(probe, "push", "-q")
+        sh(probe, "fetch", "-q")
+        (probe / "tracked.md").write_text("v2 mine\n", encoding="utf-8")
+        msgs2 = []
+        rc = commit_from_origin_worktree(probe, "v2\n", copies=[(probe / "tracked.md", "tracked.md")],
+                                         remove_live_copies=True, log=lambda m: msgs2.append(m))
+        hint = next((m for m in msgs2 if "is tracked and now equals" in m), "")
+        check("a tracked live copy is left in place and the catch-up recipe is printed",
+              rc == 0 and hint and (probe / "tracked.md").read_text() == "v2 mine\n")
+        sh(probe, "fetch", "-q")
+        aborted = subprocess.run(["git", "-C", str(probe), "merge", "--ff-only", "origin/main"],
+                                 capture_output=True, text=True).returncode != 0
+        subprocess.run(["bash", "-c", hint.split("to catch live up: ", 1)[1]], capture_output=True)
+        check("the recipe catches live up cleanly, and without `add` the fast-forward aborts (the foil has teeth)",
+              aborted and sh(probe, "status", "--porcelain").stdout == ""
+              and sh(probe, "rev-parse", "HEAD").stdout == sh(probe, "rev-parse", "origin/main").stdout)
+
+        # --apply on a file I had ALSO written in live (a ledger tool writes live, then the change is redone in the
+        # worktree): after the push the live copy is reported and live is not touched; a live file that does not
+        # hold the pushed change gets no report
+        p2 = T / "probe2"
+        subprocess.run(["git", "clone", "-q", str(remote), str(p2)], capture_output=True, check=True)
+        sh(p2, "config", "user.email", "t@t"); sh(p2, "config", "user.name", "t")
+        (p2 / "ledger.md").write_text("entry 1\n", encoding="utf-8")
+        sh(p2, "add", "ledger.md"); sh(p2, "commit", "-q", "-m", "ledger"); sh(p2, "push", "-q")
+        (p2 / "ledger.md").write_text("entry 1\nentry 2 mine\n", encoding="utf-8")
+        msgs3 = []
+        rc = commit_from_origin_worktree(p2, "entry 2\n", apply_cmd='printf "entry 2 mine\\n" >> ledger.md',
+                                         log=lambda m: msgs3.append(m))
+        check("a live copy left by --apply is reported, and live is untouched",
+              rc == 0 and any("[live] ledger.md" in m and "UNCOMMITTED" in m for m in msgs3)
+              and (p2 / "ledger.md").read_text() == "entry 1\nentry 2 mine\n")
+        msgs4 = []
+        rc = commit_from_origin_worktree(p2, "entry 3\n", apply_cmd='printf "entry 3\\n" >> ledger.md',
+                                         log=lambda m: msgs4.append(m))
+        check("no live-copy report when the live file does not hold the pushed change",
+              rc == 0 and not any("UNCOMMITTED" in m for m in msgs4))
+
+        # a NEW file written in live and pushed with --copy (no --remove-live-copies): the live original is untracked,
+        # so the report gives the cmp + rm + ff recipe, not `checkout --` (which fails on an untracked path = the foil),
+        # and the recipe leaves live clean at origin with the file tracked
+        p3 = T / "probe3"
+        subprocess.run(["git", "clone", "-q", str(remote), str(p3)], capture_output=True, check=True)
+        sh(p3, "config", "user.email", "t@t"); sh(p3, "config", "user.name", "t")
+        (p3 / "plans").mkdir()
+        (p3 / "plans" / "spec §.md").write_text("spec\n", encoding="utf-8")
+        msgs5 = []
+        rc = commit_from_origin_worktree(p3, "spec\n", copies=[(p3 / "plans" / "spec §.md", "plans/spec §.md")],
+                                         log=lambda m: msgs5.append(m))
+        rep = next((m for m in msgs5 if m.startswith("[live] plans/spec §.md")), "")
+        check("an untracked live original is reported with the rm recipe, not `checkout --`",
+              rc == 0 and "UNTRACKED" in rep and "rm -- " in rep and "checkout --" not in rep.split("`checkout --`", 1)[1])
+        ff_blocked = subprocess.run(["git", "-C", str(p3), "merge", "--ff-only", "origin/main"],
+                                    capture_output=True, text=True).returncode != 0
+        co_fails = subprocess.run(["git", "-C", str(p3), "checkout", "--", "plans/spec §.md"],
+                                  capture_output=True, text=True).returncode != 0
+        recipe = rep.split("in one command: ", 1)[1].split(" (stops before removing", 1)[0] if "in one command: " in rep else ""
+        subprocess.run(["bash", "-c", recipe], capture_output=True)
+        check("the untracked original blocks the fast-forward and `checkout --` fails on it (the foil has teeth); the "
+              "recipe catches live up with the file tracked",
+              ff_blocked and co_fails and recipe and sh(p3, "status", "--porcelain").stdout == ""
+              and sh(p3, "rev-parse", "HEAD").stdout == sh(p3, "rev-parse", "origin/main").stdout
+              and (p3 / "plans" / "spec §.md").read_text(encoding="utf-8") == "spec\n")
+        # the recipe does not remove a copy whose bytes differ from origin
+        (p3 / "plans" / "other.md").write_text("pushed\n", encoding="utf-8")
+        msgs6 = []
+        rc = commit_from_origin_worktree(p3, "other\n", copies=[(p3 / "plans" / "other.md", "plans/other.md")],
+                                         log=lambda m: msgs6.append(m))
+        rep6 = next((m for m in msgs6 if m.startswith("[live] plans/other.md")), "")
+        (p3 / "plans" / "other.md").write_text("pushed\nedited after the push\n", encoding="utf-8")
+        recipe6 = rep6.split("in one command: ", 1)[1].split(" (stops before removing", 1)[0] if "in one command: " in rep6 else ""
+        subprocess.run(["bash", "-c", recipe6], capture_output=True)
+        check("the recipe keeps an untracked copy that no longer equals origin",
+              rc == 0 and recipe6 and (p3 / "plans" / "other.md").read_text(encoding="utf-8").endswith("edited after the push\n"))
+
+        # whole-file copy guard: upstream changed the file / the live base carries a foreign unpushed hunk
+        sh(other, "pull", "-q")
+        (other / "shared.md").write_text("v1\n", encoding="utf-8")
+        sh(other, "add", "shared.md"); sh(other, "commit", "-q", "-m", "v1"); sh(other, "push", "-q")
+        sh(live, "fetch", "-q")
+        (other / "shared.md").write_text("v2 upstream\n", encoding="utf-8")
+        sh(other, "commit", "-qam", "v2"); sh(other, "push", "-q")
+        my_v1_edit = T / "shared-mine.md"
+        my_v1_edit.write_text("v1 plus my line\n", encoding="utf-8")
+        before = sh(remote, "rev-parse", "main").stdout
+        rc = commit_from_origin_worktree(live, "x\n", copies=[(my_v1_edit, "shared.md")], log=quiet)
+        check("a copy of a file that changed upstream since the live base is refused  [foil: silent revert]",
+              rc == 1 and sh(remote, "rev-parse", "main").stdout == before)
+        (live / "foreign.md").write_text("foreign unpushed\nplus a foreign hunk\n", encoding="utf-8")
+        sh(live, "commit", "-q", "-m", "foreign hunk, unpushed", "--", "foreign.md")
+        mixed = T / "foreign-mine.md"
+        mixed.write_text("foreign unpushed\nplus a foreign hunk\nplus mine\n", encoding="utf-8")
+        rc = commit_from_origin_worktree(live, "x\n", copies=[(mixed, "foreign.md")], log=quiet)
+        check("a copy whose live base carries a foreign unpushed commit is refused  [foil: publish by copy]",
+              rc == 1 and "foreign.md" not in sh(remote, "ls-tree", "--name-only", "main").stdout)
+
+        if shutil.which("git-crypt"):
+            cs = T / "crypt-src"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(cs)], check=True)
+            sh(cs, "config", "user.email", "t@t"); sh(cs, "config", "user.name", "t")
+            subprocess.run(["git-crypt", "init"], cwd=cs, capture_output=True, check=True)
+            (cs / ".gitattributes").write_text("secret*.txt filter=git-crypt diff=git-crypt\n", encoding="utf-8")
+            (cs / "secret.txt").write_text("plain secret\n", encoding="utf-8")
+            sh(cs, "add", "-A"); sh(cs, "commit", "-q", "-m", "base")
+            subprocess.run(["git", "clone", "-q", "--bare", str(cs), str(T / "crypt.git")], check=True)
+            sh(cs, "remote", "add", "origin", str(T / "crypt.git")); sh(cs, "fetch", "-q", "origin")
+            sh(cs, "branch", "-q", "-u", "origin/main")
+            plain = subprocess.run(["git", "-C", str(cs), "worktree", "add", "-q", "--detach", str(T / "plainwt"),
+                                    "origin/main"], capture_output=True, text=True)
+            check("git-crypt: a plain worktree add fails at the smudge filter (the foil has teeth)",
+                  plain.returncode != 0 and "smudge" in plain.stderr)
+            subprocess.run(["git", "-C", str(cs), "worktree", "prune"], capture_output=True)
+            shutil.rmtree(T / "plainwt", ignore_errors=True)
+            addition = T / "note.md"
+            addition.write_text("crypt repo note\n", encoding="utf-8")
+            rc = commit_from_origin_worktree(cs, "note\n", copies=[(addition, "note.md")],
+                                             check_cmd='grep -q "plain secret" secret.txt', log=quiet)
+            enc = subprocess.run(["git", "-C", str(T / "crypt.git"), "show", "main:secret.txt"], capture_output=True).stdout
+            check("git-crypt: the worktree is decrypted (check read the plaintext) and the push succeeds",
+                  rc == 0 and b"plain secret" not in enc and "note.md" in
+                  sh(T / "crypt.git", "ls-tree", "--name-only", "main").stdout)
+            # the live-copy comparisons read origin as PLAIN text (`git show` returns the ciphertext and never matched)
+            sh(cs, "fetch", "-q", "origin"); sh(cs, "merge", "-q", "--ff-only", "origin/main")
+            enc_new = cs / "secret-new.txt"
+            enc_new.write_text("new encrypted note\n", encoding="utf-8")
+            cmsg = []
+            rc = commit_from_origin_worktree(cs, "enc\n", copies=[(enc_new, "secret-new.txt")], remove_live_copies=True,
+                                             log=lambda m: cmsg.append(m))
+            stored = subprocess.run(["git", "-C", str(T / "crypt.git"), "show", "main:secret-new.txt"],
+                                    capture_output=True).stdout
+            check("git-crypt: --remove-live-copies removes an untracked copy whose PLAIN text equals origin "
+                  "(the stored blob is ciphertext = the foil has teeth)",
+                  rc == 0 and stored.startswith(b"\x00GITCRYPT") and not enc_new.exists()
+                  and any("removed untracked copy secret-new.txt" in m for m in cmsg))
+            # no --remove-live-copies: the UNTRACKED report's one-line recipe gets past its cmp and catches live up
+            enc_fresh = cs / "secret-fresh.txt"
+            enc_fresh.write_text("fresh encrypted note\n", encoding="utf-8")
+            cmsg = []
+            rc = commit_from_origin_worktree(cs, "fresh\n", copies=[(enc_fresh, "secret-fresh.txt")],
+                                             log=lambda m: cmsg.append(m))
+            rep = next((m for m in cmsg if m.startswith("[live] secret-fresh.txt")), "")
+            recipe = rep.split("in one command: ", 1)[1].split(" (stops before removing", 1)[0] if "in one command: " in rep else ""
+            subprocess.run(["bash", "-c", recipe], capture_output=True)
+            check("git-crypt: the UNTRACKED recipe compares plain text, so it removes the copy and catches live up",
+                  rc == 0 and recipe and sh(cs, "status", "--porcelain").stdout == ""
+                  and sh(cs, "rev-parse", "HEAD").stdout == sh(cs, "rev-parse", "origin/main").stdout
+                  and enc_fresh.read_text(encoding="utf-8") == "fresh encrypted note\n")
+            # a TRACKED encrypted file edited in live: the catch-up recipe is printed
+            (cs / "secret.txt").write_text("plain secret v2\n", encoding="utf-8")
+            cmsg = []
+            rc = commit_from_origin_worktree(cs, "v2\n", copies=[(cs / "secret.txt", "secret.txt")],
+                                             remove_live_copies=True, log=lambda m: cmsg.append(m))
+            check("git-crypt: a tracked encrypted live copy that equals origin gets the catch-up recipe",
+                  rc == 0 and any("secret.txt is tracked and now equals" in m for m in cmsg)
+                  and (cs / "secret.txt").read_text(encoding="utf-8") == "plain secret v2\n")
+            # the reverse side: plain text that differs after the push is kept
+            enc_diff = cs / "secret-diff.txt"
+            enc_diff.write_text("pushed version\n", encoding="utf-8")
+            cmsg = []
+            rc = commit_from_origin_worktree(cs, "diff\n", copies=[(enc_diff, "secret-diff.txt")], remove_live_copies=True,
+                                             before_push=lambda a: enc_diff.write_text("edited before the push\n",
+                                                                                       encoding="utf-8"),
+                                             log=lambda m: cmsg.append(m))
+            check("git-crypt: an untracked copy whose plain text differs from origin is kept",
+                  rc == 0 and enc_diff.exists() and any("kept secret-diff.txt: differs" in m for m in cmsg))
+        else:
+            print("[SKIP] git-crypt not installed")
+    print("\nALL PASS" if ok else "\nFAILED")
+    return 0 if ok else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--repo", type=Path, help="the live checkout (never modified)")
+    ap.add_argument("-m", "--message-file", type=Path)
+    ap.add_argument("--copy", action="append", default=[], metavar="SRC:DST")
+    ap.add_argument("--apply", metavar="CMD")
+    ap.add_argument("--check", metavar="CMD")
+    ap.add_argument("--branch")
+    ap.add_argument("--remove-live-copies", action="store_true")
+    ap.add_argument("--allow-overwrite", action="store_true",
+                    help="let --copy replace a file whose live-HEAD and origin versions differ")
+    ap.add_argument("--selftest", action="store_true")
+    a = ap.parse_args()
+    if a.selftest:
+        return selftest()
+    if not (a.repo and a.message_file and (a.copy or a.apply)):
+        ap.error("--repo, -m and at least one of --copy / --apply are required")
+    copies = []
+    for c in a.copy:
+        s, sep, d = c.rpartition(":")
+        if not sep or not s or not d or os.path.isabs(d):
+            ap.error(f"--copy wants SRC:DST with DST relative to the repo: {c!r}")
+        copies.append((Path(s).expanduser(), d))
+    return commit_from_origin_worktree(a.repo, a.message_file.read_text(encoding="utf-8"), copies, a.apply,
+                                       a.check, a.branch, a.remove_live_copies, allow_overwrite=a.allow_overwrite)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

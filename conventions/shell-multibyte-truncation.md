@@ -1,0 +1,111 @@
+<!-- doc-meta
+when: shell で多バイト文字列を truncate・加工するとき + **grep / sed の角括弧に非 ASCII を書くとき・`.{0,N}` で非 ASCII の語の間の距離を限るとき** + **git が出す file path (log --name-only / diff --name-only / ls-files / status) を script が文字列で判定するとき** (#git-quoted-paths) + **日本語の文の中の英字の語を Python の正規表現で探すとき** (#python-word-boundary-cjk) + **macOS の file 名を日本語の語で探して 0 件のとき** (#nfd-file-names) + **Python で file の行番号を出すとき** (#python-splitlines-line-numbers) + **PDF から起こした文字列をギリシャ文字で探すとき** (#pdf-text-micro-sign)
+category: infra
+summary: シェルの多バイト UTF-8 切り詰め gotchas (= cut -c/head -c/bash 部分文字列は byte 単位で多バイト文字を割り invalid UTF-8 → osascript 等下流で文字列全体が文字化け、 launchd は LANG 空で C locale ゆえ特に注意、 安全策=python 文字単位 truncate + valid UTF-8 検証 1-liner、 2026-06-24 osascript 通知 RCA)
+-->
+# シェルの多バイト文字 (UTF-8) 切り詰め gotchas
+
+**読むタイミング**: shell script で日本語等の**非 ASCII text を切り詰め / 部分抽出**する時 (= 通知本文・ログ・サマリの短縮、ファイル名生成 等)。または **macOS 通知 (osascript) や CLI 出力が文字化けして読めない**症状の診断時。
+
+## 原則: byte 単位の文字列操作は多バイト文字を割る
+
+UTF-8 では日本語 1 文字 = 3 バイト、絵文字 = 4 バイト。**byte 単位で切る操作は多バイト境界を無視して文字の途中で割り、invalid UTF-8 (壊れた byte 列) を生む。** 非 ASCII を含み得る text は**必ず文字単位で**切ること。
+
+### byte 単位で切ってしまう代表的な操作 (= 罠)
+
+| 操作 | 挙動 | 安全な代替 |
+|---|---|---|
+| `cut -c1-N` | **macOS / BSD は byte 単位** (GNU cut は UTF-8 locale なら文字単位だが、移植性のため依存しない) | `python3 -c 'import sys;sys.stdout.write(sys.stdin.read()[:N])'` |
+| `head -c N` / `dd bs=1 count=N` | 定義上 byte 単位 | 同上 (文字単位 truncate) |
+| `${var:0:N}` (bash 部分文字列) | locale が C/POSIX (= `LANG` 空) や bash 3.2 だと byte 単位 | python / perl、または `LC_ALL` を `*.UTF-8` に確実に設定 |
+| `awk 'substr(...)'` | BSD awk は多バイト非対応のことが多い | `python3` / `perl -CSD` |
+| `wc -m` (字数を数える) | locale が C/POSIX だと **byte を数える** (日本語は 1 字 3 byte = 約 3 倍に出る)。 Claude Code の Bash tool も `LANG`・`LC_ALL` が空 (下の節)。 実測: 投稿先の字数の上限に合わせて文面を削ったが、 数えていたのは byte で、 実際は上限の半分ほどだった = 削らなくてよい文を削った | `python3 -c 'import sys;print(len(open(sys.argv[1],encoding="utf-8").read()))' <file>` |
+
+⚠️ **launchd / cron から走る script は `LANG` が空 (= C locale) になりがち** (= user の shell profile を読まないため)。bash の `${var:0:N}` 等が byte 単位に落ちるので、daemon 系 script では特に文字単位の truncate を明示する。
+
+## amplifier: invalid UTF-8 は「末尾だけ」でなく「全体」を化けさせ得る
+
+切り詰めで末尾 1 文字を割っただけでも、その invalid UTF-8 を**下流が再 decode する時に文字列全体を別エンコーディングで解釈し直す**ことがあり、壊れるのは末尾だけでなく**文字列全体**になる。「末尾が少し欠けるだけ」と侮らない。
+
+**実例 (macOS osascript / 2026-06-24 RCA)**: 通知 daemon が finding 1 行を `cut -c1-80` で短縮 → 80 byte 目で日本語を割り invalid UTF-8 に → `osascript -e "display notification \"...\""` がその文字列を valid UTF-8 と認識できず**全体を別エンコーディング (MacRoman 等) で再解釈** → 通知**全体**が文字化けして読めなくなった。修正は `cut -c` → python の文字単位 truncate (= 常に valid UTF-8)。
+
+## 検証: 切り詰め結果が valid UTF-8 か
+
+切り詰めた text を osascript / 通知 / 別プロセスに渡す**前に**、valid UTF-8 か確認する習慣をつける (= 末尾 byte が中途半端な多バイト列なら INVALID):
+
+```bash
+printf '%s' "$truncated" | python3 -c "import sys
+try: sys.stdin.buffer.read().decode('utf-8'); print('VALID')
+except UnicodeDecodeError as e: print('INVALID', e)"
+```
+
+## <a id="bracket-expression-c-locale"></a>`grep` / `sed` の角括弧に非 ASCII を入れると、C locale では byte の集合になる (2026-09-13)
+
+`LANG` と `LC_ALL` が空の shell では、`[^。]` は「。」という 1 文字の否定ではなく、その UTF-8 表現の 3 byte (`E3 80 82`) それぞれの否定になる。ひらがな・カタカナの UTF-8 はどれも `E3` で始まるので、`[^。]*。` は最初の「。」に届く前の仮名で止まり、**一致しないのに error も出さない**。Claude Code の Bash tool も `LANG` と `LC_ALL` が空だった (desktop app、2026-09-13 実測)。
+
+- 実例: 挿入した一文を `/usr/bin/grep -o '…[^。]*。'` で表示してから commit する `&&` chain を書いた。表示が 0 件で exit 1 になって commit は走らず、`;` の後ろに置いた検査の出力だけが出た。同じ pattern は先頭に `LC_ALL=en_US.UTF-8` を付けると一致した。
+- 書き方: 非 ASCII を含む pattern は python で書くか、`LC_ALL=en_US.UTF-8` を明示する。表示のための grep を gate の chain に入れない ([shell-env.md#test-gate-no-pipe](shell-env.md#test-gate-no-pipe))。 bash の hook なら jq の `test` / `match` に寄せてもよい (jq の正規表現は UTF-8 を文字として読む)。
+- <a id="bash-tool-grep-differs-from-hook-grep"></a>⚠️ **Claude Code の Bash tool で pattern を試しても、 hook の中の grep の動きは再現しない** — Bash tool の `grep` は別の grep ([shell-env.md#bash-tool-grep-ignores-gitignore](shell-env.md#bash-tool-grep-ignores-gitignore)) で非 ASCII の角括弧を文字として読むが、 hook の bash script が呼ぶ `/usr/bin/grep` は byte で読む。 実測: hook の「語の直後 20 字に否定の語があるか」 の判定 `[^。]{0,20}` が、 Bash tool では文の終わりまで当たり、 hook の中では 0 字にしか当たらず否定の語を読み落とした。 hook の pattern は hook を起こす試験 (`.test.sh`) の中で確かめる
+- <a id="wildcard-window-counts-bytes"></a>同じ環境では `.` も 1 byte に一致する。 語と語の間の距離を限る窓 `.{0,30}` は 30 字でなく 30 byte (全角なら 10 字) になり、 離れた入力に**一致しないだけで error は出ない** (実測: 「30 字以内」 のつもりの hook の pattern が、 14 字離れた入力に一致しなかった)。 test も同じ環境で回るので、 距離の短い case だけだと通ってしまう = **窓の上限に近い距離の case を 1 つ入れ、 locale の指定を外した版でそれが赤くなることを見る**。 書き方は上と同じ (python で書くか、 その grep に `LC_ALL=en_US.UTF-8` を明示)。 窓の上限も別にある: macOS の `grep -E` は N が 255 を超えると `grep: maximum repetition exceeds 255` で止まる (実測) = 長い行の一部を見るなら python で slice する。
+
+## <a id="git-quoted-paths"></a>git が出す path は、 非 ASCII の file 名を引用符つき 8 進にする
+
+- `git log --name-only` / `git diff --name-only` / `git status` / `git ls-files` は、 既定 (`core.quotepath=true`) で**非 ASCII の file 名を `"docs/2_1_\346\265\267….xlsm"` の形**で出す = 先頭と末尾が `"`。
+- ∴ **出力行を `endswith(".xlsm")` や拡張子の正規表現で判定する検出器は、 日本語の file 名だけを黙って取りこぼす** (実測: 印刷済みの紙の鮮度検査が、 日本語名の様式の修正を見逃した。 ASCII 名の file は正しく出るので気づきにくい)。
+- 対策: `git -c core.quotepath=false …` で呼ぶ。 それでも `"` / `\` / 制御文字を含む名前は引用符で囲まれるので、 **引用符を外してから判定する** (実装例 = [`scripts/lib/staged_diff.py`](../scripts/lib/staged_diff.py) の path 取り出し)。 完全に曖昧さを消すなら `-z` (NUL 区切り、 引用しない) を使う。
+- 検出器の selftest が git の出力を偽の文字列で与えていると、 この取りこぼしは selftest を通る = 非 ASCII の file 名を 1 本含む実 repo で 1 回回す。
+
+## <a id="unbraced-var-before-multibyte"></a>変数の直後の全角文字は変数名に取り込まれる — 非 ASCII の直前は `${var}`
+
+`"$rpath、 直近 14 日"` のように変数の直後に空白なしで非 ASCII の文字を置くと、 UTF-8 の locale では shell がその文字 (の一部) を変数名の続きとして読む。
+
+- **bash (macOS 同梱の 3.2)**: 日本語の文字ならかな・漢字・句読点・全角括弧のどれでも、 UTF-8 表現の先頭 byte を変数名に取り込む。 `set -u` の script は `rpath�: unbound variable` で止まり、 `set -u` が無いと**値が黙って消えて**残りの byte が文字化けして出る
+- **zsh 5.9**: かな・漢字 (Unicode の文字) は変数名に取り込み (`$xを` は空)、 句読点・全角括弧 (`、` `）`) は取り込まない。 Claude Code の Bash tool は zsh なので、 Claude が発行するコマンドにも効く
+- **locale で出たり出なかったりする**: C locale (`LANG` / `LC_ALL` が空 = launchd や Bash tool の既定) ではどちらも正しく展開する。 UTF-8 の locale を渡す呼び出し元 (terminal・locale を持つ hook の実行環境) でだけ壊れるので、 **手元で通ったことは反証にならない** (実測: 検査 script が session 開始 hook から回ると落ち、 C locale では通った)
+- **書き方**: 変数の直後に非 ASCII の文字が来るときは必ず `${var}` と書く (`"… (${rpath}、 直近 14 日)"`)。 空白を挟めば起きない (`"$task_id を"` は安全) が、 句読点・括弧が直後に来る形は多い
+- **探し方**: 追跡中の shell script を byte 列として `(?<![\\'$])\$[A-Za-z_][A-Za-z0-9_]*[\xc0-\xff]` で走査する (コメント行は除く)。 実測では当たりは全件が本物だった。 **機械の検出** = [`scripts/check-unbraced-multibyte-var.py`](../scripts/check-unbraced-multibyte-var.py) (`--staged` = stage した shell script の足した行を見て違反で exit 1 を返す commit gate の段 / `--paths <file>...` / `--tree <dir>` = fleet の棚卸し。 1 行の中で閉じた単一引用符と引用符つき heredoc の本文の扱いを含む述語の正本 = その docstring)。 全 repo の pre-commit (pre-commit-bib と public stub) に `--staged` を配線済み = 足した行の違反は commit で止まる (escape hatch = `CLAUDE_UNBRACED_MB_VAR_GUARD=0`)
+- **新しい bash も同じ**: Homebrew の bash 5.3 (macOS) も UTF-8 の locale で先頭 byte を変数名に取り込み、 `set -u` なら落ちる (実測)。 `#!/usr/bin/env bash` が PATH の新しい bash を選んでも避けられない
+
+## <a id="python-word-boundary-cjk"></a>Python の `\b` は仮名・漢字を単語の文字と数える — 日本語の文の中の英字の語は英字の境界で探す
+
+Python の `re` は既定で Unicode を扱い、 `\w` に仮名・漢字が入る。 だから `\bwrap\b` は「wrap skill」「wrap させて」 には当たるが、 **仮名が続く「wrapして」 には当たらない** (`p` と `し` がどちらも単語の文字 = 境界が無い。 実測 = 子への依頼の message を語で拾う hook が、 この形を素通りした)。
+日本語の文の中で英字の語を探すときは、 前後が英字でないことだけを見る: `(?<![A-Za-z])wrap(?![A-Za-z])` (「unwrapped」 は外し、 「wrapして」「/wrap」 は拾う)。 `re.ASCII` を付けても同じ結果になるが、 同じ pattern の中の他の `\w` まで ASCII に変わる。
+数字・日付の前後を区切るときも同じ: `(?<![\w/\-])\d{1,2}/\d{1,2}(?![\w\-/])` は「締切3/4の朝」 の日付を拾わない (`切` も `の` も `\w`)。 path の中の日付だけを外したいなら、 境の class を英数字と記号で書く = `(?<![0-9A-Za-z_/\-])` (実測: 日本語の文字に隣接する日付を見落とした判定を、 この形に直した)。
+**語を消す側の正規表現も同じ**: 数字を含む id を散文から外すつもりの `\b\w*\d\w*\b` は、 日本語では語の間に空白が無いので、 数字を 1 つ含む 1 文をまるごと消す (仮名・漢字も `\w`)。 日本語の散文の中の語を判定するときは、 消す token を ASCII で始まる形に絞る = `[A-Za-z0-9~+_.-]*[A-Za-z0-9](?:[-./_@:#][\w~+-]+)+` (区切りの後ろの段には日本語の語も入る = path の中の日本語の dir 名も一緒に消える) (実測: 英語の比を量るための除外をそのまま日本語の語の判定に流用しかけ、 対象の語を含む 1 文が消えることに気づいた)。
+
+## <a id="nfd-file-names"></a>macOS の file 名は濁点が分かれていることがある — 日本語の語の grep の 0 件を信じない
+
+Dropbox や macOS から来た file 名は、 「ピ」 を「ヒ + 半濁点」 のように分けた形 (NFD) で持っていることがある。 手で打った語は合成した形 (NFC) なので、 見た目が同じでも byte が違い、 `ls | grep 'コピー'` は **error なしで 0 件**を返す (実測)。
+濁点・半濁点を含む語で file 名を探すときは、 濁点の無い部分の語で引くか、 python で揃えてから比べる: `unicodedata.normalize('NFC', name)`。 path を組み立てるときの形の違いは [`claude-code-permissions.md`](claude-code-permissions.md) の表にある。
+
+## <a id="python-splitlines-line-numbers"></a>Python の `splitlines()` は改頁の文字でも行を割る — `file:行` を出す道具は改行だけで数える
+
+`str.splitlines()` は `\n` のほかに `\r`・`\v`・`\f` (改頁)・`\x1c`〜`\x1e`・`\x85`・`U+2028`・`U+2029` でも行を割る。 file にこれらが 1 つでもあると、 それより後ろの行番号が grep・git・editor の数え方より大きくなり、 error は出ない (実測: 改頁の文字を含む台帳について報告した `file:行` がずれ、 別の session の照合で見つかった)。
+人や他の道具に渡す行番号は `text.split('\n')` で数える (file を `for i, line in enumerate(f, 1)` で読むのも `\n` で割る)。 食い違う文字があるかの確かめ = `len(s.split('\n')) != len(s.splitlines()) + s.endswith('\n')`。
+
+## <a id="pdf-text-micro-sign"></a>PDF から起こした文字列では μ が micro 記号 µ (U+00B5) になることがある — ギリシャ文字の語で探すときは両方を入れる
+
+組版された PDF の文字層 (PyMuPDF・pdftotext の出力) では、 ギリシャ文字の μ (U+03BC) が見た目の同じ micro 記号 µ (U+00B5) で出てくることがある。 μ だけの pattern (`[λμν]` など) は error なしで 0 件を返す (実測: PDF から起こした文字列の添字の µ を、 μ だけの pattern が拾わなかった)。
+PDF 由来の文字列をギリシャ文字の語で探すときは `[μµ]` と両方を書くか、 `unicodedata.normalize('NFKC', s)` で揃えてから比べる (NFKC は µ を μ に写す)。 角括弧に非 ASCII を書くときの locale の罠は上の [#bracket-expression-c-locale](#bracket-expression-c-locale)。
+
+## まとめ (reflex)
+
+- shell で非 ASCII を切る時は `cut -c` / `head -c` / byte slice を**使わない** → python の文字単位 truncate。
+- 切った結果を別プロセスに渡す前に valid UTF-8 を検証。 file に書くときも同じ = `cut -c` の出力で書いた記録・根拠の file は invalid UTF-8 のまま残り、 規則の守りの道具 (`manuscript-claim-guard.py`) が commit の前に読めず `inspection unavailable (file-unreadable …)` で止める (実測)。
+- daemon (launchd/cron) は `LANG` 空 = C locale 前提で組む。
+- `grep` / `sed` の `[...]` に非 ASCII を入れない (C locale では byte の集合)。Claude Code の Bash tool も `LANG` 空の前提で書く。
+- 変数の直後に非 ASCII の文字を置くときは `${var}` (UTF-8 の locale では文字が変数名に取り込まれる、 [#unbraced-var-before-multibyte](#unbraced-var-before-multibyte))。
+- 日本語の文の中で英字の語を Python の正規表現で探すときは `\b` を使わず `(?<![A-Za-z])語(?![A-Za-z])` ([#python-word-boundary-cjk](#python-word-boundary-cjk))。
+- macOS の file 名を濁点つきの語で grep して 0 件なら、 NFD を疑う ([#nfd-file-names](#nfd-file-names))。
+- 人や他の道具に渡す行番号は改行だけで数える (`splitlines()` は改頁の文字でも割る、 [#python-splitlines-line-numbers](#python-splitlines-line-numbers))。
+- PDF 由来の文字列を μ で探すときは micro 記号 µ も入れる ([#pdf-text-micro-sign](#pdf-text-micro-sign))。
+
+## <a id="prose-args-quoting"></a>自然文を CLI 引数で渡すときの quoting — backtick は double quote の中で消える (2026-09)
+
+長い自然文 (投稿の summary・commit message・issue 本文) を shell 経由で渡すとき、**double quote の中では `` `…` `` と `$…` と (対話 shell の) `!` が展開される**。`` `2026-09-07-foo` `` のような ID を強調のつもりで書くと、shell がそれを command として実行し (「command not found」)、引数からは**空文字**になって届く。届いた側では「thread 名が消えている」以外に痕跡が無い。
+
+- **規律**: 自然文の引数は **single quote** で囲む (single quote の中は一切展開されない)。文中に `'` が要るなら heredoc (`<<'EOF'`) か file 経由で渡す。
+- **痕跡**: 消えた token の場所には空の backtick 対 ` `` ` が残る。受け側の tool は**この指紋を拒否**して「引用符を直して再送」と言える (= 記録が immutable な board で事故を止めた実例、agent-board の writer gate)。
+- **痕跡が残らない形もある** (2026-09-13 実測、zsh): double quote の中の `` `x` `` は backtick ごと消えて空白だけが残り、`` ``x`` `` は中身だけが残る。どちらも空の backtick の対は残らないので、指紋で拒否する受け側もこの形は捕まえない。同日、commit message に書いた `` `~` `` が home dir の実行に化けて消え、`permission denied` が 1 行出ただけで commit と push は通った (履歴には「latex.md:  の無い」 が残った)。**再発 2 件目**。3 件目が出たら、`git commit -m` などの double quote の引数に backtick があれば止める PreToolUse guard を足す (校正の道具 = [`scripts/calibrate-bash-command-pattern.py`](../scripts/calibrate-bash-command-pattern.py))。それまでは commit message を `-F <file>` で渡す。
+- 関連: 文面を user が貼る側の規律は [`paste-destined-plain-text.md`](paste-destined-plain-text.md)、tool 入力に書いた文は user に見えていない = [`mid-turn-text-visibility.md`](mid-turn-text-visibility.md)。
+

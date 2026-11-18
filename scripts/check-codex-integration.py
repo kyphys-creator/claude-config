@@ -1,0 +1,1023 @@
+#!/usr/bin/env python3
+"""check-codex-integration.py — Codex SoT, session drift, Hook, and trigger-wiring gate.
+
+The durable technical source of truth is codex/PARITY.md#codex-integration-sot.
+This checker deliberately verifies only objective invariants:
+
+* every Codex-facing entry point routes to that source;
+* SESSION.md does not reintroduce durable implementation details
+  (scoped to paragraphs that mention Codex — the token vocabulary
+  overlaps Claude-side hook work, which is legitimate in SESSION.md);
+* known superseded capability claims do not return;
+* the shipped Hooks configuration names the expected local adapters.
+* repository/template entry points retain the root AGENTS.md discovery contract;
+* the external-browser recovery application retains pointers to the shared
+  state-transition source of truth and official browser-profile contract;
+* the aggregate runner, CI, and pre-commit warning keep the contract and
+  adapter tests wired to an automatic trigger.
+
+It cannot decide whether arbitrary prose expresses the same idea as the
+source of truth. That remains a review concern; keeping secondary documents
+as thin pointers makes that semantic surface small.
+
+Usage:
+  check-codex-integration.py [--root PATH] [--check]
+  check-codex-integration.py --selftest
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+
+CANONICAL_POINTER = "codex/PARITY.md#codex-integration-sot"
+ENTRY_POINTS = (
+    "AGENTS.md",
+    "README.md",
+    "README.ja.md",
+    "SESSION.md",
+    "DESIGN.md",
+    "codex/HOME-AGENTS.md",
+    "codex/AGENTS.md",
+    "codex/skills/claude-config-conventions/SKILL.md",
+    "codex/skills/claude-config-operations/SKILL.md",
+    "codex/skills/codex-automation-routing/SKILL.md",
+    "templates/personal-layer/README.md",
+)
+INSTRUCTION_ENTRYPOINT_MAX_BYTES = {
+    "AGENTS.md": 4096,
+    "codex/HOME-AGENTS.md": 4096,
+    "codex/AGENTS.md": 2048,
+    "templates/shared-project/AGENTS.md.template": 2048,
+    "templates/personal-layer/codex/AGENTS.md.template": 2048,
+    "templates/personal-layer/AGENTS.md.template": 2048,
+}
+SESSION_HANDOFF_REQUIREMENTS = {
+    "CONVENTIONS.md": ("codex/PARITY.md#session-handoff-contract",),
+    "codex/AGENTS.md": ("CONVENTIONS.md#auto-update-protocol", "CONVENTIONS.md#session-no-durable-record"),
+    "codex/skills/claude-config-operations/SKILL.md": ("CONVENTIONS.md#auto-update-protocol", "codex/PARITY.md#session-handoff-contract"),
+    "codex/skills/claude-config-conventions/SKILL.md": ("CONVENTIONS.md#auto-update-protocol", "codex/PARITY.md#session-handoff-contract"),
+    "codex/HOME-AGENTS.md": ("CONVENTIONS.md#auto-update-protocol", "CONVENTIONS.md#session-no-durable-record"),
+    "codex/hooks/resume_context.py": ("CONVENTIONS.md#auto-update-protocol",),
+    "codex/PARITY.md": ('id="session-handoff-contract"',),
+}
+COMPLETION_GATE_REQUIREMENTS = {
+    "CONVENTIONS.md": (
+        'id="completion-git-gate"',
+        "実装 + 検証 + commit + push + remote 照合",
+        "git status --porcelain",
+        "live remote ref",
+        "同じ command chain",
+        "commit / push しない正当な例外",
+        "codex/PARITY.md#completion-git-gate-hook",
+        "docs/convention-design-principles.md#completion-boundary-state-gate",
+    ),
+    "docs/convention-design-principles.md": (
+        'id="completion-boundary-state-gate"',
+        "完了報告の直前を独立した stage boundary",
+        "状態ベクトル",
+        "CONVENTIONS.md#completion-git-gate",
+        "codex/PARITY.md#completion-git-gate-hook",
+    ),
+    "README.md": (
+        "CONVENTIONS.md#completion-git-gate",
+        "codex/PARITY.md#completion-git-gate-hook",
+    ),
+    "README.ja.md": (
+        "CONVENTIONS.md#completion-git-gate",
+        "codex/PARITY.md#completion-git-gate-hook",
+    ),
+    "DESIGN.md": (
+        'id="completion-gate-firing-resolution"',
+        "entry / event / blocking surface / state predicate",
+        "docs/convention-design-principles.md#completion-boundary-state-gate",
+        "codex/PARITY.md#completion-git-gate-hook",
+    ),
+    "codex/HOME-AGENTS.md": (
+        "CONVENTIONS.md#completion-git-gate",
+        "Before reporting an authorized change complete",
+    ),
+    "codex/AGENTS.md": (
+        "CONVENTIONS.md#completion-git-gate",
+        "Before reporting a change complete",
+    ),
+    "codex/skills/claude-config-conventions/SKILL.md": (
+        "CONVENTIONS.md#completion-git-gate",
+        "codex/PARITY.md#completion-git-gate-hook",
+    ),
+    "codex/skills/claude-config-operations/SKILL.md": (
+        "CONVENTIONS.md#completion-git-gate",
+        "dirty/ahead/behind",
+    ),
+    "codex/PARITY.md": (
+        'id="completion-git-gate-hook"',
+        "git ls-remote",
+        '`{"decision":"block","reason":"..."}`',
+        "stop_hook_active",
+        "commit-only/ahead completion",
+        "Completion-state baseline, live-remote comparison",
+        "blocks one turn-end continuation",
+        "https://learn.chatgpt.com/docs/hooks",
+    ),
+    "codex/hooks/session_touch.py": (
+        "CONVENTIONS.md#completion-git-gate",
+        '"ls-remote"',
+        '"decision": "block"',
+        "commit_without_push",
+    ),
+    "scripts/audit-codex-integration.sh": (
+        "Codex completion Git gate",
+        "PreToolUse baseline + blocking Stop + live remote head",
+    ),
+}
+
+SESSION_DURABLE_TOKENS = (
+    "~/.codex",
+    "PreToolUse",
+    "PostToolUse",
+    "SessionStart",
+    "approval_policy",
+    "sandbox_mode",
+    "hooks.json",
+    "Agent-Session",
+    "Agent-Model",
+    "Agent-Effort",
+    "--repo-root",
+    "auto_compact_token_limit",
+    "compaction threshold",
+)
+SUPERSEDED_CLAIMS = (
+    "Codex currently has no supported equivalent to Claude Code's per-tool",
+    "Codex does not have Claude Code's equivalent per-tool event-hook mechanism",
+    "same target is effectively free",
+    "同じ目標は実質無料",
+    "reports unintended dirty worktree state at turn end",
+)
+HOOK_ADAPTERS = {
+    "SessionStart": ("resume_context.py", "session_provenance.py"),
+    "UserPromptSubmit": ("session_provenance.py", "first_prompt_stamp.py"),
+    "PreToolUse": ("pre_tool_policy.py", "session_provenance.py", "session_touch.py"),
+    "PostToolUse": ("session_touch.py",),
+    "Stop": ("session_touch.py", "first_turn_stamp_check.py"),
+}
+WIRING_REQUIREMENTS = {
+    "scripts/run-all-checks.sh": (
+        "check-codex-integration.py --check",
+        "codex/hooks/*.test.sh",
+    ),
+    ".github/workflows/checks.yml": ("bash scripts/run-all-checks.sh",),
+    ".claude/pre-commit-extra.sh": ("check-codex-integration.py --check",),
+}
+PROJECT_ENTRYPOINT_REQUIREMENTS = {
+    "AGENTS.md": (
+        "CLAUDE.md",
+        "SESSION.md",
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+    ),
+    "CONVENTIONS.md": (
+        'id="agent-instruction-entrypoints"',
+        "templates/shared-project/AGENTS.md.template",
+        "audit-codex-integration.sh --repo",
+    ),
+    "conventions/shared-repo.md": (
+        'id="agent-entrypoint"',
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+        "codex/PARITY.md#project-instruction-discovery",
+    ),
+    "codex/PARITY.md": (
+        'id="project-instruction-discovery"',
+        "https://learn.chatgpt.com/docs/agent-configuration/agents-md",
+        "project_doc_fallback_filenames",
+        "once per run",
+    ),
+    "codex/HOME-AGENTS.md": (
+        "repository-root",
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+        "codex/PARITY.md#project-instruction-discovery",
+        "read that nested root `AGENTS.md` manually",
+    ),
+    "codex/AGENTS.md": (
+        "repository-root `AGENTS.md` first",
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+        "codex/PARITY.md#project-instruction-discovery",
+    ),
+    "codex/hooks/resume_context.py": (
+        "repository-root AGENTS.md first",
+        "nested root",
+        "startup chain",
+    ),
+    "templates/shared-project/AGENTS.md.template": (
+        "CLAUDE.md",
+        "SESSION.md",
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+        "codex/PARITY.md#instruction-entrypoint-kernel",
+    ),
+    "templates/shared-project/README.md": ("AGENTS.md.template",),
+    "templates/personal-layer/AGENTS.md.template": (
+        "CLAUDE.md",
+        "SESSION.md",
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+        "codex/PARITY.md#instruction-entrypoint-kernel",
+    ),
+    "setup.sh": ("templates/personal-layer/AGENTS.md.template",),
+    "templates/shared-project/AUDIT.md.template": (
+        "root `AGENTS.md`",
+        "`CLAUDE.md` と `SESSION.md`",
+    ),
+    "scripts/audit-codex-integration.sh": (
+        "tracked thin root AGENTS.md",
+        "CONVENTIONS.md#agent-instruction-entrypoints",
+        "codex/PARITY.md#instruction-entrypoint-kernel",
+        "PROJECT_AGENTS_MAX_BYTES=4096",
+    ),
+}
+PERSONAL_OVERLAY_REQUIREMENTS = {
+    "codex/PARITY.md": (
+        "--personal-layer <path>",
+        "<path>/codex/AGENTS.md",
+        "post-merge.d",
+        'id="instruction-entrypoint-kernel"',
+    ),
+    "scripts/setup-codex.sh": (
+        "--personal-layer",
+        "--refresh-personal-layer",
+        "global-personal-composite",
+        "PERSONAL_AGENTS_MAX_BYTES=4096",
+    ),
+    "scripts/audit-codex-integration.sh": (
+        "global-personal-composite",
+        "personal-layer pull refresh",
+    ),
+    "templates/personal-layer/codex/AGENTS.md.template": (
+        "Personal Codex routing overlay",
+        "Personal-source routing",
+        "codex/PARITY.md#instruction-entrypoint-kernel",
+    ),
+}
+GIT_PUSH_RULE_REQUIREMENTS = {
+    "codex/PARITY.md": (
+        'id="normal-git-push-rule"',
+        "https://learn.chatgpt.com/docs/agent-configuration/rules",
+        "scripts/setup-codex-git-push.py",
+        "git push origin main",
+        "git push origin master",
+        "git push origin HEAD:main",
+        "git push origin HEAD:master",
+        "default.rules",
+        "superseded derived wiring",
+    ),
+    "README.md": (
+        "scripts/setup-codex-git-push.py --install",
+        "codex/PARITY.md#normal-git-push-rule",
+        "git push origin HEAD:main",
+        "git push origin HEAD:master",
+    ),
+    "README.ja.md": (
+        "scripts/setup-codex-git-push.py --install",
+        "codex/PARITY.md#normal-git-push-rule",
+        "git push origin HEAD:main",
+        "git push origin HEAD:master",
+    ),
+    "scripts/setup-codex-git-push.py": (
+        'decision = "allow"',
+        'decision = "prompt"',
+        '"--delete"',
+        '"--tags"',
+        "execpolicy",
+        "RULE_NAME = \"claude-config-git-push.rules\"",
+        '"HEAD:main"',
+        '"HEAD:master"',
+        '"HEAD:refs/heads/main"',
+        "LEGACY_DEFAULT_RULE_LINES",
+        "default.rules",
+        "superseded push rules",
+    ),
+    "scripts/audit-codex-integration.sh": (
+        "setup-codex-git-push.py",
+        "prompt-free normal Git push rule",
+    ),
+}
+CONTEXT_BUDGET_REQUIREMENTS = {
+    "codex/PARITY.md": (
+        "## Context-budget discipline",
+        "does not set\na compaction threshold",
+        "Runtime diagnostics are layer-4 observations",
+        'id="context-capacity-diagnosis"',
+        "advertised model/API capacity",
+        "billing or credit policy",
+        "An API pricing cutoff",
+        "carried-over compaction-window prefix",
+        "marginal A/B runs",
+        "A clean numerical ratio is a hypothesis",
+    ),
+    "codex/HOME-AGENTS.md": (
+        "Keep global startup context compact.",
+        "on-demand sources",
+    ),
+    "docs/convention-design-principles.md": (
+        'id="context-capacity-evidence-layers"',
+        "model / API advertised capacity",
+        "billing / credit policy",
+        "product-owned prefix",
+        "retained useful context",
+    ),
+    "README.md": ("context-capacity-evidence-layers", "billing or credit policy"),
+    "README.ja.md": ("context-capacity-evidence-layers", "課金・credit"),
+}
+EXTERNAL_BROWSER_RECOVERY_REQUIREMENTS = {
+    "docs/convention-design-principles.md": (
+        'id="recovery-state-transition"',
+        "absent / stopped",
+        "present + healthy",
+        "present + transport/control-plane failure",
+        "present + wrong context/profile/session",
+        "unknown / probe failure",
+        "debugging-discipline.md#recovery-state-dispatch",
+        "codex/PARITY.md#external-browser-lifecycle",
+    ),
+    "conventions/debugging-discipline.md": (
+        'id="recovery-state-dispatch"',
+        "docs/convention-design-principles.md#recovery-state-transition",
+        "launch は recovery の同義語ではない",
+        "process-list probe",
+        "live config / process argv",
+        "codex/PARITY.md#external-browser-lifecycle",
+    ),
+    "codex/PARITY.md": (
+        'id="external-browser-lifecycle"',
+        "https://learn.chatgpt.com/docs/chrome-extension",
+        "docs/convention-design-principles.md#recovery-state-transition",
+        "conventions/debugging-discipline.md#recovery-state-dispatch",
+        "do not force a parallel process over the same",
+        "Chromium `SingletonLock` PID",
+        "live\ntrusted-service configuration",
+        "patch a vendor cache.",
+    ),
+}
+MACHINE_PROVENANCE_REQUIREMENTS = {
+    "codex/PARITY.md": (
+        'id="machine-local-provenance"',
+        'id="conversation-start-stamp"',
+        "Codex <surface|surface unknown>",
+        "account unknown",
+        "session_stamp.py",
+        "A session title, a prior message, or an audit/report from another\nhost is an observation",
+        "verify it locally with `hostname`",
+    ),
+    "codex/HOME-AGENTS.md": (
+        "## Context and machine-local truth",
+        "### Session identity stamp",
+        "literal product\nidentity `Codex`",
+        "session_stamp.py",
+        "verify the current host with `hostname`",
+        "never infer it from a title, transcript, or another\nhost's report",
+    ),
+}
+AUTOMATION_ROUTING_REQUIREMENTS = {
+    "codex/PARITY.md": (
+        'id="native-automation-routing"',
+        "Heartbeat attached to the current task",
+        "Standalone cron automation",
+        "ChatGPT Web/Mobile event trigger",
+        "Deduplicate first.",
+        "Creation-state and schedule semantics",
+        "automation identifier and active",
+        "Composer\navailability proves",
+    ),
+    "codex/skills/codex-automation-routing/SKILL.md": (
+        "#native-automation-routing",
+        "same-task heartbeat",
+        "automation definitions before creating one",
+        "do not expose raw recurrence syntax",
+        "suggestion card as proposed, not active",
+        "destination-side object or receipt",
+    ),
+    "docs/convention-design-principles.md": (
+        'id="automation-trigger-routing"',
+        'id="activation-evidence-ladder"',
+        "操作可能性と対象の存在状態を分ける",
+    ),
+    "README.md": ("codex/PARITY.md#native-automation-routing",),
+    "README.ja.md": ("codex/PARITY.md#native-automation-routing",),
+    "scripts/setup-codex.sh": ("codex-automation-routing",),
+    "scripts/audit-codex-integration.sh": ("codex-automation-routing",),
+}
+SESSION_PROVENANCE_REQUIREMENTS = {
+    "codex/PARITY.md": (
+        'id="git-session-provenance"',
+        "Agent-Session",
+        "Agent-Model",
+        "Agent-Effort",
+        "--repo-root",
+        "post-resolution-scope-revalidation",
+        "required-field-fabrication",
+        'id="session-provenance-implementation"',
+        "hooks.json",
+        "session_provenance_cache.py",
+        "session_provenance.py",
+        "session_stamp.py",
+        "resume_context.py",
+        "prepare-commit-msg-session.sh",
+        "install-session-trailer.sh",
+        "setup-codex.sh",
+        "audit-codex-integration.sh",
+        "check-codex-integration.py",
+        "codex-hooks.test.sh",
+        "prepare-commit-msg-session.test.sh",
+        "setup-codex.test.sh",
+        "run-all-checks.sh",
+        "https://learn.chatgpt.com/docs/hooks",
+    ),
+    "codex/HOME-AGENTS.md": ("Agent-Session", "codex/PARITY.md#git-session-provenance"),
+    "scripts/setup-codex.sh": ("--repo-root", "install-session-trailer.sh"),
+    "scripts/audit-codex-integration.sh": ("Agent-Session prepare-commit-msg hook",),
+    "scripts/prepare-commit-msg-session.sh": (
+        "CODEX_SESSION_ID",
+        "Agent-Model",
+        "Agent-Effort",
+        "session_provenance_cache.py",
+        "--resolve-codex",
+        "writing Agent-Model: unknown",
+    ),
+    "scripts/session_provenance_cache.py": (
+        "resolve_codex_metadata",
+        "codex_thread_metadata",
+        "PRAGMA query_only",
+    ),
+    "codex/hooks/resume_context.py": (
+        "build_stamp",
+        "resolve_codex_metadata",
+        "first user-visible reply",
+    ),
+    "codex/hooks/session_stamp.py": (
+        "Codex",
+        "resolve_codex_metadata",
+        "account unknown",
+        "surface unknown",
+        "CODEX_SESSION_ID",
+    ),
+    "setup.sh": ("session-start-provenance.py",),
+}
+
+
+def text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {path}: {exc}") from exc
+
+
+def hook_commands(payload: object, event_name: str) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    groups = hooks.get(event_name)
+    if not isinstance(groups, list):
+        return []
+    commands: list[str] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        adapters = group.get("hooks")
+        if not isinstance(adapters, list):
+            continue
+        for adapter in adapters:
+            if isinstance(adapter, dict) and isinstance(adapter.get("command"), str):
+                commands.append(adapter["command"])
+    return commands
+
+
+def check(root: Path) -> list[str]:
+    errors: list[str] = []
+    parity = root / "codex/PARITY.md"
+    try:
+        parity_text = text(parity)
+    except RuntimeError as exc:
+        return [str(exc)]
+    if 'id="codex-integration-sot"' not in parity_text:
+        errors.append("codex/PARITY.md: missing canonical codex-integration-sot anchor")
+
+    for relative in ENTRY_POINTS:
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        if CANONICAL_POINTER not in content:
+            errors.append(f"{relative}: missing pointer to {CANONICAL_POINTER}")
+        for stale in SUPERSEDED_CLAIMS:
+            if stale in content:
+                errors.append(f"{relative}: superseded capability claim is present")
+
+    for relative, maximum in INSTRUCTION_ENTRYPOINT_MAX_BYTES.items():
+        try:
+            size = len(text(root / relative).encode("utf-8"))
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        if size > maximum:
+            errors.append(
+                f"{relative}: instruction entry point is {size} bytes; "
+                f"maximum is {maximum}; keep trigger-and-pointer stubs only"
+            )
+
+    for stale in SUPERSEDED_CLAIMS:
+        if stale in parity_text:
+            errors.append("codex/PARITY.md: superseded capability claim is present")
+
+    try:
+        session = text(root / "SESSION.md")
+    except RuntimeError:
+        session = ""
+    # Scope the durable-detail scan to "## " entries that mention Codex: the
+    # token vocabulary (PreToolUse, SessionStart, ...) is shared with Claude
+    # Code's own hook system, and Claude-side hook work is a legitimate SESSION
+    # topic. Entry granularity (not paragraph) so a Codex heading covers its
+    # whole body even when the body itself doesn't repeat the word.
+    # A "## " section whose heading mentions Codex is scanned whole. Under any other heading
+    # (e.g. one dated index of "- " bullets covering many topics), scan only the bullets that
+    # mention Codex, so a Codex bullet elsewhere in the index does not turn a Claude-side hook
+    # bullet next to it into a violation.
+    codex_sections = []
+    for section in ("\n" + session).split("\n## "):
+        heading = section.split("\n", 1)[0]
+        if "codex" in heading.lower():
+            codex_sections.append(section)
+            continue
+        codex_sections.extend(b for b in ("\n" + section).split("\n- ") if "codex" in b.lower())
+    for token in SESSION_DURABLE_TOKENS:
+        if any(token in section for section in codex_sections):
+            errors.append(f"SESSION.md: durable Codex implementation detail must live in {CANONICAL_POINTER}: {token}")
+
+    config = root / "codex/hooks/hooks.json"
+    try:
+        hook_config = json.loads(text(config))
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        errors.append(f"{config.relative_to(root)}: invalid JSON: {exc}")
+    else:
+        for event_name, adapters in HOOK_ADAPTERS.items():
+            commands = hook_commands(hook_config, event_name)
+            for adapter in adapters:
+                if not any(adapter in command for command in commands):
+                    errors.append(f"codex/hooks/hooks.json: {event_name} does not invoke {adapter}")
+
+    for relative, fragments in SESSION_HANDOFF_REQUIREMENTS.items():
+        try:
+            content = text(root / relative)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing session handoff wiring: {fragment}")
+
+    for relative, fragments in COMPLETION_GATE_REQUIREMENTS.items():
+        try:
+            content = text(root / relative)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing completion-gate wiring: {fragment}")
+
+    for relative, fragments in WIRING_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing Codex integration wiring: {fragment}")
+    for relative, fragments in PROJECT_ENTRYPOINT_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing project-entrypoint contract: {fragment}")
+    for relative, fragments in PERSONAL_OVERLAY_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing personal-overlay contract: {fragment}")
+    for relative, fragments in GIT_PUSH_RULE_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing normal-git-push rule wiring: {fragment}")
+    for relative, fragments in CONTEXT_BUDGET_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing context-budget contract: {fragment}")
+    for relative, fragments in EXTERNAL_BROWSER_RECOVERY_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing external-browser recovery contract: {fragment}")
+    for relative, fragments in MACHINE_PROVENANCE_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing machine-provenance contract: {fragment}")
+    for relative, fragments in AUTOMATION_ROUTING_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing automation-routing contract: {fragment}")
+    for relative, fragments in SESSION_PROVENANCE_REQUIREMENTS.items():
+        path = root / relative
+        try:
+            content = text(path)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
+        for fragment in fragments:
+            if fragment not in content:
+                errors.append(f"{relative}: missing session-provenance contract: {fragment}")
+    return errors
+
+
+def print_errors(errors: Iterable[str]) -> int:
+    errors = list(errors)
+    if not errors:
+        print("Codex integration contract: OK")
+        return 0
+    for error in errors:
+        print(f"ERROR: {error}")
+    return 1
+
+
+def fixture(root: Path) -> None:
+    for relative in ENTRY_POINTS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(CANONICAL_POINTER + chr(10), encoding="utf-8")
+    parity = root / "codex/PARITY.md"
+    parity.write_text('<a id="codex-integration-sot"></a>' + chr(10), encoding="utf-8")
+    hook_config = root / "codex/hooks/hooks.json"
+    hook_config.parent.mkdir(parents=True, exist_ok=True)
+    hooks = {
+        name: [{"hooks": [{"command": f"python3 {adapter}"} for adapter in adapters]}]
+        for name, adapters in HOOK_ADAPTERS.items()
+    }
+    hook_config.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+    for relative, fragments in WIRING_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in PROJECT_ENTRYPOINT_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in PERSONAL_OVERLAY_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in GIT_PUSH_RULE_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in CONTEXT_BUDGET_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in EXTERNAL_BROWSER_RECOVERY_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in MACHINE_PROVENANCE_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in AUTOMATION_ROUTING_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+    for relative, fragments in SESSION_PROVENANCE_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+
+
+    for relative, fragments in SESSION_HANDOFF_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+
+    for relative, fragments in COMPLETION_GATE_REQUIREMENTS.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(existing + "\n".join(fragments) + "\n", encoding="utf-8")
+
+
+def selftest() -> int:
+    with tempfile.TemporaryDirectory(prefix="check-codex-integration-") as temporary:
+        root = Path(temporary)
+        fixture(root)
+        clean_errors = check(root)
+        if clean_errors:
+            print("FAIL: clean fixture", clean_errors)
+            return 1
+
+        for relative in SESSION_HANDOFF_REQUIREMENTS:
+            fixture(root)
+            path = root / relative
+            fragment = SESSION_HANDOFF_REQUIREMENTS[relative][0]
+            path.write_text(path.read_text().replace(fragment, "removed-handoff-pointer"))
+            if not any("missing session handoff wiring" in error for error in check(root)):
+                print("FAIL: missing handoff wiring was not detected", relative)
+                return 1
+        fixture(root)
+
+        completion_path = root / "codex/HOME-AGENTS.md"
+        completion_fragment = COMPLETION_GATE_REQUIREMENTS["codex/HOME-AGENTS.md"][0]
+        completion_path.write_text(
+            completion_path.read_text().replace(completion_fragment, "removed-completion-gate-pointer")
+        )
+        if not any("missing completion-gate wiring" in error for error in check(root)):
+            print("FAIL: missing completion-gate wiring was not detected")
+            return 1
+        fixture(root)
+
+        (root / "templates/shared-project/AGENTS.md.template").write_text(
+            "CLAUDE.md\nSESSION.md\n", encoding="utf-8"
+        )
+        errors = check(root)
+        if not any("missing project-entrypoint contract" in error for error in errors):
+            print("FAIL: missing project-entrypoint wiring was not detected")
+            return 1
+
+        fixture(root)
+
+        (root / "README.md").write_text("missing pointer" + chr(10), encoding="utf-8")
+        errors = check(root)
+        if not any(error.startswith("README.md: missing pointer") for error in errors):
+            print("FAIL: missing README pointer was not detected")
+            return 1
+
+        fixture(root)
+        (root / "SESSION.md").write_text(
+            CANONICAL_POINTER + chr(10) + "approval_policy" + chr(10),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any(error.startswith("SESSION.md: durable") for error in errors):
+            print("FAIL: durable SESSION detail was not detected")
+            return 1
+
+        fixture(root)
+        (root / "SESSION.md").write_text(
+            CANONICAL_POINTER
+            + chr(10) * 2
+            + "## Claude hook maintenance"
+            + chr(10) * 2
+            + "Refined the PreToolUse nudge and the hooks.json-free settings merge."
+            + chr(10),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if any(error.startswith("SESSION.md: durable") for error in errors):
+            print("FAIL: Claude-side hook vocabulary outside a Codex entry was flagged")
+            return 1
+
+        fixture(root)
+        (root / "SESSION.md").write_text(
+            CANONICAL_POINTER
+            + chr(10) * 2
+            + "## Recent index"
+            + chr(10)
+            + "- Codex instruction entrypoint trimmed to a pointer kernel"
+            + chr(10)
+            + "- Claude SessionStart injection folded into one block"
+            + chr(10),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if any(error.startswith("SESSION.md: durable") for error in errors):
+            print("FAIL: a Claude-side bullet next to a Codex bullet in one index section was flagged")
+            return 1
+        (root / "SESSION.md").write_text(
+            CANONICAL_POINTER
+            + chr(10) * 2
+            + "## Recent index"
+            + chr(10)
+            + "- Codex: set approval_policy in the local config"
+            + chr(10),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any(error.startswith("SESSION.md: durable") for error in errors):
+            print("FAIL: durable detail in a Codex bullet of an index section was not detected")
+            return 1
+
+        fixture(root)
+        (root / "SESSION.md").write_text(
+            CANONICAL_POINTER
+            + chr(10) * 2
+            + "## Codex integration status"
+            + chr(10) * 2
+            + "Set approval_policy in the local config."
+            + chr(10),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any(error.startswith("SESSION.md: durable") for error in errors):
+            print("FAIL: durable detail in a Codex entry body was not detected")
+            return 1
+
+        fixture(root)
+        (root / "codex/AGENTS.md").write_text(
+            CANONICAL_POINTER + chr(10) + SUPERSEDED_CLAIMS[0] + chr(10),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any(error.startswith("codex/AGENTS.md: superseded") for error in errors):
+            print("FAIL: superseded capability claim was not detected")
+            return 1
+
+        fixture(root)
+        hook_path = root / "codex/hooks/hooks.json"
+        hook_path.write_text('{"hooks": {"Stop": []}}', encoding="utf-8")
+        errors = check(root)
+        if not any("SessionStart does not invoke" in error for error in errors):
+            print("FAIL: missing Hook adapter was not detected")
+            return 1
+
+        fixture(root)
+        (root / ".github/workflows/checks.yml").write_text("name: checks\n", encoding="utf-8")
+        errors = check(root)
+        if not any(error.startswith(".github/workflows/checks.yml: missing Codex integration wiring") for error in errors):
+            print("FAIL: missing CI wiring was not detected")
+            return 1
+
+        fixture(root)
+        (root / "scripts/setup-codex.sh").write_text(
+            "\n".join(PERSONAL_OVERLAY_REQUIREMENTS["scripts/setup-codex.sh"][:-1]) + "\n",
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any(error.startswith("scripts/setup-codex.sh: missing personal-overlay") for error in errors):
+            print("FAIL: missing personal-overlay wiring was not detected")
+            return 1
+
+        fixture(root)
+        push_rule_path = root / "scripts/setup-codex-git-push.py"
+        push_rule_path.write_text(
+            push_rule_path.read_text(encoding="utf-8").replace(
+                'decision = "allow"', 'decision = "removed"'
+            ),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any("missing normal-git-push rule wiring" in error for error in errors):
+            print("FAIL: missing normal-git-push rule wiring was not detected")
+            return 1
+
+        fixture(root)
+        push_rule_path = root / "scripts/setup-codex-git-push.py"
+        push_rule_path.write_text(
+            push_rule_path.read_text(encoding="utf-8").replace(
+                "HEAD:main", "HEAD:detached-default"
+            ),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any("missing normal-git-push rule wiring" in error for error in errors):
+            print("FAIL: missing detached-HEAD push coverage was not detected")
+            return 1
+
+        fixture(root)
+        push_rule_path = root / "scripts/setup-codex-git-push.py"
+        push_rule_path.write_text(
+            push_rule_path.read_text(encoding="utf-8").replace(
+                "LEGACY_DEFAULT_RULE_LINES", "REMOVED_LEGACY_RULE_MIGRATION"
+            ),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any("missing normal-git-push rule wiring" in error for error in errors):
+            print("FAIL: missing legacy-rule migration was not detected")
+            return 1
+
+        fixture(root)
+        (root / "codex/HOME-AGENTS.md").write_text(
+            CANONICAL_POINTER + chr(10), encoding="utf-8"
+        )
+        errors = check(root)
+        if not any(error.startswith("codex/HOME-AGENTS.md: missing context-budget") for error in errors):
+            print("FAIL: missing context-budget contract was not detected")
+            return 1
+
+        fixture(root)
+        browser_recovery_path = root / "codex/PARITY.md"
+        browser_recovery_path.write_text(
+            browser_recovery_path.read_text(encoding="utf-8").replace(
+                'id="external-browser-lifecycle"', 'id="removed-browser-lifecycle"'
+            ),
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any("missing external-browser recovery contract" in error for error in errors):
+            print("FAIL: missing external-browser recovery contract was not detected")
+            return 1
+
+        fixture(root)
+        (root / "codex/HOME-AGENTS.md").write_text(
+            CANONICAL_POINTER + chr(10), encoding="utf-8"
+        )
+        errors = check(root)
+        if not any(error.startswith("codex/HOME-AGENTS.md: missing machine-provenance") for error in errors):
+            print("FAIL: missing machine-provenance contract was not detected")
+            return 1
+
+        fixture(root)
+        oversized_path = root / "codex/HOME-AGENTS.md"
+        oversized_path.write_text(
+            oversized_path.read_text(encoding="utf-8") + "x" * 4097,
+            encoding="utf-8",
+        )
+        errors = check(root)
+        if not any("instruction entry point is" in error for error in errors):
+            print("FAIL: oversized instruction entry point was not detected")
+            return 1
+
+        fixture(root)
+        (root / "codex/skills/codex-automation-routing/SKILL.md").write_text(
+            CANONICAL_POINTER + chr(10), encoding="utf-8"
+        )
+        errors = check(root)
+        if not any(error.startswith("codex/skills/codex-automation-routing/SKILL.md: missing automation-routing") for error in errors):
+            print("FAIL: missing automation-routing contract was not detected")
+            return 1
+
+    print("check-codex-integration selftest: PASS")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--check", action="store_true", help="Check the repository contract (the default).")
+    parser.add_argument("--selftest", action="store_true", help="Run hermetic checker fixtures.")
+    args = parser.parse_args()
+    if args.selftest:
+        return selftest()
+    return print_errors(check(args.root.resolve()))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,32 +1,82 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # claude-config/setup.sh
 # 新しい端末で clone 後に実行するセットアップスクリプト
 #   1.  CONVENTIONS.md の symlink を作成（相対パス）
 #   1b. グローバル gitignore をインストール（~/.gitignore_global に symlink）
 #   2.  Claude Code hooks をインストール（symlink + settings.json マージ）
 #   2b. launchd エージェントをインストール（スナップショット PATH 自動修正、macOS のみ）
+#   2b2. launchd エージェントをインストール（Claude.app の新セッション folder picker を
+#        <base> に固定、macOS のみ・default-ON・opt-out 可。conventions/claude-app-cwd-pin.md）
 #   2c. .zprofile の重複 brew shellenv を修正（PATH 消失防止、macOS のみ）
 #   3.  Claude Code パーミッション設定（安全なツールを自動許可）
 #   4.  git post-merge hook をインストール（git pull 時に hooks を自動同期）
 #   5.  GitHub 上の全リポを <base> 以下に clone（未取得のもののみ）
 #   5a. 個人層 (.claude-personal-layer マーカー) を検出し ~/Claude/CLAUDE.md を symlink
+#        + 個人層の root に AGENTS.md が無ければ雛形を置く (commit は本人)
 #   5a2. 個人層に dropbox-collabs.yaml があれば dropbox-refs symlinks を作成
 #        + 個人層 .git/hooks/post-merge を設置（git pull で自動再生成）
+#   5a3. 個人層に scripts/setup-file-associations.sh があれば実行（macOS のみ、
+#        Launch Services のファイル拡張子別デフォルトアプリ設定）
 #   5b. git-crypt 暗号化リポを自動 unlock（鍵があれば）
-#   6.  LaTeX リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正）
+#   6.  全リポに pre-commit hook をインストール（Unicode→LaTeX 自動修正、
+#        hook 自体が staged file 判定で no-op skip するので全 repo に install）
 #   6b. JHEP.bst を texmf-local にインストール（全リポからグローバル利用）
-#   7.  Hammerspoon 設定をインストール（Claude Cmd+Q 誤終了防止、macOS のみ）
-#   8.  Public repo pre-commit stubs をインストール（`.claude/public-repo.marker`
-#        を持つ repo のみ、冪等）+ missing marker の警告
+#   7.  Hammerspoon 設定をインストール（Claude Cmd+Q 誤終了防止 + クリップボード
+#        整形 hotkey、macOS のみ、 opt-in = --hammerspoon / CLAUDE_HAMMERSPOON=1。
+#        既に入れた機・個人層に hammerspoon/local.lua がある機・owner は付けなくても続く）。
+#        個人層に hammerspoon/local.lua があれば
+#        ~/.hammerspoon/local.lua に symlink（init.lua 末尾の拡張 hook が読む）
+#   8.  Public repo pre-commit + commit-msg stubs をインストール
+#        （`.claude/public-repo.marker` を持つ repo のみ、冪等）+ missing
+#        marker の警告。 commit-msg layer は 2026-05-26 追加 (= claude-code
+#        2.1.x harness invoke bug 修復 option B、 詳細は
+#        conventions/hook-authoring.md#delivery-audit-4-axes (d))
+#   8b2. commit-msg stub を marker の無い repo にも置く（commit-msg の無い repo だけ。
+#        runner の Stage 0 = 学生の識別子は全 repo で走る、 2026-09-29）
+#   8c. (macOS) exec で kill される git hook を同じ中身の新しい file に作り直す
+#        （conventions/hook-authoring.md#killed-hook-stub）
+#   6d. zsh の interactive_comments を有効化（貼り付けたコマンドの行内 `#` が
+#        argv に化けて壊れるのを防ぐ保険。conventions/shell-env.md
+#        #no-inline-comments-in-pasted-commands。owner / --recommended は自動、その他は案内）
+#   9.  python-docx XML 宣言 auto-patch をインストール（Word「破損」回避）
+#   10. (macOS) pty-leak mitigation の案内（--recommended で user watchdog、
+#        conventions/macos-claude-app-pty-leak.md）
 #
 # 使い方:
 #   mkdir -p <base> && cd <base>
 #   gh repo clone <your-username>/claude-config
-#   cd claude-config && ./setup.sh
+#   cd claude-config && ./setup.sh [--no-clone] [--hammerspoon] [--recommended]
+#
+#   --no-clone : Step 5 (全リポ clone) を skip する。対話実行では flag が無くても
+#                clone 前に確認 prompt が出る (既定 = No)。非対話 (pipe / cron) は
+#                従来どおり自動 clone (= 既存ユーザーの再走の後方互換)。
+#   --hammerspoon : Step 7 (Hammerspoon 設定) を入れる。 個人の生産性ツールなので既定では入れない
+#                (環境変数 CLAUDE_HAMMERSPOON=1 でも同じ。 =0 なら既に入れた機でも触らない)。
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIRNAME="$(basename "$SCRIPT_DIR")"
+
+# --- 引数 parse ---
+NO_CLONE=0
+WANT_HAMMERSPOON=0
+WANT_RECOMMENDED="${CLAUDE_RECOMMENDED:-0}"
+for _arg in "$@"; do
+    case "$_arg" in
+        --no-clone) NO_CLONE=1 ;;
+        --hammerspoon) WANT_HAMMERSPOON=1 ;;
+        --recommended) WANT_RECOMMENDED=1 ;;
+        -h|--help)
+            echo "Usage: ./setup.sh [--no-clone] [--hammerspoon] [--recommended]"
+            echo "  --no-clone   Skip Step 5 (cloning all your GitHub repos into $CLAUDE_DIR/)."
+            echo "               Interactive runs also confirm before cloning (default: No)."
+            echo "  --hammerspoon  Install the Hammerspoon config in Step 7 (opt-in; also CLAUDE_HAMMERSPOON=1)."
+            echo "  --recommended  Apply user-scoped tips: JHEP.bst, noreply email, zsh comments, macOS pty watchdog."
+            echo "                 Also CLAUDE_RECOMMENDED=1; never invokes the admin --persist option."
+            exit 0 ;;
+        *) echo "WARNING: unknown option: $_arg (ignored)" ;;
+    esac
+done
 
 # --- GitHub ユーザー名を認証情報から自動検出（Step 4 で使用）---
 GH_USER=$(gh api user --jq '.login' 2>/dev/null)
@@ -160,35 +210,24 @@ HOOKS_SRC="$SCRIPT_DIR/hooks"
 HOOKS_DST="$HOME/.claude/hooks"
 SETTINGS="$HOME/.claude/settings.json"
 
-# 期待する hook 定義（settings.json にマージする内容）
-# hook を追加・削除する場合はここと HOOK_CMD の for ループを同時に更新する
-HOOK_ENTRIES='[
-  {
-    "matcher": "Edit|Write",
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/memory-guard.sh"}]
-  },
-  {
-    "matcher": "Edit|Write|MultiEdit",
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/public-leak-guard.sh"}]
-  },
-  {
-    "matcher": "Bash",
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/memory-guard-bash.sh"}]
-  }
-]'
-
-# PostToolUse hooks: run after each tool call. Used for git state nudges.
-# (Note: a former SessionStart hook `session-git-check.sh` was removed in
-# favour of letting `git-state-nudge.sh` do a one-time `git fetch` on
-# first-sighting. The reason: the SessionStart UI notification fired on
-# every session, which became noise. The PostToolUse hook is only loud
-# when something actually needs attention.)
-POST_TOOL_USE_ENTRIES='[
-  {
-    "matcher": "Bash",
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/git-state-nudge.sh"}]
-  }
-]'
+# 期待する hook 定義 (settings.json にマージする内容) の唯一の list = hooks/settings-entries.json
+# (event → entries)。 hook の追加・削除はその JSON だけを更新する。 symlink と settings への配線は
+# scripts/sync-hook-settings.sh が行い、 本 Step / setup.sh が生成する post-merge hook / 個人層の
+# bootstrap が同じ script を呼ぶ。
+#   2026-07-10: JSON 文字列 + for ループの二重管理を解消 (stale-read-nudge.sh の同期漏れ silent dead RCA)
+#   2026-09-12: list を setup.sh の文字列から file へ出した — setup.sh を再実行しない machine でも
+#     pull で新しい hook が配線されるように (DESIGN.md#ci-and-single-list-wiring)
+# event ごとの経緯 (list 本体は JSON 側):
+#   PostToolUse: 旧 SessionStart hook session-git-check.sh は退役し git-state-nudge.sh の初回 fetch に
+#     寄せた (毎 session の UI 通知が noise だった。 PostToolUse は必要な時だけ鳴る)
+#   Stop: session-commit-nudge.sh nudge = 同 session で編集した repo の未 commit 残を turn 境界で nudge
+#     (2026-05-26)。 層3 の Stop hook は別の install 経路で同じ array に併存する
+#   SessionStart: currentdate-anchor.py = 日付の anchor (conventions/time-context.md#design-history)、
+#     session-start-provenance.py = session id → 起動時 model の machine-local cache
+#   UserPromptSubmit: first-prompt-stamp.py = session の最初の prompt に限り自己同定 stamp を
+#     additionalContext で再注入 (画面に出ず session に 1 回)。 2026-05-20 に退役した currentdate-anchor の
+#     UPS 版は「毎 prompt・画面に出る」 が問題だった (= 本 hook はどちらも当たらない)
+SYNC_HOOK_SETTINGS="$SCRIPT_DIR/scripts/sync-hook-settings.sh"
 
 install_hooks() {
     if [ ! -d "$HOOKS_SRC" ]; then
@@ -201,9 +240,11 @@ install_hooks() {
     # symlink 作成（Windows は cp にフォールバック）
     # 絶対パス使用: ~/.claude/hooks/ と <base>/claude-config/hooks/ は
     # 異なるディレクトリツリーのため、相対パスは脆弱
-    for HOOK in "$HOOKS_SRC"/*.sh; do
+    for HOOK in "$HOOKS_SRC"/*.sh "$HOOKS_SRC"/*.py; do
         [ -f "$HOOK" ] || continue
         HOOK_NAME="$(basename "$HOOK")"
+        # .test.sh は開発用 self-test であり配信対象外 (本番 ~/.claude/hooks/ に置かない)
+        case "$HOOK_NAME" in *.test.sh) continue ;; esac
         LINK="$HOOKS_DST/$HOOK_NAME"
         if [ "$IS_WINDOWS" = true ]; then
             # Windows: cp で同期（git pull 後の自動更新は post-merge hook が担当）
@@ -230,6 +271,17 @@ install_hooks() {
         fi
     done
 
+    # (currentdate-anchor.py の symlink は上の for HOOK loop で install 済)
+
+    # .test.sh 残骸の掃除: 旧版 setup.sh は .test.sh も配信していたため
+    # 過去に作られた symlink/copy が ~/.claude/hooks/ に残り得る。 配信対象外化
+    # (上の case skip) だけでは既存残骸が消えないので、 ここで除去する。
+    for STALE in "$HOOKS_DST"/*.test.sh; do
+        { [ -e "$STALE" ] || [ -L "$STALE" ]; } || continue
+        rm -f "$STALE"
+        echo "  Removed stale test hook: $(basename "$STALE")"
+    done
+
     # settings.json に hooks 設定をマージ
     if ! command -v jq &> /dev/null; then
         echo "  WARNING: jq not found. Cannot merge hooks into settings.json."
@@ -242,82 +294,11 @@ install_hooks() {
         return 0
     fi
 
-    if [ ! -f "$SETTINGS" ]; then
-        echo "  Creating settings.json with hooks config."
-        mkdir -p "$(dirname "$SETTINGS")"
-        jq -n --argjson pre "$HOOK_ENTRIES" \
-              --argjson post "$POST_TOOL_USE_ENTRIES" \
-            '{hooks: {PreToolUse: $pre, PostToolUse: $post}}' > "$SETTINGS"
-        echo "  Created: $SETTINGS"
-        return 0
-    fi
-
-    # 既存 settings.json にマージ
-    # hooks キーがない → 追加
-    if ! jq -e '.hooks' "$SETTINGS" > /dev/null 2>&1; then
-        echo "  Adding hooks config to settings.json ..."
-        jq --argjson pre "$HOOK_ENTRIES" \
-           --argjson post "$POST_TOOL_USE_ENTRIES" \
-            '. + {hooks: {PreToolUse: $pre, PostToolUse: $post}}' \
-            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-        echo "  Done."
-    else
-        # PreToolUse 処理
-        if ! jq -e '.hooks.PreToolUse' "$SETTINGS" > /dev/null 2>&1; then
-            echo "  Adding PreToolUse hooks ..."
-            jq --argjson entries "$HOOK_ENTRIES" \
-                '.hooks.PreToolUse = $entries' \
-                "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-        else
-            # PreToolUse が存在する場合、各 hook が含まれているか個別確認
-            for HOOK_CMD in "memory-guard.sh" "public-leak-guard.sh" "memory-guard-bash.sh"; do
-                if ! jq -e --arg cmd "$HOOK_CMD" \
-                    '.hooks.PreToolUse[] | select(.hooks[]?.command | contains($cmd))' \
-                    "$SETTINGS" > /dev/null 2>&1; then
-                    echo "  Adding missing PreToolUse hook: $HOOK_CMD"
-                    ENTRY=$(echo "$HOOK_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
-                        '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
-                    jq --argjson entry "$ENTRY" \
-                        '.hooks.PreToolUse += [$entry]' \
-                        "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-                fi
-            done
-        fi
-
-        # Cleanup: remove obsolete SessionStart session-git-check hook if present
-        # (it was retired in favour of git-state-nudge's first-sighting fetch).
-        if jq -e '.hooks.SessionStart' "$SETTINGS" > /dev/null 2>&1; then
-            if jq -e '.hooks.SessionStart[] | select(.hooks[]?.command | contains("session-git-check.sh"))' \
-               "$SETTINGS" > /dev/null 2>&1; then
-                echo "  Removing obsolete SessionStart hook (session-git-check.sh)..."
-                jq '.hooks.SessionStart |= map(select(.hooks[]?.command | contains("session-git-check.sh") | not))
-                    | if .hooks.SessionStart == [] then del(.hooks.SessionStart) else . end' \
-                    "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-            fi
-        fi
-
-        # PostToolUse 処理
-        if ! jq -e '.hooks.PostToolUse' "$SETTINGS" > /dev/null 2>&1; then
-            echo "  Adding PostToolUse hooks ..."
-            jq --argjson entries "$POST_TOOL_USE_ENTRIES" \
-                '.hooks.PostToolUse = $entries' \
-                "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-        else
-            for HOOK_CMD in "git-state-nudge.sh"; do
-                if ! jq -e --arg cmd "$HOOK_CMD" \
-                    '.hooks.PostToolUse[] | select(.hooks[]?.command | contains($cmd))' \
-                    "$SETTINGS" > /dev/null 2>&1; then
-                    echo "  Adding missing PostToolUse hook: $HOOK_CMD"
-                    ENTRY=$(echo "$POST_TOOL_USE_ENTRIES" | jq --arg cmd "$HOOK_CMD" \
-                        '[.[] | select(.hooks[]?.command | contains($cmd))][0]')
-                    jq --argjson entry "$ENTRY" \
-                        '.hooks.PostToolUse += [$entry]' \
-                        "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-                fi
-            done
-        fi
-        echo "  Hooks check complete."
-    fi
+    # 配線 (hooks/settings-entries.json の無い entry を足す + hooks/retired-hooks.txt の退役 hook を外す・冪等。
+    # symlink は上の loop で張り済み。 退役の掃除を本 script の hardcode にしない = setup.sh を再実行しないマシンでも
+    # pull 後の sync で外れる: conventions/hook-authoring.md#additive-wiring-needs-retirement)
+    bash "$SYNC_HOOK_SETTINGS" --no-link "$SETTINGS"
+    echo "  Hooks check complete."
 }
 
 # hook インストールの失敗は警告のみ（Step 3-4 を止めない）
@@ -325,46 +306,111 @@ if ! install_hooks; then
     echo "  ERROR: Hook installation failed. Continuing with remaining steps."
 fi
 
-# --- 2b. Install launchd agent for snapshot PATH fix (macOS only) ---
-# fix-snapshot-path-patch.sh を自動実行する launchd エージェントをインストール
-PLIST_LABEL="com.user.claude-snapshot-fix"
-PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+# XML-escape a value before interpolating it into a plist heredoc below. Paths
+# (e.g. $HOME, $SCRIPT_DIR) are interpolated into <string> elements; a path
+# containing & < > would otherwise produce a malformed plist.
+xml_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
+# --- 2b. Install launchd agent for snapshot PATH fix (macOS only) ---
+# fix-snapshot-path-patch.sh を自動実行する launchd エージェントを、 設定フォルダ (~/.claude と CLAUDE_CONFIG_DIR で分けた
+# ~/.claude-<name>) の shell-snapshots を全部見張る形に揃える。 実体 = scripts/install-snapshot-path-fix.sh (揃っていれば
+# 何もしない)。 sync-hook-settings.sh も同じ script を呼ぶので、 setup.sh を再実行しない machine も pull と session 開始で揃う
 if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOOKS_DST/fix-snapshot-path-patch.sh" ]; then
     echo ""
     echo "=== Step 2b: Installing launchd agent for snapshot PATH fix ==="
+    SNAPSHOT_FIX_SCRIPT="$HOOKS_DST/fix-snapshot-path-patch.sh" \
+        bash "$SCRIPT_DIR/scripts/install-snapshot-path-fix.sh" | sed 's/^/  /'
+fi
 
-    PATCH_SCRIPT="$HOOKS_DST/fix-snapshot-path-patch.sh"
-    SNAPSHOT_DIR="$HOME/.claude/shell-snapshots"
+# --- 2b2. Install launchd agent that pins the Claude.app folder picker (macOS only) ---
+# Keeps the Claude desktop "New session" folder picker opening at <base> (= the
+# parent of this checkout, where your repos live) instead of drifting to whatever
+# folder you last browsed to. Default-ON on macOS *when the Claude desktop app is
+# in use* (skipped on CLI-only Macs — see the desktop-detection branch below).
+# The agent rewrites the pref every ~1s but only when it actually drifted (the
+# script reads first and skips the write when already pinned). Opt out with either:
+#   - a marker file:  touch ~/.claude/pin-claude-cwd.off
+#   - an env var:     CLAUDE_PIN_CWD=0 ./setup.sh
+# To remove after install: launchctl bootout gui/$UID <plist> && rm <plist>
+#   (also `touch ~/.claude/pin-claude-cwd.off` so re-running setup.sh won't reinstall).
+# Details / rationale: conventions/claude-app-cwd-pin.md
+PIN_LABEL="com.claude-config.pin-claude-cwd"
+PIN_PLIST="$HOME/Library/LaunchAgents/$PIN_LABEL.plist"
+PIN_SCRIPT="$SCRIPT_DIR/scripts/pin-claude-cwd.sh"
+# log は user ごとの場所に置く。 /tmp は Mac の全 user で共有なので、 別の user が先に作った
+# /tmp/pin-claude-cwd.log (0644) には書けず、 launchd が stdout を開けずに agent が毎回
+# EX_CONFIG (78) で終わる = pin が黙って効かない。
+PIN_LOG="$HOME/Library/Logs/pin-claude-cwd.log"
 
-    if launchctl list "$PLIST_LABEL" &>/dev/null; then
-        echo "  OK: $PLIST_LABEL already loaded."
-    else
-        mkdir -p "$(dirname "$PLIST_DST")"
-        cat > "$PLIST_DST" << PLIST_EOF
+# 入れる plist の全文。 既に load 済みでも中身が違えば (= 古い版の setup.sh が入れた plist) 入れ直す。
+pin_plist_body() {
+    # launchd's default ThrottleInterval is 10s, which would floor StartInterval;
+    # set both so the rewrite actually fires every ~1s.
+    cat << PIN_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>$PLIST_LABEL</string>
-    <key>WatchPaths</key>
-    <array>
-        <string>$SNAPSHOT_DIR</string>
-    </array>
+    <string>$PIN_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$PATCH_SCRIPT</string>
+        <string>/bin/sh</string>
+        <string>$(xml_escape "$PIN_SCRIPT")</string>
+        <string>$(xml_escape "$CLAUDE_DIR")</string>
     </array>
+    <key>StartInterval</key>
+    <integer>1</integer>
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$(xml_escape "$PIN_LOG")</string>
+    <key>StandardErrorPath</key>
+    <string>$(xml_escape "$PIN_LOG")</string>
 </dict>
 </plist>
-PLIST_EOF
-        launchctl load "$PLIST_DST" 2>&1
-        if launchctl list "$PLIST_LABEL" &>/dev/null; then
-            echo "  Installed and loaded: $PLIST_DST"
+PIN_EOF
+}
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    if [ -f "$HOME/.claude/pin-claude-cwd.off" ] || [ "$CLAUDE_PIN_CWD" = "0" ]; then
+        echo ""
+        echo "=== Step 2b2: Claude folder-picker pin — SKIPPED (opted out) ==="
+        # Opt-out must also STOP a job a previous run already loaded — otherwise the
+        # marker says "off" while the agent keeps rewriting the preference.
+        if launchctl list "$PIN_LABEL" &>/dev/null; then
+            launchctl bootout "gui/$(id -u)" "$PIN_PLIST" 2>/dev/null
+            rm -f "$PIN_PLIST"
+            echo "  Stopped and removed previously-installed $PIN_LABEL."
+        fi
+    elif launchctl list "$PIN_LABEL" &>/dev/null && [ "$(cat "$PIN_PLIST" 2>/dev/null)" = "$(pin_plist_body)" ]; then
+        echo ""
+        echo "=== Step 2b2: Claude folder-picker pin — already loaded ($PIN_LABEL) ==="
+    elif ! launchctl list "$PIN_LABEL" &>/dev/null && ! defaults read com.anthropic.claudefordesktop &>/dev/null; then
+        # The pin only matters for the Claude desktop app. If its prefs domain
+        # doesn't exist, this is a CLI-only Mac — don't install a 1s poller it
+        # would never benefit from. Re-running setup.sh after first opening the
+        # desktop app picks it up.
+        echo ""
+        echo "=== Step 2b2: Claude folder-picker pin — SKIPPED (Claude desktop app not detected) ==="
+    elif [ -f "$PIN_SCRIPT" ]; then
+        echo ""
+        if launchctl list "$PIN_LABEL" &>/dev/null; then
+            echo "=== Step 2b2: Updating launchd agent to pin the Claude folder picker (plist changed) ==="
+            launchctl bootout "gui/$(id -u)" "$PIN_PLIST" 2>/dev/null
         else
-            echo "  WARNING: Failed to load $PLIST_LABEL"
+            echo "=== Step 2b2: Installing launchd agent to pin the Claude folder picker ==="
+        fi
+        mkdir -p "$(dirname "$PIN_PLIST")" "$(dirname "$PIN_LOG")"
+        pin_plist_body > "$PIN_PLIST"
+        launchctl bootstrap "gui/$(id -u)" "$PIN_PLIST" 2>/dev/null || launchctl load "$PIN_PLIST" 2>&1
+        if launchctl list "$PIN_LABEL" &>/dev/null; then
+            echo "  Installed and loaded: pins picker to $CLAUDE_DIR (opt out: touch ~/.claude/pin-claude-cwd.off)"
+        else
+            echo "  WARNING: Failed to load $PIN_LABEL"
         fi
     fi
 fi
@@ -375,7 +421,10 @@ fi
 # if-blocks で追加した PATH（TeX, Python 等）を上書きする。
 # 詳細: conventions/shell-env.md
 if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOME/.zprofile" ]; then
-    if grep -q 'brew shellenv' "$HOME/.zprofile" && grep -q 'brew shellenv' "$HOME/.zshenv" 2>/dev/null; then
+    # gate は sed が置換する行 (= eval 実行行) と同じパターンで判定する。
+    # 'brew shellenv' だけだと置換後コメント自身にマッチし毎回 no-op 置換
+    # + 「Replaced」 の偽報告を出し続ける
+    if grep -q 'eval.*brew shellenv' "$HOME/.zprofile" && grep -q 'brew shellenv' "$HOME/.zshenv" 2>/dev/null; then
         echo ""
         echo "=== Step 2c: Fixing .zprofile duplicate brew shellenv ==="
         # brew shellenv 行をコメントに置換（他の内容は保持）
@@ -425,8 +474,12 @@ configure_permissions() {
         echo "  Done."
     else
         # allow が存在する場合、不足しているツールを追加
+        # Windows の jq.exe (winget) は出力を CRLF で吐くため、tr -d '\r' で
+        # 末尾 CR を除去する。除去しないと "Bash\r" のような不正値が
+        # permissions.allow に追加され (実ツール名に一致しない死にエントリ)、
+        # setup.sh を再実行するたびに増殖する。
         UPDATED=false
-        for TOOL in $(echo "$SAFE_TOOLS" | jq -r '.[]'); do
+        for TOOL in $(echo "$SAFE_TOOLS" | jq -r '.[]' | tr -d '\r'); do
             if ! jq -e --arg t "$TOOL" '.permissions.allow | index($t)' "$SETTINGS" > /dev/null 2>&1; then
                 echo "  Adding missing permission: $TOOL"
                 jq --arg t "$TOOL" \
@@ -472,9 +525,11 @@ PARENT_DIR="$(dirname "$REPO_DIR")"
 HOOKS_SRC="$REPO_DIR/hooks"
 HOOKS_DST="$HOME/.claude/hooks"
 if [ -d "$HOOKS_SRC" ] && [ -d "$HOOKS_DST" ]; then
-    for HOOK in "$HOOKS_SRC"/*.sh; do
+    for HOOK in "$HOOKS_SRC"/*.sh "$HOOKS_SRC"/*.py; do
         [ -f "$HOOK" ] || continue
         HOOK_NAME="$(basename "$HOOK")"
+        # .test.sh は開発用 self-test であり配信対象外 (本番 ~/.claude/hooks/ に置かない)
+        case "$HOOK_NAME" in *.test.sh) continue ;; esac
         DEST="$HOOKS_DST/$HOOK_NAME"
         # symlink でなければコピー（Windows の cp ファイルを更新）
         if [ -f "$DEST" ] && [ ! -L "$DEST" ]; then
@@ -484,6 +539,13 @@ if [ -d "$HOOKS_SRC" ] && [ -d "$HOOKS_DST" ]; then
     done
 fi
 
+# --- hook の配線 (= 新しい層1 hook を pull だけで効かせる、 2026-09-12) ---
+# 無い symlink と settings.json の無い entry だけ足す (冪等)。 実体 = scripts/sync-hook-settings.sh
+SYNC_HOOKS="$REPO_DIR/scripts/sync-hook-settings.sh"
+if [ -f "$SYNC_HOOKS" ] && [ -f "$HOME/.claude/settings.json" ] && command -v jq >/dev/null 2>&1; then
+    bash "$SYNC_HOOKS" "$HOME/.claude/settings.json" 2>/dev/null | sed 's/^ */[claude-config] /'
+fi
+
 # --- CONVENTIONS.md の同期（コピーの場合のみ）---
 CONV_DEST="$PARENT_DIR/CONVENTIONS.md"
 if [ -f "$CONV_DEST" ] && [ ! -L "$CONV_DEST" ]; then
@@ -491,28 +553,31 @@ if [ -f "$CONV_DEST" ] && [ ! -L "$CONV_DEST" ]; then
     echo "[claude-config] Updated: CONVENTIONS.md"
 fi
 
-# --- JHEP.bst の同期（texmf-local にインストール済みの場合）---
+# --- JHEP.bst の同期（TEXMFHOME にインストール済みの場合）---
+# TEXMFHOME (user 所有) は ls-R 不要で runtime search されるため texhash 不要。
+# 旧方式の texmf-local + texhash は ls-R が root 所有だと silent fail して
+# 「cp 成功・index されず・kpsewhich 不可視」 になる (2026-07-24 実測 RCA)。
 JHEP_SRC="$REPO_DIR/JHEP.bst"
 if [ -f "$JHEP_SRC" ] && command -v kpsewhich &> /dev/null; then
-    TEXMF_LOCAL="$(kpsewhich -var-value TEXMFLOCAL 2>/dev/null)"
-    BST_DST="$TEXMF_LOCAL/bibtex/bst/local/JHEP.bst"
-    if [ -n "$BST_DST" ] && [ -f "$BST_DST" ]; then
+    TEXMF_HOME="$(kpsewhich -var-value TEXMFHOME 2>/dev/null)"
+    BST_DST="$TEXMF_HOME/bibtex/bst/local/JHEP.bst"
+    if [ -n "$TEXMF_HOME" ] && [ -f "$BST_DST" ]; then
         if ! diff -q "$JHEP_SRC" "$BST_DST" > /dev/null 2>&1; then
-            GH_LOGIN="$(gh api user --jq '.login' 2>/dev/null)"
-            if [ "$GH_LOGIN" = "odakin" ]; then
-                if cp -f "$JHEP_SRC" "$BST_DST" 2>/dev/null; then
-                    texhash "$TEXMF_LOCAL" 2>/dev/null
-                    echo "[claude-config] JHEP.bst updated in texmf-local."
-                else
-                    echo "[claude-config] JHEP.bst updated. Run:"
-                    echo "  sudo cp $JHEP_SRC $BST_DST && sudo texhash"
-                fi
+            if cp -f "$JHEP_SRC" "$BST_DST" 2>/dev/null; then
+                echo "[claude-config] JHEP.bst updated in TEXMFHOME."
             else
                 echo "[claude-config] JHEP.bst updated. To sync:"
-                echo "  sudo cp $JHEP_SRC $BST_DST && sudo texhash"
+                echo "  cp $JHEP_SRC $BST_DST"
             fi
         fi
     fi
+fi
+
+# --- TeXShop の engine (texshop/*.engine) を Engines dir に symlink（macOS + TeXShop を 1 度起動した機のみ、 無ければ足すだけ）---
+# 原稿は先頭の `% !TEX TS-program = <engine の名前>` で選ぶ。 本人の同名の file は置き換えない。 正本 = conventions/latex.md#texshop-engines
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$REPO_DIR/scripts/install-texshop-engines.sh" ]; then
+    ts_out="$(bash "$REPO_DIR/scripts/install-texshop-engines.sh" 2>/dev/null)"
+    [ -n "$ts_out" ] && echo "[claude-config] TeXShop の engine を入れた:" && echo "$ts_out"
 fi
 
 # --- shell-snapshot patch の即時実行（macOS のみ）---
@@ -524,6 +589,14 @@ if [ "$(uname -s)" = "Darwin" ] && [ -x "$SNAPSHOT_FIX" ]; then
     "$SNAPSHOT_FIX" >/dev/null 2>&1 && \
         echo "[claude-config] Re-applied shell-snapshot PATH patches."
 fi
+
+# --- Explicit Codex personal-layer composite refresh (if opted in) ---
+# This is a no-op unless setup-codex.sh has already created a managed L4
+# composition. It never discovers a personal layer or writes below ~/.claude.
+CODEX_SETUP="$REPO_DIR/scripts/setup-codex.sh"
+if [ -x "$CODEX_SETUP" ]; then
+    "$CODEX_SETUP" --refresh-personal-layer >/dev/null 2>&1 || true
+fi
 POST_MERGE_EOF
     chmod +x "$POST_MERGE"
     echo "  Installed: .git/hooks/post-merge"
@@ -534,7 +607,21 @@ fi
 echo ""
 echo "=== Step 5: Cloning repos ==="
 
-if [ -z "$GH_USER" ]; then
+# 対話実行では clone 前に確認する (既定 = No)。 非対話 stdin (pipe / cron / CI) は
+# 従来どおり自動 clone = 既存ユーザーの再走 (非対話経路) の後方互換を維持する。
+confirm_clone() {
+    [ -t 0 ] || return 0
+    printf '  Clone ALL GitHub repos of %s into %s/? [y/N] ' "$GH_USER" "$CLAUDE_DIR"
+    read -r _clone_reply
+    case "$_clone_reply" in
+        [yY]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "$NO_CLONE" = 1 ]; then
+    echo "  SKIPPED: --no-clone."
+elif [ -z "$GH_USER" ]; then
     echo "  SKIPPED: GitHub user not detected. Run 'gh auth login' and re-run setup.sh."
 elif ! command -v gh &> /dev/null; then
     echo "  SKIPPED: gh (GitHub CLI) is not installed."
@@ -545,18 +632,49 @@ elif ! command -v gh &> /dev/null; then
     fi
 elif ! gh auth status &> /dev/null; then
     echo "  SKIPPED: gh is not authenticated. Run: gh auth login"
+elif ! confirm_clone; then
+    echo "  SKIPPED: declined at prompt (interactive default is No)."
+    echo "  To clone everything later, re-run ./setup.sh and answer y."
+    echo "  To silence this prompt, run ./setup.sh --no-clone."
 else
     echo "  User: $GH_USER"
 
     # Get all repo names from GitHub
-    REPOS=$(gh repo list "$GH_USER" --limit 100 --json name --jq '.[].name')
+    REPOS=$(gh repo list "$GH_USER" --limit 100 --json name --jq '.[].name' | tr -d '\r')
     CLONED=0
     SKIPPED=0
+    RENAMED_SKIP=0
+
+    # Build a list of "owner/repo" remotes already present locally, so a repo
+    # whose local directory was renamed (e.g. to a non-ASCII display name) is
+    # NOT re-cloned under its GitHub name on every setup run. Without this, a
+    # renamed clone yields a silent duplicate of the same remote that then drifts
+    # behind independently. bash 3.2 / Windows safe (no associative arrays; uses
+    # `git config` which predates `git remote get-url`).
+    _norm_remote() {  # arg: a git remote URL -> stdout: lowercased owner/repo
+        printf '%s' "$1" \
+          | sed -E 's#^[a-zA-Z]+://[^/]+/##; s#^[^@]+@[^:]+:##; s#\.git/?$##; s#/$##' \
+          | tr 'A-Z' 'a-z'
+    }
+    EXISTING_REMOTES=""
+    for _d in "$CLAUDE_DIR"/*/.git; do
+        [ -e "$_d" ] || continue
+        _rdir="${_d%/.git}"
+        _rurl="$(git -C "$_rdir" config --get remote.origin.url 2>/dev/null)" || continue
+        [ -n "$_rurl" ] || continue
+        EXISTING_REMOTES="$EXISTING_REMOTES$(_norm_remote "$_rurl")
+"
+    done
 
     for REPO in $REPOS; do
         TARGET_DIR="$CLAUDE_DIR/$REPO"
+        EXPECT_REMOTE="$(printf '%s/%s' "$GH_USER" "$REPO" | tr 'A-Z' 'a-z')"
         if [ -d "$TARGET_DIR" ]; then
             SKIPPED=$((SKIPPED + 1))
+        elif printf '%s' "$EXISTING_REMOTES" | grep -qxF "$EXPECT_REMOTE"; then
+            # Already cloned under a different (renamed) local dir — don't duplicate.
+            RENAMED_SKIP=$((RENAMED_SKIP + 1))
+            echo "  Skipped (remote already present under a renamed local dir): $GH_USER/$REPO"
         else
             echo "  Cloning $GH_USER/$REPO ..."
             gh repo clone "$GH_USER/$REPO" "$TARGET_DIR" 2>&1 | sed 's/^/    /'
@@ -566,9 +684,25 @@ else
 
     echo "  Cloned: $CLONED repos"
     echo "  Skipped (already exist): $SKIPPED repos"
+    [ "$RENAMED_SKIP" -gt 0 ] && echo "  Skipped (renamed local dir, remote already present): $RENAMED_SKIP repos"
 fi
 
-# --- 5a. Personal home symlink (four-layer architecture, layer 2) ---
+# Pending invitations are displayed only, including when --no-clone was chosen.
+if [ -n "$GH_USER" ] && command -v gh >/dev/null 2>&1; then
+    INVITATIONS="$(gh api --paginate user/repository_invitations --jq '.[] | [.id, .repository.full_name] | @tsv' 2>/dev/null)"
+    if [ -n "$INVITATIONS" ]; then
+        echo "  Pending repository invitations (review before accepting):"
+        while IFS=$'\t' read -r invitation_id invitation_repo; do
+            [[ "$invitation_id" =~ ^[0-9]+$ ]] || continue
+            [[ "$invitation_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || continue
+            printf '    %s (invitation %s)\n' "$invitation_repo" "$invitation_id"
+            printf '    gh api --method PATCH user/repository_invitations/%s\n' "$invitation_id"
+            printf '    gh repo clone %q %q\n' "$invitation_repo" "$CLAUDE_DIR/${invitation_repo##*/}"
+        done <<< "$INVITATIONS"
+    fi
+fi
+
+# --- 5a. Personal home symlink (four-layer architecture, layer 3) ---
 # ユーザの個人層 (personal layer) を検出し、~/Claude/CLAUDE.md をそこへ symlink する。
 # 詳しい層モデルは docs/personal-layer.md 参照。
 #
@@ -633,6 +767,15 @@ if [ -n "$LAYER" ]; then
         (cd "$CLAUDE_DIR" && ln -s "$REL_LAYER_TARGET" "CLAUDE.md")
         echo "  Linked: $HOME_CLAUDE -> $REL_LAYER_TARGET"
     fi
+    # 個人層の root AGENTS.md (= Codex がこの repo で task を始めたときの入口、
+    # CONVENTIONS.md#agent-instruction-entrypoints)。 無い時だけ雛形を置く: 手で書いた file は
+    # 上書きしない。 個人層は owner だけの layer 3 なので、 layer 2 project file を生成しない規則には当たらない。
+    LAYER_AGENTS="$LAYER/AGENTS.md"
+    LAYER_AGENTS_TEMPLATE="$SCRIPT_DIR/templates/personal-layer/AGENTS.md.template"
+    if [ -f "$LAYER_AGENTS_TEMPLATE" ] && [ ! -e "$LAYER_AGENTS" ] && [ ! -L "$LAYER_AGENTS" ]; then
+        cp "$LAYER_AGENTS_TEMPLATE" "$LAYER_AGENTS"
+        echo "  Installed $LAYER_AGENTS (commit it in the personal layer)"
+    fi
 elif [ -f "$DEFAULT_ROOT_TEMPLATE" ]; then
     echo ""
     echo "=== Step 5a: Personal home symlink (no personal layer detected) ==="
@@ -655,6 +798,29 @@ elif [ -f "$DEFAULT_ROOT_TEMPLATE" ]; then
     else
         cp "$DEFAULT_ROOT_TEMPLATE" "$HOME_CLAUDE"
         echo "  Installed default $HOME_CLAUDE"
+    fi
+fi
+
+# --- Step 5a': <base>/AGENTS.md (Codex がこの dir で task を始めたときの入口) ---
+# Claude Code は cwd の祖先の CLAUDE.md を自動で読むが、Codex は AGENTS.md しか自動発見しない
+# (codex/PARITY.md#project-instruction-discovery)。<base> は repo ではないので repo 用の入口とは別に、
+# 「ここの CLAUDE.md を読め + repo で作業するならその repo の入口を先に読め」 だけを持つ薄い file を置く。
+# 個人層の AGENTS.md を symlink しない = それは repo の入口で、SESSION.md 等の相対 pointer が <base> では解決しない。
+# 手で直した file は上書きしない (= 触っていない時だけ雛形に揃える)。
+HOME_AGENTS="$CLAUDE_DIR/AGENTS.md"
+ROOT_AGENTS_TEMPLATE="$SCRIPT_DIR/templates/root-AGENTS.md.default"
+if [ -f "$ROOT_AGENTS_TEMPLATE" ]; then
+    echo ""
+    echo "=== Step 5a': Workspace-root AGENTS.md (Codex entry point) ==="
+    if [ -L "$HOME_AGENTS" ]; then
+        echo "  $HOME_AGENTS is a symlink to $(readlink "$HOME_AGENTS"). Leaving it in place."
+    elif [ ! -e "$HOME_AGENTS" ]; then
+        cp "$ROOT_AGENTS_TEMPLATE" "$HOME_AGENTS"
+        echo "  Installed $HOME_AGENTS"
+    elif cmp -s "$HOME_AGENTS" "$ROOT_AGENTS_TEMPLATE"; then
+        echo "  Already installed: $HOME_AGENTS"
+    else
+        echo "  $HOME_AGENTS exists and differs from the template. Leaving it in place."
     fi
 fi
 
@@ -696,6 +862,15 @@ $HOOK_TAG
 # (re)installed by claude-config/setup.sh — re-running setup.sh refreshes
 # the absolute paths below. Do not edit by hand.
 "$DROPBOX_REFS_SCRIPT" "$LAYER/dropbox-collabs.yaml" "$CLAUDE_DIR" || true
+
+# claude-config post-merge extensions
+# Local extension scripts are optional and must never make git pull fail.
+POST_MERGE_EXTENSION_DIR="$(dirname "$0")/post-merge.d"
+for POST_MERGE_EXTENSION in "$POST_MERGE_EXTENSION_DIR"/*.sh; do
+  [ -x "$POST_MERGE_EXTENSION" ] || continue
+  "$POST_MERGE_EXTENSION" "$@" || \
+    echo "[claude-config] WARNING: post-merge extension failed: $POST_MERGE_EXTENSION" >&2
+done
 HOOK_EOF
             chmod +x "$LAYER_POST_MERGE"
             echo "  $ACTION: $LAYER_POST_MERGE"
@@ -703,11 +878,91 @@ HOOK_EOF
     fi
 fi
 
-# --- 5b. Unlock git-crypt repos ---
+# --- 5a3. Personal-layer file associations (macOS only) ---
+# 個人層に scripts/setup-file-associations.sh があれば実行する。macOS の
+# Launch Services でファイル拡張子別のデフォルトアプリを固定するなど、
+# OS に依存する個人カスタマイズを personal layer 側に閉じ込めるための
+# generic な hook。条件:
+#   - macOS (Darwin) であること
+#   - 個人層 ($LAYER) が検出済み (Step 5a) であること
+#   - $LAYER/scripts/setup-file-associations.sh が存在し実行可能であること
+# どれか欠けたらサイレントスキップ (Linux/Windows では出力なし)。
+# 失敗してもセットアップは継続。冪等性は呼び出される側のスクリプトが保証する。
+if [ "$(uname -s)" = "Darwin" ] \
+        && [ -n "${LAYER:-}" ] \
+        && [ -d "$LAYER" ] \
+        && [ -x "$LAYER/scripts/setup-file-associations.sh" ]; then
+    echo ""
+    echo "=== Step 5a3: Personal-layer file associations ==="
+    "$LAYER/scripts/setup-file-associations.sh" || \
+        echo "  WARNING: setup-file-associations.sh failed (see above)"
+fi
+
+# --- 5b. Recover shared keys from Dropbox + Unlock git-crypt repos ---
 # git-crypt + 鍵が両方ある場合のみ実行（なければサイレントスキップ）
 GIT_CRYPT_KEY="$HOME/.secrets/git-crypt.key"
+DROPBOX_ROOT_SCRIPT="$SCRIPT_DIR/scripts/dropbox-root.sh"
 
-if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
+# 5b-pre: Recover missing shared keys from Dropbox encrypted backups
+# 各リポの .claude/git-crypt-backup にファイル名 (例: <repo>.key.enc) が
+# 書かれていれば、~/.secrets/<repo>.key が無い場合に Dropbox 内を find で検索し、
+# 見つかったら openssl で復号を試みる（パスフレーズ入力のみ対話）。
+# 共有フォルダの受け手側パスが異なっていても find で発見できる。
+if command -v git-crypt &> /dev/null && [ -x "$DROPBOX_ROOT_SCRIPT" ]; then
+    DROPBOX_ROOT="$("$DROPBOX_ROOT_SCRIPT" 2>/dev/null)" || true
+    if [ -n "$DROPBOX_ROOT" ]; then
+        RECOVERED=0
+        for REPO_DIR in "$CLAUDE_DIR"/*/; do
+            [ -d "$REPO_DIR/.git" ] || continue
+            [ -f "$REPO_DIR/.gitattributes" ] || continue
+            grep -q "git-crypt" "$REPO_DIR/.gitattributes" 2>/dev/null || continue
+            REPO_NAME="$(basename "$REPO_DIR")"
+            REPO_KEY="$HOME/.secrets/${REPO_NAME}.key"
+            BACKUP_CONF="$REPO_DIR/.claude/git-crypt-backup"
+
+            # 鍵が既にある or 既に unlock 済 or backup 設定がない → スキップ
+            # (unlock 済なら鍵 restore は不要 — 毎回 openssl の passphrase
+            #  prompt / 非対話では "bad password read" WARNING を出すだけになる)
+            [ -f "$REPO_KEY" ] && continue
+            [ -f "$REPO_DIR/.git/git-crypt/keys/default" ] && continue
+            [ -f "$BACKUP_CONF" ] || continue
+
+            BACKUP_FILENAME="$(head -1 "$BACKUP_CONF" | tr -d '\r')"
+            [ -z "$BACKUP_FILENAME" ] && continue
+
+            # Dropbox 内を find で検索（maxdepth 5 で十分深い）
+            BACKUP_PATH="$(find "$DROPBOX_ROOT" -maxdepth 5 -name "$BACKUP_FILENAME" -print -quit 2>/dev/null)"
+            [ -z "$BACKUP_PATH" ] && continue
+
+            echo ""
+            echo "  Key missing for $REPO_NAME — encrypted backup found:"
+            echo "    $BACKUP_PATH"
+            install -d -m 700 "$HOME/.secrets"
+            TMPKEY="$(mktemp "$HOME/.secrets/.tmp.XXXXXX")"
+            if /usr/bin/openssl enc -aes-256-cbc -d -pbkdf2 \
+                -in "$BACKUP_PATH" \
+                -out "$TMPKEY"; then
+                if [ -s "$TMPKEY" ]; then
+                    chmod 600 "$TMPKEY"
+                    mv "$TMPKEY" "$REPO_KEY"
+                    echo "  Recovered: $REPO_KEY"
+                    RECOVERED=$((RECOVERED + 1))
+                else
+                    echo "  WARNING: Decrypted key is empty for $REPO_NAME. Skipping."
+                    rm -f "$TMPKEY"
+                fi
+            else
+                echo "  WARNING: Decryption failed for $REPO_NAME. Skipping."
+                rm -f "$TMPKEY"
+            fi
+        done
+        if [ "$RECOVERED" -gt 0 ]; then
+            echo "  Recovered $RECOVERED shared key(s) from Dropbox."
+        fi
+    fi
+fi
+
+if command -v git-crypt &> /dev/null && { [ -f "$GIT_CRYPT_KEY" ] || ls "$HOME"/.secrets/*.key &>/dev/null; }; then
     echo ""
     echo "=== Step 5b: Unlocking git-crypt repos ==="
     UNLOCKED=0
@@ -719,20 +974,35 @@ if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
         [ -f "$REPO_DIR/.gitattributes" ] || continue
         grep -q "git-crypt" "$REPO_DIR/.gitattributes" 2>/dev/null || continue
         REPO_NAME="$(basename "$REPO_DIR")"
+        # 既に unlock 済 (= .git/git-crypt に key 保存済) なら再 unlock 不要。
+        # 再 unlock は dirty working tree で fail するので、 unlock 済 repo に
+        # 対して毎回試みると偽の失敗を量産する (ephemeral credential drift 等)。
+        if [ -f "$REPO_DIR/.git/git-crypt/keys/default" ]; then
+            SKIPPED_CRYPT=$((SKIPPED_CRYPT + 1))
+            continue
+        fi
         if (cd "$REPO_DIR" && git-crypt status 2>/dev/null | grep -q "encrypted:"); then
             # 共有プロジェクト鍵 (~/.secrets/<repo>.key) があれば優先
+            # (exit code は sed でなく git-crypt のものを見る = PIPESTATUS)
             REPO_KEY="$HOME/.secrets/${REPO_NAME}.key"
             if [ -f "$REPO_KEY" ]; then
                 echo "  Unlocking $REPO_NAME (shared key) ..."
-                if (cd "$REPO_DIR" && git-crypt unlock "$REPO_KEY" 2>&1 | sed 's/^/    /'); then
+                if (cd "$REPO_DIR" && git-crypt unlock "$REPO_KEY" 2>&1 | sed 's/^/    /'; exit "${PIPESTATUS[0]}"); then
                     UNLOCKED=$((UNLOCKED + 1))
                     continue
                 fi
                 echo "    shared key failed, trying personal key ..."
             fi
-            echo "  Unlocking $REPO_NAME ..."
-            (cd "$REPO_DIR" && git-crypt unlock "$GIT_CRYPT_KEY" 2>&1 | sed 's/^/    /')
-            UNLOCKED=$((UNLOCKED + 1))
+            if [ -f "$GIT_CRYPT_KEY" ]; then
+                echo "  Unlocking $REPO_NAME ..."
+                if (cd "$REPO_DIR" && git-crypt unlock "$GIT_CRYPT_KEY" 2>&1 | sed 's/^/    /'; exit "${PIPESTATUS[0]}"); then
+                    UNLOCKED=$((UNLOCKED + 1))
+                else
+                    echo "  WARNING: unlock failed for $REPO_NAME (see message above)."
+                fi
+            else
+                echo "  WARNING: No key available for $REPO_NAME. Skipping."
+            fi
         else
             SKIPPED_CRYPT=$((SKIPPED_CRYPT + 1))
         fi
@@ -744,7 +1014,21 @@ if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
     # Claude Code の Bash ツールなど PATH に /usr/local/bin 等を持たないプロセスから
     # git commit / checkout 時に「git-crypt: command not found」で filter が失敗するのを防ぐ。
     # secrets-config/CLAUDE.md にも「git filter は絶対パス使用」と明記済み。
-    GITCRYPT_ABS="$(command -v git-crypt)"
+    # 焼く binary は、 この Mac の arch に合う Homebrew の側を優先し、 実際に起動できるものだけにする
+    # (Intel から移行した Apple Silicon 機では PATH の先に Intel 版が残りうる。 それを焼くと全 repo の
+    # `git status` が filter の失敗で止まる = conventions/macos-cpu-arch.md#migration-intel-to-apple-silicon)。
+    # 移行後に再実行すれば、 焼いた path も今の git-crypt に揃い直る。
+    if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+        _GC_CANDS="/opt/homebrew/bin/git-crypt /usr/local/bin/git-crypt"
+    else
+        _GC_CANDS="/usr/local/bin/git-crypt /opt/homebrew/bin/git-crypt"
+    fi
+    GITCRYPT_ABS=""
+    for _gc in $_GC_CANDS "$(command -v git-crypt 2>/dev/null)"; do
+        if [ -n "$_gc" ] && [ -x "$_gc" ] && "$_gc" --version >/dev/null 2>&1; then
+            GITCRYPT_ABS="$_gc"; break
+        fi
+    done
     if [ -n "$GITCRYPT_ABS" ]; then
         echo ""
         echo "=== Step 5c: Pinning git-crypt absolute path in .git/config ==="
@@ -765,103 +1049,69 @@ if command -v git-crypt &> /dev/null && [ -f "$GIT_CRYPT_KEY" ]; then
     fi
 fi
 
-# --- 6. Install pre-commit hook for LaTeX repos ---
-# .tex or .bib を含むリポに pre-commit hook (Unicode→LaTeX 自動修正) をインストール
-echo ""
-echo "=== Step 6: Installing pre-commit hooks for LaTeX repos ==="
-
-PRE_COMMIT_SRC="$SCRIPT_DIR/scripts/pre-commit-bib"
-
-if [ ! -f "$PRE_COMMIT_SRC" ]; then
-    echo "  ERROR: $PRE_COMMIT_SRC not found. Skipping."
-else
-    INSTALLED=0
-    SKIPPED_HOOK=0
-
-    for REPO_DIR in "$CLAUDE_DIR"/*/; do
-        [ -d "$REPO_DIR/.git" ] || continue
-
-        # LaTeX ファイルが存在するか簡易チェック
-        HAS_LATEX=false
-        for ext in tex bib; do
-            if ls "$REPO_DIR"*."$ext" "$REPO_DIR"**/*."$ext" 2>/dev/null | head -1 | grep -q .; then
-                HAS_LATEX=true
-                break
-            fi
-        done
-        [ "$HAS_LATEX" = true ] || continue
-
-        HOOK_DST="$REPO_DIR.git/hooks/pre-commit"
-        REPO_NAME="$(basename "$REPO_DIR")"
-
-        if [ "$IS_WINDOWS" = true ]; then
-            # Windows: コピー
-            if [ -f "$HOOK_DST" ] && grep -q "fix-bib-unicode" "$HOOK_DST" 2>/dev/null; then
-                SKIPPED_HOOK=$((SKIPPED_HOOK + 1))
-            else
-                if [ -f "$HOOK_DST" ]; then
-                    cp "$HOOK_DST" "$HOOK_DST.bak"
-                    echo "  WARNING: $REPO_NAME had existing pre-commit → backed up to .bak"
-                fi
-                cp -f "$PRE_COMMIT_SRC" "$HOOK_DST"
-                chmod +x "$HOOK_DST"
-                echo "  Installed (copy): $REPO_NAME"
-                INSTALLED=$((INSTALLED + 1))
-            fi
-        else
-            # Mac/Linux: symlink
-            if [ -L "$HOOK_DST" ]; then
-                CURRENT_TARGET="$(readlink "$HOOK_DST")"
-                if [ "$CURRENT_TARGET" = "$PRE_COMMIT_SRC" ]; then
-                    SKIPPED_HOOK=$((SKIPPED_HOOK + 1))
-                else
-                    echo "  UPDATE: $REPO_NAME (was -> $CURRENT_TARGET)"
-                    rm "$HOOK_DST"
-                    ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
-                    INSTALLED=$((INSTALLED + 1))
-                fi
-            elif [ -f "$HOOK_DST" ]; then
-                if grep -q "fix-bib-unicode" "$HOOK_DST" 2>/dev/null; then
-                    # 旧バージョン（直接コピー）→ symlink に差し替え
-                    rm "$HOOK_DST"
-                    ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
-                    echo "  Upgraded to symlink: $REPO_NAME"
-                    INSTALLED=$((INSTALLED + 1))
-                else
-                    cp "$HOOK_DST" "$HOOK_DST.bak"
-                    echo "  WARNING: $REPO_NAME had existing pre-commit → backed up to .bak"
-                    ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
-                    echo "  Installed (symlink): $REPO_NAME"
-                    INSTALLED=$((INSTALLED + 1))
-                fi
-            else
-                ln -s "$PRE_COMMIT_SRC" "$HOOK_DST"
-                echo "  Installed (symlink): $REPO_NAME"
-                INSTALLED=$((INSTALLED + 1))
-            fi
-        fi
-    done
-
-    echo "  Installed: $INSTALLED repos"
-    echo "  Already up to date: $SKIPPED_HOOK repos"
+# --- 5d. Symlink secrets from <repo>/secrets/ to ~/.secrets/ ---
+# 個人層の secrets-repos.txt にリストされた各リポ (例: secrets-config 等の
+# allow-list 内 repo + 個人層に登録された private repo) の secrets/ 配下にある
+# git-crypt encrypted secret 値を、 ~/.secrets/<basename> に symlink で配置する。
+# 各リポは git-crypt で unlock 済 (Step 5b 完了) を前提とする。
+# 本体 = scripts/link-secrets.sh (毎 session の自動適用からも呼ぶ = 後から足した秘密も他の機械に届く)。
+# 張る前に secrets repo を fast-forward pull し、 通常ファイルは中身が正本と一致するときだけ置き換える。
+# 個人層なし or secrets-repos.txt 無しなら何もしない (foreign user 対応)。
+# 設計詳細: DESIGN.md §「SECRETS_REPOS の個人層外出し」
+LINK_SECRETS="$SCRIPT_DIR/scripts/link-secrets.sh"
+if [ -f "$LINK_SECRETS" ]; then
+    if [ -n "$LAYER" ]; then
+        bash "$LINK_SECRETS" --claude-dir "$CLAUDE_DIR" --layer "$LAYER" --pull \
+            --header "$(printf '\n=== Step 5d: Symlinking secrets/ → ~/.secrets/ ===')" \
+            || echo "  WARNING: link-secrets.sh failed (non-fatal)"
+    fi
 fi
 
-# --- 6b. Install JHEP.bst to texmf-local (optional) ---
-# JHEP.bst (modified ver. 2.18, note 有効化) を texmf-local にインストール
-# odakin: 自動インストール / 他ユーザー: オプション表示のみ
+# --- 6. Install pre-commit hook for ALL repos ---
+# pre-commit hook (Unicode→LaTeX 自動修正) を全 repo にインストール
+#
+# 設計: hook 自体が staged file に .tex/.bib/.bst/.cls/.sty が無ければ no-op
+# で exit 0 する (scripts/pre-commit-bib L31-35)。 よって LaTeX file 検出は
+# 不要。 全 repo に install する方が robust:
+#
+# - 旧方式 (= 検出 logic 経由) は時点依存: setup.sh 実行時に .tex/.bib 不在
+#   の repo は skip → 後から .tex 追加されても hook 未 install のまま (= 2026-05-14
+#   個人層 private repo の深い path で発生、 RCA は DESIGN.md)
+# - 旧方式の bash glob `**/*.tex` は globstar 無効時に深い path を検出しない
+#   (depth 4 で detection failed)
+# - 新方式 (= 全 repo install) は時点依存性が消える、 LaTeX 不在 repo でも
+#   hook overhead は staged file の grep 1 回のみ (= 無視できる)
+#
+# 本体 = scripts/install-precommit-bib.sh (test = install-precommit-bib.test.sh)。
+# 自分が置いた pre-commit (pre-commit-bib への link / 旧版コピー) だけを最新化し、 repo が管理する
+# pre-commit は退避も上書きもしない。 repo が自前の pre-commit を宣言しているのに効いていなければ
+# ⚠ で repo 側の入れ方を出す (2026-09-16: 旧 Step 6 が repo の検査 gate を pre-commit-bib で置き換えていた)。
+# public repo (.claude/public-repo.marker) は Step 8 の stub が管轄なので installer 側で飛ばす。
+echo ""
+echo "=== Step 6: Installing pre-commit hooks for all repos (LaTeX guard) ==="
+
+PRE_COMMIT_INSTALLER="$SCRIPT_DIR/scripts/install-precommit-bib.sh"
+if [ ! -f "$PRE_COMMIT_INSTALLER" ]; then
+    echo "  ERROR: $PRE_COMMIT_INSTALLER not found. Skipping."
+else
+    bash "$PRE_COMMIT_INSTALLER" "$CLAUDE_DIR"/*/ || echo "  WARNING: pre-commit installer failed (non-fatal)"
+fi
+
+# --- 6b. Install JHEP.bst to TEXMFHOME (optional) ---
+# JHEP.bst (modified ver. 2.18, note 有効化) を TEXMFHOME にインストール。
+# TEXMFHOME (~/texmf 系、 user 所有) は ls-R 不要で runtime search されるため
+# sudo も texhash も不要 = 全ユーザーで安全に自動 install 可能。
+# ⚠️ 旧方式 (texmf-local + texhash) は ls-R が root 所有のマシンで texhash が
+# silent fail し「cp 成功・index されず・kpsewhich 不可視」 の死角を作っていた
+# (2026-07-24 実測 RCA: 4/7 install 分が一度も index されていなかった)。
+# owner または --recommended: 自動インストール / その他: 案内のみ
 JHEP_SRC="$SCRIPT_DIR/JHEP.bst"
 
-if [ -f "$JHEP_SRC" ]; then
-    # texmf-local のパスを検出
-    TEXMF_LOCAL=""
-    if command -v kpsewhich &> /dev/null; then
-        TEXMF_LOCAL="$(kpsewhich -var-value TEXMFLOCAL 2>/dev/null)"
-    elif [ -d "/usr/local/texlive/texmf-local" ]; then
-        TEXMF_LOCAL="/usr/local/texlive/texmf-local"
-    fi
+if [ -f "$JHEP_SRC" ] && command -v kpsewhich &> /dev/null; then
+    TEXMF_HOME="$(kpsewhich -var-value TEXMFHOME 2>/dev/null)"
 
-    if [ -n "$TEXMF_LOCAL" ]; then
-        BST_DIR="$TEXMF_LOCAL/bibtex/bst/local"
+    if [ -n "$TEXMF_HOME" ]; then
+        BST_DIR="$TEXMF_HOME/bibtex/bst/local"
         BST_DST="$BST_DIR/JHEP.bst"
         NEEDS_UPDATE=false
 
@@ -873,44 +1123,137 @@ if [ -f "$JHEP_SRC" ]; then
 
         if [ "$NEEDS_UPDATE" = true ]; then
             echo ""
-            echo "=== Step 6b: JHEP.bst (texmf-local) ==="
-            if [ "$GH_USER" = "odakin" ]; then
-                # 自分の端末: 自動インストール試行
+            echo "=== Step 6b: JHEP.bst (TEXMFHOME) ==="
+            if [ "$GH_USER" = "odakin" ] || [ "$WANT_RECOMMENDED" = 1 ]; then
+                # 自分の端末: 自動インストール（sudo 不要）
                 mkdir -p "$BST_DIR" 2>/dev/null
                 if cp -f "$JHEP_SRC" "$BST_DST" 2>/dev/null; then
                     echo "  Installed: $BST_DST"
-                    if command -v texhash &> /dev/null; then
-                        texhash "$TEXMF_LOCAL" 2>&1 | sed 's/^/    /'
-                    fi
+                    echo "  (TEXMFHOME needs no texhash; verify: kpsewhich JHEP.bst)"
                 else
                     echo "  JHEP.bst needs update. Run:"
-                    echo "    sudo cp $JHEP_SRC $BST_DST && sudo texhash"
+                    echo "    mkdir -p $BST_DIR && cp $JHEP_SRC $BST_DST"
                 fi
             else
-                # 他ユーザー: オプション表示のみ
+                # 他ユーザー: オプション表示のみ（sudo 不要）
                 echo "  Optional: JHEP.bst (modified ver. 2.18, note enabled) is available."
-                echo "  To install globally for BibTeX:"
-                echo "    sudo mkdir -p $BST_DIR"
-                echo "    sudo cp $JHEP_SRC $BST_DST"
-                echo "    sudo texhash"
+                echo "  To install for BibTeX (user-scoped, no sudo needed):"
+                echo "    mkdir -p $BST_DIR"
+                echo "    cp $JHEP_SRC $BST_DST"
             fi
         fi
     fi
 fi
 
-# --- 7. Install Hammerspoon config ---
-# Hammerspoon がインストール済みの場合のみ実行（なければサイレントスキップ）
+# --- 6c. Use GitHub noreply for commit author email (privacy) ---
+# 公開リポの commit author に実 email が焼き付くのを防ぐ。 各ユーザーの
+# GitHub noreply (= <id>+<login>@users.noreply.github.com) を gh api から
+# 導出する (= email をハードコードしない)。 既に noreply / 未設定なら no-op。
+# owner または --recommended: 自動適用 (idempotent) / その他: 案内のみ。
+CUR_EMAIL="$(git config --global user.email 2>/dev/null)"
+case "$CUR_EMAIL" in
+    ""|*@users.noreply.github.com)
+        : # 未設定 or 既に noreply → 何もしない
+        ;;
+    *)
+        NOREPLY="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"' 2>/dev/null)"
+        if [ -n "$NOREPLY" ]; then
+            echo ""
+            echo "=== Step 6c: GitHub noreply email ==="
+            if [ "$GH_USER" = "odakin" ] || [ "$WANT_RECOMMENDED" = 1 ]; then
+                git config --global user.email "$NOREPLY"
+                echo "  commit author email を GitHub noreply に設定 (実 email を公開しない)。"
+                echo "  user.email = $NOREPLY"
+            else
+                echo "  あなたの commit author email ($CUR_EMAIL) は公開 commit に焼き付きます。"
+                echo "  GitHub の noreply を使うには (privacy 推奨):"
+                echo "    git config --global user.email \"$NOREPLY\""
+            fi
+        fi
+        ;;
+esac
+
+# --- 6d. zsh: interactive_comments (貼り付けコマンドの行内 `#` 保険) ---
+# macOS 既定の interactive zsh は interactive_comments が既定 OFF なので、
+# 貼り付けた行の `#` はコメントにならず argv に化けてコマンドが壊れる
+# (bash の interactive は既定 ON = zsh 固有の非対称)。
+# 詳細と「保険で出し手の規律を緩めない」理由は
+# conventions/shell-env.md#no-inline-comments-in-pasted-commands。
+# owner または --recommended: 自動追記 (idempotent) / その他: 案内のみ。
+case "${SHELL:-}" in
+    *zsh*)
+        if [ -f "$HOME/.zshrc" ] && grep -q 'interactive_comments' "$HOME/.zshrc" 2>/dev/null; then
+            : # 既に設定済 → no-op (冪等)
+        else
+            echo ""
+            echo "=== Step 6d: zsh interactive_comments ==="
+            if [ "$GH_USER" = "odakin" ] || [ "$WANT_RECOMMENDED" = 1 ]; then
+                {
+                    printf '\n'
+                    printf '%s\n' '# 貼り付けたコマンドの行内 # をコメントとして扱う (zsh 既定は OFF = 引数に化ける)'
+                    printf '%s\n' '# 正本 = claude-config/conventions/shell-env.md#no-inline-comments-in-pasted-commands'
+                    printf '%s\n' 'setopt interactive_comments'
+                } >> "$HOME/.zshrc"
+                echo "  ~/.zshrc に setopt interactive_comments を追記しました。"
+                echo "  (既存のタブに効かせるには source ~/.zshrc)"
+            else
+                echo "  interactive zsh は貼り付けた行の # をコメントとして扱いません"
+                echo "  (# 以降が余計な引数になりコマンドが壊れます)。bash と同じ挙動にするには:"
+                echo "    echo 'setopt interactive_comments' >> ~/.zshrc"
+            fi
+        fi
+        ;;
+esac
+
+# --- 7. Install Hammerspoon config (opt-in) ---
+# 個人の生産性ツール (Claude の Cmd+Q 誤終了防止 + クリップボード整形 hotkey) なので全員には配らない
+# (conventions/clipboard-cleaner.md の「全 user にデフォルト ON で入れない」 と同じ判断。 /Applications は
+# Mac の全 user で共有なので、 別の user が入れた Hammerspoon でも設定が入ってしまっていた)。 入れるのは:
+#   --hammerspoon / CLAUDE_HAMMERSPOON=1 (明示)
+#   ~/.hammerspoon/init.lua が既に本リポの init.lua への symlink (= 前に入れた機。 再走で外さない)
+#   個人層に hammerspoon/local.lua がある (= 個人層が使うと宣言している)
+#   owner (6b・6c・6d と同じ扱い)
+# CLAUDE_HAMMERSPOON=0 なら触らない。 どれでもなければ入れ方を案内するだけ。
 HS_SRC="$SCRIPT_DIR/hammerspoon/init.lua"
 HS_DIR="$HOME/.hammerspoon"
 HS_DST="$HS_DIR/init.lua"
+
+hs_linked_here() {
+    [ -L "$HS_DST" ] || return 1
+    local target
+    target="$(readlink "$HS_DST")"
+    case "$target" in /*) ;; *) target="$HS_DIR/$target" ;; esac
+    [ "$target" -ef "$HS_SRC" ]
+}
+HS_REASON=""
+if [ "${CLAUDE_HAMMERSPOON:-}" = "0" ]; then
+    HS_REASON=""
+elif [ "$WANT_HAMMERSPOON" = 1 ] || [ "${CLAUDE_HAMMERSPOON:-}" = "1" ]; then
+    HS_REASON="requested"
+elif hs_linked_here; then
+    HS_REASON="already installed"
+elif [ -n "${LAYER:-}" ] && [ -f "$LAYER/hammerspoon/local.lua" ]; then
+    HS_REASON="personal layer has hammerspoon/local.lua"
+elif [ "$GH_USER" = "odakin" ]; then
+    HS_REASON="owner"
+fi
 
 if [ "$(uname -s)" != "Darwin" ] || [ ! -d "/Applications/Hammerspoon.app" ]; then
     : # macOS 以外 or Hammerspoon 未インストール → サイレントスキップ
 elif [ ! -f "$HS_SRC" ]; then
     : # init.lua がリポにない → スキップ
+elif [ -z "$HS_REASON" ]; then
+    echo ""
+    echo "=== Step 7: Hammerspoon config — SKIPPED (opt-in) ==="
+    if [ "${CLAUDE_HAMMERSPOON:-}" = "0" ]; then
+        echo "  CLAUDE_HAMMERSPOON=0 → 触らない"
+    else
+        echo "  Hammerspoon があります。 Claude の Cmd+Q 誤終了防止と ⌃⌥⌘V クリップボード整形を使うなら:"
+        echo "    ./setup.sh --hammerspoon"
+    fi
 else
     echo ""
-    echo "=== Step 7: Installing Hammerspoon config ==="
+    echo "=== Step 7: Installing Hammerspoon config ($HS_REASON) ==="
     mkdir -p "$HS_DIR"
     if [ -L "$HS_DST" ]; then
         CURRENT_TARGET="$(readlink "$HS_DST")"
@@ -931,33 +1274,70 @@ else
         ln -s "$HS_SRC" "$HS_DST"
         echo "  Created: $HS_DST -> $HS_SRC"
     fi
+
+    # 個人層が hammerspoon/local.lua を提供していれば ~/.hammerspoon/local.lua
+    # に symlink する。init.lua 末尾の local.lua hook がこれを読み、layer 1 を
+    # fork せずに個人の binding / watcher を足せる (= layer 1 は odakin 等の
+    # path を hardcode せず、検出した個人層から generic に拾う)。
+    if [ -n "${LAYER:-}" ] && [ -f "$LAYER/hammerspoon/local.lua" ]; then
+        HS_LOCAL_SRC="$LAYER/hammerspoon/local.lua"
+        HS_LOCAL_DST="$HS_DIR/local.lua"
+        if [ -L "$HS_LOCAL_DST" ]; then
+            if [ "$(readlink "$HS_LOCAL_DST")" = "$HS_LOCAL_SRC" ]; then
+                echo "  OK: $HS_LOCAL_DST -> $HS_LOCAL_SRC"
+            else
+                rm "$HS_LOCAL_DST"
+                ln -s "$HS_LOCAL_SRC" "$HS_LOCAL_DST"
+                echo "  Updated: $HS_LOCAL_DST -> $HS_LOCAL_SRC"
+            fi
+        elif [ -f "$HS_LOCAL_DST" ]; then
+            mv "$HS_LOCAL_DST" "$HS_LOCAL_DST.bak"
+            ln -s "$HS_LOCAL_SRC" "$HS_LOCAL_DST"
+            echo "  Backed up + created: $HS_LOCAL_DST -> $HS_LOCAL_SRC"
+        else
+            ln -s "$HS_LOCAL_SRC" "$HS_LOCAL_DST"
+            echo "  Created: $HS_LOCAL_DST -> $HS_LOCAL_SRC"
+        fi
+    fi
 fi
 
 
-# --- 8. Install pre-commit stubs on public repos ---
-# claude-config/hooks/public-leak-guard.sh (PreToolUse) と組み合わせて
-# pre-commit 層で Tier A 構造制約 + Tier B literal (ephemeral) をかける。
-# `.claude/public-repo.marker` を持つ repo のみが対象で、installer が
-# 冪等 (既存 stub は refresh) かつ marker なしは refuse する。
+# --- 8. Install pre-commit + commit-msg stubs on public repos ---
+# 2 layer 防御:
+#   - pre-commit: claude-config/hooks/public-leak-guard.sh (PreToolUse)
+#     と組み合わせて file 本文 Tier A 構造制約 + Tier B literal (ephemeral)
+#     をかける
+#   - commit-msg: 2026-05-26 追加。 claude-code 2.1.x harness invoke bug
+#     (= Anthropic issues #52715 + #59513、 詳細 `conventions/hook-authoring.md
+#     §2 (d)`) で PreToolUse Bash hook が silent skip される件の修復 option B。
+#     git native commit-msg hook は harness を経由しないので bypass されない、
+#     commit message Tier A + B (= shared matcher library) を BLOCK mode で
+#     検出
+# どちらも `.claude/public-repo.marker` を持つ repo のみ対象、installer が
+# 冪等 (既存 stub は refresh) かつ marker なしは refuse。
 # `gh repo list --visibility public` と付き合わせて missing marker も
 # 警告する。
 echo ""
-echo "=== Step 8: Installing pre-commit stubs on public repos ==="
+echo "=== Step 8: Installing pre-commit + commit-msg stubs on public repos ==="
 
 INSTALLER="$SCRIPT_DIR/scripts/install-public-precommit.sh"
+INSTALLER_COMMITMSG="$SCRIPT_DIR/scripts/install-public-commit-msg.sh"
 if [ ! -x "$INSTALLER" ]; then
-    echo "  WARNING: installer not found or not executable: $INSTALLER"
+    echo "  WARNING: pre-commit installer not found or not executable: $INSTALLER"
+elif [ ! -x "$INSTALLER_COMMITMSG" ]; then
+    echo "  WARNING: commit-msg installer not found or not executable: $INSTALLER_COMMITMSG"
 else
-    # marker を持つ local repo に install
+    # marker を持つ local repo に install (= 両 hook を同時 install)
     INSTALLED_COUNT=0
     for d in "$CLAUDE_DIR"/*/; do
         [ -d "$d.git" ] || continue
         if [ -f "$d.claude/public-repo.marker" ]; then
             "$INSTALLER" "${d%/}" 2>&1 | sed 's/^/  /'
+            "$INSTALLER_COMMITMSG" "${d%/}" 2>&1 | sed 's/^/  /'
             INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
         fi
     done
-    echo "  Installed pre-commit stubs in $INSTALLED_COUNT repo(s) with marker."
+    echo "  Installed pre-commit + commit-msg stubs in $INSTALLED_COUNT repo(s) with marker."
 
     # gh list と marker の diff で missing marker を警告
     if [ -n "$GH_USER" ] && command -v gh >/dev/null 2>&1; then
@@ -973,11 +1353,104 @@ else
                 echo "    - $name"
                 MISSING_COUNT=$((MISSING_COUNT + 1))
             fi
-        done < <(gh repo list --visibility public --limit 200 --json name --jq '.[].name' 2>/dev/null)
+        done < <(gh repo list --visibility public --limit 200 --json name --jq '.[].name' 2>/dev/null | tr -d '\r')
         if [ "$MISSING_COUNT" -gt 0 ]; then
             echo "  To opt each in, create \`.claude/public-repo.marker\` and re-run setup.sh."
         fi
     fi
+fi
+
+# --- 8b. Install prepare-commit-msg stub (Agent-Session/model/effort trailers) on all repos ---
+echo ""
+echo "=== Step 8b: Installing prepare-commit-msg stubs (Agent session/model/effort trailers) ==="
+# 並列 Claude session が同じ working tree を触ると commit author が全 commit で同一人物に
+# 潰れ、 「どの commit がどの session か」 が git から復元できない (= staging window race の
+# 事後追跡が transcript 漁りと記憶になる)。 commit message の trailer に agent/session と
+# runtime model/effort を足して機械抽出可能にする。 host / account は書かない (= 公開面に機器名を晒す経路を増やさ
+# ないため。 設計理由は scripts/prepare-commit-msg-session.sh の header が正本)。
+# Step 8 と違い marker を要求しない = 全 repo 対象 (private repo でこそ効く)。
+INSTALLER_SESSION="$SCRIPT_DIR/scripts/install-session-trailer.sh"
+if [ ! -x "$INSTALLER_SESSION" ]; then
+    echo "  WARNING: session-trailer installer not found or not executable: $INSTALLER_SESSION"
+else
+    SESSION_COUNT=0
+    for d in "$CLAUDE_DIR"/*/; do
+        [ -e "$d.git" ] || continue   # -e = worktree (.git が file) も拾う
+        if "$INSTALLER_SESSION" "${d%/}" >/dev/null 2>&1; then
+            SESSION_COUNT=$((SESSION_COUNT + 1))
+        fi
+    done
+    echo "  Installed prepare-commit-msg stubs in $SESSION_COUNT repo(s)."
+    echo "  Opt-out per repo: git config agent.sessionTrailer false"
+fi
+
+# --- 8b2. Install the commit-msg stub on private repos too (student identifiers in commit messages) ---
+echo ""
+echo "=== Step 8b2: Installing commit-msg stubs on private repos (student identifiers) ==="
+# Step 8 は marker を持つ public repo にだけ commit-msg stub を置く。 runner の Stage 0 (学生の識別子 =
+# scripts/check-student-identifiers.py --commit-msg、 値の一覧は machine-local) は全 repo で効かせたいので、
+# 同じ stub を marker の無い repo にも置く (--any-repo)。 runner の marker の safety net が、 private repo では
+# Stage 1 以降 (公開 repo の leak 検出) を飛ばす。 既存の自前 commit-msg は installer が退避する (track 済みなら触らない)
+# ので、 ここでは commit-msg の無い repo にだけ呼ぶ (= user の hook を黙って置き換えない)。
+if [ -x "$INSTALLER_COMMITMSG" ]; then
+    CM_COUNT=0
+    for d in "$CLAUDE_DIR"/*/; do
+        [ -e "$d.git" ] || continue
+        [ -f "$d.claude/public-repo.marker" ] && continue   # Step 8 が置いた
+        hp="$(git -C "$d" rev-parse --git-path hooks/commit-msg 2>/dev/null)" || continue
+        case "$hp" in /*) ;; *) hp="$d$hp" ;; esac
+        [ -e "$hp" ] && continue
+        if "$INSTALLER_COMMITMSG" --any-repo "${d%/}" >/dev/null 2>&1; then
+            CM_COUNT=$((CM_COUNT + 1))
+        fi
+    done
+    echo "  Installed commit-msg stubs in $CM_COUNT private repo(s)."
+fi
+
+# --- 8c. macOS に exec で kill される git hook を作り直す (conventions/hook-authoring.md#killed-hook-stub) ---
+echo ""
+echo "=== Step 8c: Checking that every git hook can be executed (macOS) ==="
+# macOS は exec 時の malware 判定を file (inode) ごとに覚え、 syspolicyd が詰まっている間の判定失敗は kill として残る
+# (git は "hook ... died of signal 9")。 上の installer は自分の stub と runner を直すが、 出力を捨てているので、
+# 作り直しても直らない hook の WARNING と、 Step 4 / 5a2 の post-merge・repo 自前の hook はここで拾う。
+HEAL_SH="$SCRIPT_DIR/scripts/heal-hook-stubs.sh"
+if [ -f "$HEAL_SH" ]; then
+    HEAL_OUT="$(bash "$HEAL_SH" "$CLAUDE_DIR" 2>&1)"
+    if [ -n "$HEAL_OUT" ]; then
+        printf '%s\n' "$HEAL_OUT" | sed 's/^/  /'
+    else
+        echo "  Nothing to fix."
+    fi
+fi
+
+# --- 9. Install python-docx XML declaration auto-patch (Word「破損」回避) ---
+echo ""
+echo "=== Step 9: Installing python-docx declaration auto-patch ==="
+# python-docx の single-quote XML 宣言を厳格 macOS Word が「破損」判定する問題を、
+# save 時 source で Word 形式に自動正規化して根絶 (office-automation.md#docx-checkbox-content-control)。
+if command -v python3 >/dev/null 2>&1; then
+    bash "$SCRIPT_DIR/scripts/install-docx-decl-patch.sh" || echo "  ⚠ docx-decl patch install skipped (non-fatal)"
+else
+    echo "  python3 not found → skip"
+fi
+
+# --- 10. (macOS) pty-leak mitigation (--recommended で user watchdog) ---
+# Claude.app の /dev/ptmx leak で `forkpty: Device not configured` が出る既知バグ。
+# フラグ無しは案内のみ。--recommended は user watchdog を入れ、sudo を使う --persist は渡さない。
+# 詳細・原理・upstream issue は conventions/macos-claude-app-pty-leak.md。
+if [ "$(uname -s)" = "Darwin" ]; then
+    echo ""
+    echo "=== Step 10: pty-leak mitigation (macOS, opt-in) ==="
+    echo "  既知バグ: 長い session で Claude.app が pty を溜め込み、 Terminal 等が"
+    echo "  'forkpty: Device not configured' で開けなくなる (kern.tty.ptmx_max 枯渇)。"
+    if [ "$WANT_RECOMMENDED" = 1 ]; then
+        bash "$SCRIPT_DIR/scripts/install-pty-leak-mitigation.sh" || echo "  WARNING: pty watchdog install failed."
+    else
+        echo "  緩和を入れるなら (user watchdog):"
+        echo "    bash \"$SCRIPT_DIR/scripts/install-pty-leak-mitigation.sh\""
+    fi
+    echo "  管理者の操作が必要な起動時 bump は別途 --persist を選んでください。"
+    echo "  詳細: conventions/macos-claude-app-pty-leak.md"
 fi
 
 echo ""

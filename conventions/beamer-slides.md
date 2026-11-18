@@ -1,0 +1,283 @@
+<!-- doc-meta
+when: Beamer/metropolis または編集可能な PPTX / Keynote で研究スライドを作る・直すとき + 既存デッキの「同じ感じ」を引き継ぐとき + 「最新のデザインでかっこよく」 と頼まれたとき (#design-from-principles) + 原則から組んだデッキの組版と言葉の罠 (#principled-deck-pitfalls)
+category: paper
+summary: 研究スライドの技術規約 (= Beamer の build・font・section・page label / 既存デッキの構成・意匠・素材を分けて継承 / editable PPTX の共通 artifact-tool helper / Keynote 読戻し + PDF 出荷 / 全頁 visual QA / QR payload と link 検査。giving-talks.md〔中身/作法〕と相補)
+-->
+# 研究スライド — Beamer・PPTX・Keynote のビルドと検収
+
+研究発表スライドをプログラム的に作る・直すときの技術規約。Beamer 固有の build に加え、
+編集可能な PPTX、Keynote、既存デッキの継承、図の生成・抽出、再現可能なビルド、視覚 QA を扱う。
+
+棲み分け(§2 定義は1箇所):
+- **発表の中身・作法**(主題選択・3-4 メッセージ・図優先・質問対応 等)= [`giving-talks.md`](giving-talks.md)(Geroch 蒸留)。
+- **一般 LaTeX / 図** = [`latex.md`](latex.md) / [`tikz-pgfplots.md`](tikz-pgfplots.md)。本 file は **Beamer 固有**。
+- 個人のスタイル選好(odakin)は personal layer 側(layer 1 からは参照しない)。
+
+---
+
+## 1. エンジンとフォント(system install ゼロで)
+
+- **LuaLaTeX + metropolis** を基本にする。`\documentclass[aspectratio=169,11pt]{beamer}` で 16:9。
+- **欧文(Fira)**: metropolis は Fira を `\iffontsavailable` で**安全判定**し、無ければ警告して fallback(ハードエラーにならない)。LuaLaTeX なら luaotfload が **TeX 同梱の `fira` パッケージ**を名前解決するので、**system フォント install 不要**で Fira が出る。(XeLaTeX 経路では system に Fira が要ることがある。)
+- **日本語(CJK)**: LuaLaTeX + `\usepackage{luatexja}` + `\usepackage[haranoaji,deluxe]{luatexja-preset}`。**TeX 同梱の原ノ味ゴシック(Harano Aji)**を使うので install 不要。`deluxe` で複数ウェイト(和文太字)が効く。XeLaTeX 代替は `xeCJK` + system 和文(例: ヒラギノ)。
+  - <a id="beamer-japanese-gothic"></a>⚠️ **beamer の欧文が sans でも、 和文は明朝のまま出る** (実測: 地の文の一部と太字の題が明朝になった。 組版の error も警告も出ない)。 luatexja の和文の既定の族は明朝で、 beamer の `\sffamily` に付いてこない。 preset の後に和文を全部ゴシックに決める: `\setmainjfont{HaranoAjiGothic-Regular.otf}[BoldFont=HaranoAjiGothic-Bold.otf]` と同じ形の `\setsansjfont{…}`、 `\renewcommand{\kanjifamilydefault}{\gtdefault}`。 確かめは頁を画像にして和文の字形を見る (§9)
+
+## 2. 配色(アクセント)
+
+metropolis のパレットを上書き:
+
+```latex
+\setbeamercolor{frametitle}{bg=<accent>}
+\setbeamercolor{progress bar}{fg=<accent>}
+\setbeamercolor{alerted text}{fg=<accent2>}   % \alert{} の色
+\setbeamercolor{title separator}{fg=<accent>}
+\setbeamercolor{palette primary}{fg=white,bg=<dark>}  % ← standout / section page の背景はこれ
+```
+
+`palette primary` が **standout フレームとセクションページの背景色**を司る。
+
+## 3. `[shrink]` の罠(重要)
+
+- `[shrink]` は内容がはみ出したとき**縦横を一律(uniform)に縮小**して枠に収める。
+- 副作用: 疎なスライドを「埋めよう」とフォントを大きくすると shrink が発動し、**テキスト箱が横にも縮んで全幅に届かず**、改行も縮小前(大フォント)レイアウトで固定 → 「無駄に幅が狭い + 不自然な改行」になる。
+- **縮小させずに埋める正解 = `[shrink]` が発動しない範囲のフォントサイズを選ぶ**(全幅・自然改行のまま)。発動の有無はビルドログを `grep -i shrink` で確認(空 = 縮小なし = 全幅維持)。
+- `[shrink=N]` は実測上「はみ出した時だけ必要分縮小」、N は**警告閾値**(強制最小縮小ではない)。安全網として残しつつ、フォントを発動しないサイズに合わせるのがコツ。
+- 密な補足/付録スライドは「大フォント + shrink(縮小=狭幅)」より「`\small` 等で全幅」の方が読みやすい。
+
+## 4. standout フレームの `\\` 落とし穴
+
+`[standout]` 内で、サイズ変更グループ(例 `{\fontsize{60}{68}\selectfont ...}`)の直後に `\\[..]` を置くと
+`! LaTeX Error: There's no line here to end.` が出る。→ 要素を1つにするか、空行(段落区切り)+ `\vspace` で代替。
+
+## <a id="beamer-name-clashes"></a>4b. beamer の既存の名前と、 frame の中の定義 (実測)
+
+- **色の名前に `fg` / `bg` を使わない**: beamer は内部で `fg` / `bg` を通常の文字色・地の色の名前に使う。 design token を `\definecolor{fg}{…}` と名付けると、 題や太字が structure の色で出るなど文字色が狂う (error は出ない)。 token は別の名前 (`vtext` / `vbg` など) にする
+- **`\note` (発表者 note の命令) と、 beamer が定義済みの定理型の環境の名前を、 自分の macro・環境・箱に使わない**: `\newcommand` / `\newenvironment` / `\newtcolorbox` で同じ名前を作ると `! LaTeX Error: Command \<名前> already defined.` で止まる。 定理型の環境の名前 (beamerbasetheorems.sty) = `theorem` / `corollary` / `fact` / `lemma` / `problem` / `solution` / `definition` / `definitions` / `example` / `examples` (`proof` は amsthm から)。 説明の箱・補足の macro には、 これと重ならない名前 (`infobox` など) を付ける (実測: 箱の名前を `note` → `fact` と変えて 2 回続けて止まった)
+- **frame の中で `#` を含む `\newcommand` を書かない**: frame の本体は macro の引数として読まれるので、 `\newcommand{\x}[2]{… #1 …}` を frame の中に置くと `! Illegal parameter number in definition of \iterate` で止まる。 macro は preamble で定義する
+- fontspec の `\newfontfamily` で読んだ字体に en dash を書くときの罠 = [`latex.md#fontspec-textendash`](latex.md#fontspec-textendash)
+
+## 5. セクション扉を「全セクション一覧 + 現在以外を薄く」にする
+
+```latex
+\usetheme[...,sectionpage=none]{metropolis}      % 既定のセクション扉を無効化
+\setbeamertemplate{section in toc shaded}[default][30]  % 非現在を 30% 不透明
+\AtBeginSection[]{\begin{frame}[c]{今日の道のり}
+  \tableofcontents[currentsection,hideallsubsections]\end{frame}}
+```
+
+現在セクションが通常色、他がグレーの「現在地」扉になる。
+
+<a id="section-pages-count-against-budget"></a>⚠️ **扉は節の数だけ頁を増やす** — 頁数の目安 (1 時間に 10 枚前後 = [`giving-talks.md`](giving-talks.md) の Slide count) は扉も数え、 討論・演習の時間は頁の予算から引く。 話す時間が短い回 (討論・演習を引いて 30 分前後) で節が 5 つ以上なら、 節ごとに扉を挟まず、 冒頭に流れ (節の名前と時間の配分) の 1 枚だけを置く。 作る前に頁数を見積もり、 組み上がったら総頁を数える (実測: 6 節それぞれに扉を挟んで 30 頁になり、 長すぎると言われた。 扉を流れの 1 枚にまとめ、 同じ問いに答える頁を統合して 15 頁にした)
+
+## 6. フッタ番号・進捗バー
+
+metropolis の `numbering=fraction` は standout/plain/セクション扉が混ざると**誤カウント**(欠番 + 「X/Y」重複)。
+`numbering=none` で消すのが綺麗。通し番号が欲しいなら §7 の PDF ページラベルで持たせる。
+また `progressbar=frametitle` は文書構成によって `! Arithmetic overflow`(calc の `\calc@denominator`)で
+**fatal になる**(2026-08 実測、初回パスで再現・原因未特定)。現在地表示は §5 の扉 TOC が担えるので、落ちたら外すのが早い。
+
+## 7. PDF ページラベル重複と修正(=「ページ番号振り直し」)
+
+- **症状**: ビューア(Preview のサムネイル等)で論理ページ番号が重複。例: タイトルと次スライドが両方「1」、セクション扉が直前番号を継承。
+- **原因**: beamer は PDF の `/PageLabels` を**フレーム番号**(`\thepage = \insertframenumber`)で書くため、タイトル+次・非増分フレームが番号を共有する。`\hypersetup{pdfpagelabels=false}` では**直らない**(beamer が shipout で再設定、`\AtBeginDocument` でも勝てない)。
+- **修正 = ビルド後に PDF を後処理**(PyMuPDF):
+
+```python
+import fitz, os
+d = fitz.open("deck.pdf")
+d.set_page_labels([{"startpage": 0, "prefix": "", "style": "D", "firstpagenum": 1}])  # 1,2,3,...
+d.save("deck.tmp.pdf"); d.close(); os.replace("deck.tmp.pdf", "deck.pdf")
+# fallback: カタログの /PageLabels を消す(d.xref_set_key(d.pdf_catalog(),"PageLabels","null"))→ 物理番号
+```
+
+- これを `build.sh` に入れて再コンパイルでも壊れないようにする。**落とし穴**: 非対話 shell(`zsh build.sh`)では `python3` が対話時と**別の python**(PATH が `.zshrc` 由来だと未適用)に解決され、PyMuPDF 無しのことがある。fitz を持つ python を自動探索:
+
+```sh
+PYEXE=""
+for PY in python3 /usr/bin/python3 /Library/Developer/CommandLineTools/usr/bin/python3 \
+          /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+  if command -v "$PY" >/dev/null 2>&1 && "$PY" -c 'import fitz' >/dev/null 2>&1; then PYEXE="$PY"; break; fi
+done
+```
+
+## 8. 再現可能なビルド wrapper
+
+`build.sh` = `latexmk -lualatex -interaction=nonstopmode deck.tex` → `python3 fix-pagelabels.py`。
+metropolis は 2 パス以上必要(latexmk が面倒を見る)。「正規ビルドは ./build.sh」と .tex 冒頭にコメント。
+
+## 9. 視覚 QA ループ(「コンパイル成功」を信用しない)
+
+コンパイル → 各ページを PNG 化(PyMuPDF) → **画像を実際に見る** → 直す → 反復。ログでは捕れない
+「下端での見切れ・色背景上の低コントラスト文字・不自然な改行・軸が欠けた図」を捕まえる(= `tikz-pgfplots.md` の
+「compile 成功 ≠ visual 成功」 と同型)。
+
+```python
+import fitz
+d = fitz.open("deck.pdf")
+for i, p in enumerate(d):
+    p.get_pixmap(matrix=fitz.Matrix(1.6, 1.6)).save(f"/tmp/p{i+1}.png")
+```
+
+ログ: `grep "^! " deck.log`(エラー)/ `grep Overfull deck.log`(はみ出し)/ `grep -i shrink deck.log`(意図しない縮小)。ただし**最終判定はレンダ画像**。
+
+全頁を 1 枚に並べて見る = [`../scripts/pdf-contact-sheet.py`](../scripts/pdf-contact-sheet.py) `deck.pdf --cols 3` (頁をまたぐ揃い = 題の行数・余白・色の配分と、 どの頁がはみ出したかが一度に見える。 図の PDF の束も `figures/*.pdf` で並べられる。 透明な図は `--bg` の色の上)。 1 枚の一覧で気になった頁だけを上の snippet で大きく出す。 図の中の文字の大きさは一覧では判断しない = 原寸の頁で見る ([`matplotlib-figure-qa.md#draw-at-placed-size`](matplotlib-figure-qa.md#draw-at-placed-size))。
+
+## <a id="generate-figures-not-scavenge"></a>10. 図は「拾う」のでなく「生成する」
+
+- **matplotlib 図のラベルはみ出しは目視でなく機械 gate で落とす**: 正本 =
+  [`matplotlib-figure-qa.md`](matplotlib-figure-qa.md) (`assert_texts_inside` snippet + 限界)。
+- **matplotlib でオリジナル模式図**(著作権リスクなし): 波束(Gauss 包絡 × 搬送波で「波束サイズ σ ≠ 波長 λ」を可視化)/「予想 vs 観測」曲線(`fill_between` でズレを塗る)/散乱模式(`patches.Circle` + 放射状の `annotate('', arrowprops=...)`)。`transparent=True, bbox_inches='tight'` で保存すると任意の背景に載る。
+- **背景グラデ**: numpy で色を線形補間 → PIL `Image.fromarray`。
+- **matplotlib の日本語ラベル**: `fm.fontManager.addfont(<CJK .otf>)` + `rcParams['font.family']=fm.FontProperties(fname=<otf>).get_name()`。TeX 同梱の Harano Aji OTF が install 不要で便利。`rcParams['axes.unicode_minus']=False`。
+  - ⚠️ **OS 標準の CJK フォントを `font.family` に名前で指定しない**(macOS の Hiragino Sans で実測、2026-08-22)。PDF 出力が **既定 `pdf.fonttype=3` では `UnicodeEncodeError` で保存失敗**(glyph 名が非 ASCII)、**`pdf.fonttype=42` では落ちないまま文字層が丸ごと壊れる**(日本語だけでなく**目盛り数字も消える**。`pdffonts` が CID Type 0C +「Mismatch between font type and embedded font file」)。対策 = Harano Aji のように **glyph 名が ASCII の OTF を addfont() で登録し、 `pdf.fonttype` は既定 (3) のままにする** — Harano Aji でも `pdf.fonttype=42` にすると同じ壊れ方をする (CID Type 0C + Mismatch、 LuaLaTeX の `\includegraphics` 経由でも日本語だけ消える = 実測)。 既定の 3 なら `pdffonts` が Type 3 と出て、 描画も文字抽出も正常。
+  - ⚠️ **PNG(Agg)は正常に見えるので目視では気付けない**。CJK ラベル入りの図を PDF で出したら `pdffonts <fig>.pdf` を必ず見る(= §9「compile 成功 ≠ visual 成功」の図版。PNG だけ確認して壊れた PDF を出荷した実例あり)。CJK を図に入れず frame/caption 側に置くのも有効な回避。
+- **厳密な可視スペクトル(波長→色)**: CIE 1931 等色関数 → XYZ → sRGB。CMF は **Wyman–Sapra–Wenzel (2013) の多ローブ・ガウス近似**を使えばデータ表不要。手順: `XYZ=(x̄,ȳ,z̄)(λ)` → `RGB_lin = M_{XYZ→sRGB}·XYZ` → 負値(色域外)をクランプ(境界へデサチュレート)→ 正規化 → sRGB ガンマ。区分線形(Bruton 流)より色相が正確。
+
+## 11. 論文の図を流用する(文献紹介系)
+
+- 埋め込みラスタ: `page.get_images()` + `fitz.Pixmap(doc, xref)`。**ただし軸ラベル/凡例/inset は別ベクタで raster に含まれない**ことが多く、曲線だけ取れて軸が欠ける。
+- 推奨 = **領域レンダリング**: `page.get_pixmap(matrix=fitz.Matrix(4,4), clip=fitz.Rect(x0,y0,x1,y1))`。`page.get_image_rects(xref)` で図の位置を取り、軸ラベルを含むよう clip を広げ、論文側キャプションは除外(自分のキャプションを付ける)。
+- 紹介対象論文の図を、出典明記で当該論文の発表に使うのは正当な学術利用。装飾目的で web の著作権画像を拾わない(§10 でオリジナル生成 or ライセンス明確な素材)。
+
+## <a id="editable-keynote-handoff"></a>12. 出力形式の現実 — Keynote へ「編集できる」デッキを渡す
+
+- **`.key`(Keynote)はバイナリ package(IWA)で直接編集不可**。Keynote ユーザーへ渡すなら `.pptx`(Keynote が import 可)か、Beamer PDF で投影。
+- **Marp**(Markdown → PDF/PPTX)はデッキをテキスト管理したい時の選択肢。レイアウト自由度は Beamer より低い。
+
+**編集可能な形で渡す実務レシピ**(2026-08 実測。「PDF 各頁を画像で貼った pptx」は 100% 忠実だが編集ベースにならない):
+
+1. python-pptx 等で**ネイティブ text box の pptx を再構築**する(デザイン token = 色・階層・余白を移植)。フォントは TeX 専用書体(Fira/原ノ味)でなく **Mac ネイティブ(例: Hiragino Sans)を明示**。CJK は `a:latin` だけでなく `a:ea`/`a:cs` にも typeface を書く。
+2. **数式だけは画像**にする(standalone LaTeX → pdfcrop → PNG)。**LaTeX ソースを README 等に添える** — Keynote は 挿入 > 方程式 が LaTeX を受けるので、受け手がネイティブ数式に置換できる。
+3. AppleScript で `.key` 化: `open (POSIX file …)` → `save d in POSIX file "….key"` → `export d to … as PDF`(この PDF が「Keynote が実際に描画した姿」= 視覚 QA の対象)。
+
+**Keynote import の落とし穴 3 つ**(いずれも 2026-08 バイセクトで確定):
+
+- **python-pptx の発表者ノートを Keynote は silent 拒否する**。notesSlide/notesMaster part があると、エラーも出さず何も開かない。python-pptx は notesMaster part と rel を作るのに `presentation.xml` へ `<p:notesMasterIdLst>` を登録しない(orphan、PowerPoint は黙認)が、**これを補修しても Keynote は拒否したまま**(根は未特定)。→ Keynote 向け pptx では notes を作らない。数式ソース等は別ファイルへ。
+- **import が一度詰まると以後 silent 失敗が連鎖する**。冷間起動時の「開く」チョーザや timeout 後の残留状態が AppleEvent を塞ぎ、正常なファイルまで documents=0 のまま無反応になる。**Keynote を quit → 再起動してから 1 回だけ試す**のが正しい再試行。バイセクト中はこの flake が「偽の毒」を量産する — 判定はクリーン再起動後の 1 回で。
+- 検証は必ず「documents 数の polling」で(open の戻り値は import 成功でも missing value のことがある)。
+
+QA は 3 の export PDF を頁画像化して §9 と同じ目視ループ。
+
+### <a id="keynote-iwa-text-fallback"></a>Keynote の本文を読む fallback — IWA は inventory にだけ使う
+
+既存 `.key` の review は **Keynote から PDF を書き出して頁画像を読む**のが第一選択。Keynote の操作が
+止まっている、または user が同じ app を操作中で export を完遂できない時は、
+[`scripts/keynote-iwa-text.py`](../scripts/keynote-iwa-text.py) で package 内の `Index/Slide*.iwa` を
+展開し、UTF-8 の text run を拾える。
+
+```bash
+python3 scripts/keynote-iwa-text.py deck.key --japanese-only
+```
+
+これは **本文の棚卸し専用**。IWA archive 名はスライド順ではなく、座標・色・見切れ・ビルド段階・
+発表者ノートも復元しない。従って「全頁を目視した」「レイアウトに問題なし」の証拠にはならない。
+出力にもこの限界を必ず残し、PDF export が可能になったら最終 QA はそちらで行う。
+
+### <a id="latexit-portable-snippet"></a>LaTeXiT / Keynote に渡す式は project macro を展開する
+
+論文の式を LaTeXiT や Keynote の方程式欄へ貼る時、論文固有の `\ov`、`\fn`、`\abb`、`\os`、
+色 macro 等はその app の preamble に無く、そのままでは組めない。配布する式片は `\frac`、
+`\mathrm`、`\left\|\cdot\right\|`、`\overset`、`\textcolor` など標準 command に展開する。
+色は stock の `blue` へ落とさず、本文または参照画像から確定した `\definecolor` を式片に同梱する。
+
+最小の `standalone` wrapper に `amsmath` と `color` / `xcolor` だけを読み、式片を実際に一度組んでから
+渡す。式片の source は deck の近くに保存する。chat で渡す時は
+[`latex.md#latex-in-chat-codeblock`](latex.md#latex-in-chat-codeblock)どおり code block に入れる。
+
+### <a id="generated-overlay-real-alpha"></a>生成画像の市松模様は透明の証拠ではない
+
+画像生成器へ「透明背景」と頼んでも、透明を模した市松模様を **RGB画素として描いた画像**が返ることが
+ある。見た目で判定せず、metadata の alpha channel、外周の alpha、穴を持つ図形なら穴の alpha を測る。
+
+- 元生成画像・prompt・仕上げ script・最終 RGBA を別に保存し、どの段で alpha を作ったかを記録する。
+- 前景が有彩色、背景が中立灰色なら、輝度しきい値より **色差**（例: 緑なら `G-R` と `G-B`）を matte
+  に使うと、市松模様と灰色の縁を落としながら antialias を残しやすい。しきい値・出力色・crop padding
+  は入力依存なので、個別 project の script / config に置く。
+- 検収は RGBA、alpha の範囲 0–255、外周と穴が透明、必要なら alpha 閾値上の連結成分数。輪郭を足す時は
+  検証済み alpha mask を膨張させて背面に置き、図形を再生成しない。
+
+生成器が shape と style を作り、決定的 script が alpha と輪郭を仕上げたなら、その分担をそのまま書く。
+「生成器が透明PNGを作った」と短絡して provenance を偽らない。
+
+## <a id="keynote-pdf-shipping"></a>13. Keynote 混成 deck の PDF 出荷 (web 公開版)
+
+Keynote で仕上げた deck (LaTeX 頁の貼り込み混成を含む) を web 公開用 PDF にする時の実測 gotcha (2026-08):
+
+- **ビルドが各頁に展開されうる**。書き出し設定次第で、ビルド (段階表示) を持つ slide が「各段階 = 別頁」で出て頁数が想定と合わなくなる。連続するほぼ同一頁がその signature。段階を畳んで 1 頁にするなら**各組の最後 = 完成形**を残す (ビルドは累積するので)。
+- **圧縮は数千枚の微小タイル画像が floor を作る**。Keynote 出力はグラデーション・影などを微小画像 tile (実測: 40 頁 deck で 2,313 枚・計 10.6 MB) で持つことがあり、ghostscript の downsample (解像度基準) がほぼ効かない — `/ebook` で 22→13 MB 止まり。それ以下が要るなら全頁ラスタ化 (PyMuPDF で頁→JPEG→再 PDF。テキスト選択は失われる) が唯一のレバーなので、サイズ上限のある投稿先向け fallback としてベクター版と両建てにする。
+- **16:9 の Beamer 頁を 4:3 Keynote deck (1024×768 pt) へ追補**するなら、PyMuPDF `show_pdf_page` で新頁に上下白帯 letterbox で載せる — ベクターのまま、Keynote 内に 16:9 スライドを置いた時と同じ見え方になる:
+
+  ```python
+  page = doc.new_page(width=1024, height=768)          # Keynote 4:3
+  page.show_pdf_page(fitz.Rect(0, y0, 1024, y0 + h), src, 0)  # y0 = (768 - h) / 2
+  ```
+
+## <a id="reference-deck-adaptation"></a>14. 既存デッキの「同じ感じ」を継承する
+
+「前回と同じ感じ」は一つの値ではない。元デッキを全頁レンダリングし、次の三つを別々に読む。
+
+1. **意匠**: slide size、font の PostScript 名、色、余白、写真の crop、影、頁番号。
+2. **進行**: 表紙、実演、別件の短い案内、メッセージ一覧、説明、まとめ、終幕などの順と時間配分。
+3. **内容と素材**: 再利用する図・写真・式、その出所とライセンス。新しい講演の主張は今回の abstract / paper / case-SoT から取る。
+
+意匠だけを真似て進行を捨てたり、古い内容を新しい講演へ持ち越したりしない。元 PDF / PPTX は SHA-256 で
+固定し、font policy は抽出器が実際に返した family 名を使う。PDF の埋込み font 名が
+`HiraMinProN-W3` のような PostScript 名なら、表示名を推測して書き換えない。
+
+元デッキから写真・科学図を再利用する場合は、元ファイルから直接抽出し、案件側の asset 台帳に頁と出所を
+残す。異なる時刻のスクリーンショットを左右比較に置く場合は「表示モードの例」であり同時刻の定量比較では
+ないと notes に書く。主張の根拠として必要な差を、撮影時刻の差で作らない。
+
+## <a id="artifact-tool-editable-pptx"></a>15. Artifact Tool で編集可能な PPTX を作る共通部
+
+`@oai/artifact-tool` が使える環境では、共通の runtime load、editable text / image、speaker notes、
+finalizer、全頁 PNG 出力を [`scripts/lib/artifact-presentation.mjs`](../scripts/lib/artifact-presentation.mjs)
+から使う。案件側 `build.mjs` はスライドの内容・座標・asset と reference hash だけを持つ。
+汎用 helper を案件ごとにコピーしない。
+
+検収は次を一単位にする。
+
+1. candidate と final を別 path にし、finalizer の package / font / geometry / first-party import を通す。
+2. 全頁を PNG にして一枚ずつ見る。意図的な文字 shadow は overlap warning の受理対象だが、slide boundary 外は直す。
+3. Keynote 利用者向けなら PPTX を Keynote で実際に開き、`.key` と最高品質 PDF を保存する。Mac の deck は
+   Keynote の表示と Keynote 出力 PDF を正とし、汎用 renderer の代替 font だけで font 不良と決めない。
+4. PDF の頁数・slide size・本文抽出・hyperlink を検査し、PDF を全頁レンダリングして再度見る。
+5. QR は画像の見た目で済ませず [`scripts/decode-qr.py`](../scripts/decode-qr.py) で payload を復号し、
+   文字リンクと同じ URL か照合する。会場専用 room 等の fragment も比較対象にする。
+
+Artifact Tool で speaker notes を持つ PPTX が Keynote に import できた実例はある。これは
+python-pptx の notes part を Keynote が拒否する上の既知事例を否定しない。生成器ごとに import と
+発表者表示を確認し、重要な進行メモは deck 近傍の Markdown にも置く。
+
+## <a id="design-from-principles"></a>16. 「最新のデザインでかっこよく」 を原則から組む
+
+前のデッキの token を流用せず、 その講演のために組む (§14 の「同じ感じ」 を頼まれたときは別)。 決める順:
+
+1. **型 = 主張と証拠** (Michael Alley の assertion–evidence): 本文の頁の題は動詞のある 1 文の主張 (2 行まで)、 本体は図か大きな数字 = 証拠。 箇条書きは最小にする ([`giving-talks.md`](giving-talks.md) の図 > 言葉 > 式と同じ向き)
+2. **認知の負荷を減らす** (Mayer のマルチメディア学習の原則): 飾り・重複を削る (coherence) / いまどのメッセージかの目印を毎頁に置く (signaling = 題の上の小さな見出し + 右上の現在地の線) / 凡例をやめて図に直接ラベル (spatial contiguity) / メッセージごとに扉 (segmenting、 扉の形 = §5)
+3. **色 = 地 + 2 色** (構造と強調): 色覚の違いに配慮した対 (Okabe–Ito の青と橙など)、 本文と地のコントラスト比を 7:1 以上 (WCAG AAA)。 図の色を deck の token と同じ値にする
+   - <a id="okabe-ito-text-contrast"></a>Okabe–Ito の色はそのままでは白地の字に足りない (WCAG の式で計算: 青 `#0072B2` 5.2:1、 朱 `#D55E00` 3.9:1)。 線と点 (図の部分は 3:1 = WCAG 1.4.11) にはそのまま使い、 字には同じ色相の濃い版を token に分けて置く (例: 青 `#005A8C` 7.4:1、 朱 `#8F3D00` 7.4:1)。 token ごとの比を script で出して記録の隣に置く。 Okabe と Ito の原典の頁は色の値を図でしか持たない = 16 進の値は配布物の表 (R・Python の palette) で確かめる
+   - 2 色に意味を 1 つずつ持たせ、 全頁で変えない (例: 青 = 片方の条件、 朱 = もう片方の条件)。 図の線・点・その語の字を同じ意味の色で塗ると、 凡例なしで頁をまたいで読める。 飾りに同じ色を使うと意味がぶれる
+4. **主題を意匠にする**: 講演の主題から 1 つのモチーフを決め、 全頁に控えめに通す (合成例: 主題が「流れ」 なら下端に細い流線、 表紙だけ一面に)。 モチーフは現在地の目印 (2 の signaling) を兼ねられる (合成例: 主題が「対称と破れ」 なら下端に頁の数だけ同じ点を並べ = ずらしても同じ並び、 今の頁の点だけ色と大きさを変える = その頁が並びの対称を破る。 `\inserttotalframenumber` と `\insertframenumber` から tikz で描く)
+5. **文字の階層は太さで**: 同梱のフォントで install 不要 = 欧文と数字は Inter (TeX Live 同梱。 本文と題の font に `Numbers=Tabular` を付けない = 下の罠のハイフンの幅)、 和文は原ノ味ゴシック (`deluxe` で極太まで)。 見出し Bold、 断言と大きな数字 Heavy / Black、 本文 Regular。 <a id="subtitle-smaller-than-title"></a>**表題と副題を同じ大きさで並べない** = 副題は主題の 0.5〜0.65 倍で一段細く組む (大きさと太さの差が副題を表すので、 「―」「：」「～…～」 の区切りの記号は要らない)。 同じ大きさで改行だけで続けると、 どこまでが題か読めない (実測)。 ポスター・チラシの表題も同じ
+6. **頁の種類を絞る**: 表紙・断言・討論のお題 = 全面の hero / 数字 = 大きな数字だけの頁 / 並列の 3 項目 = カード (bento) / 扉 = 大きな番号 + 全メッセージ
+7. **暗い地は明るい部屋で沈む** → 色を名前で 1 か所にまとめ、 白地の版に切り替えられるようにしておく
+
+- 部品: metropolis を使わず plain beamer にし、 `background` template に tikz で現在地の線・モチーフ・頁番号を描く。 カードは `tcolorbox`
+- 図はすべて自作 (§10)。 写真や観測の画像を使うなら出所の公式頁から取り、 クレジットを頁に入れる
+- 罠 = §4b と §10
+- <a id="principled-deck-pitfalls"></a>組版と言葉の罠 (実測):
+  - <a id="inter-tabular-hyphen"></a>Inter に `Numbers=Tabular` (tnum) を付けると、 ハイフンも数字と同じ幅になる (Inter Bold で 6.46 pt、 付けなければ 4.68 pt = lualatex の `\settowidth` で実測)。 本文・題の font に付けると、 すべてのハイフンの両側に隙間が出る (two - point)。 組版の error にも overfull にもならず、 頁を画像にして初めて見える。 数字の列を揃える箇所だけ `\addfontfeature{Numbers=Tabular}` で局所に付ける
+  - 色覚の確かめ = [`../scripts/pdf-cvd-render.py`](../scripts/pdf-cvd-render.py) `deck.pdf OUT --sheet` (頁ごとに 元・P 型・D 型・T 型・grayscale の 5 枚を横に並べる)。 2 色の系列が線種・点の形・直接ラベルだけでも区別できるかを見る
+  - `fontspec` の font に `Ligatures=TeX` を付ける。 無いと `--` と `---` がそのまま出る
+  - 本文は左寄せにする = `\usepackage[document]{ragged2e}` と `\setlength{\RaggedRightRightskip}{0pt plus 1fil}`。 両端揃えのままだと狭い欄で字間が崩れ、 長い題が折り返さずにはみ出す
+  - 題の 1 行に入る字数を、 組む前に計算する: 和文は全角 1 字 = 字の大きさの幅なので、 本文の幅を字の大きさで割る (合成例: 16:9 の 160 mm の幅から左右の余白 12 mm ずつを引いた 136 mm に 17.5 pt の題 = 約 6.2 mm/字 → 21 字)。 題が 2 行に折れると、 その頁の本体が 1 行分 (約 8 mm) 下がり、 図の頁の下がはみ出す = 図の頁の題は 1 行に収まる字数で書く
+  - 頁は上から詰める = `\documentclass[...,t]{beamer}`。 縦の中央寄せのままだと、 長い頁の下が切れる
+  - 文を 1 語でも足したら頁を画像にし直す (§9): 高さを揃えたカード (`equal height group`) は 1 枚が 1 行伸びると全部伸び、 下の注記が隅のモチーフに重なる。 組版は error 無しで通る
+  - <a id="numbers-from-source-note-only"></a>研究の数字を載せるデッキは、 正本の note に書かれた値と文だけを載せる。 note の表から自分で出した比・範囲の上限 (「N〜M 倍」「X 以下」) は note に無い主張になり、 note を正とする依頼元に外すよう言われる (実測)。 強調したい比があるなら、 表の行そのもの (二つの値) を並べて読む人に比を見せる。 載せた数字は、 頁の断片と note の断片の対で照合する script を deck の隣に置く (外した言い方も「戻ったら止める」 一覧に入れる)
+  - 討論の頁の問いは、 物理の未解決の問いにする。 手順の選択 (どれを採るか・節を残すか) や、 対称性から自動で従うことは並べない (「自明すぎる」 と言われる)
+  - 会合の後に送るデッキは、 表紙を「会合の後」 の形にし、 状態は送る時点のものを書く
+  - file 名は中身が分かる名前にする (`<project>-<主題>-<日付>.tex`)。 `status.tex` のような名前は、 同じ dir に次のデッキが来たときに区別できない
+  - 人名の付いた呼び方 (「〜の公式」) は聞き手が知らないことがある = 何の式かを言う (「熱核係数の一般公式」)
+  - <a id="deadline-raster-deck"></a>締めまで十数分しかない短いデッキの組み方: 頁を matplotlib で描いて画像の PDF にする (16:9 の図に頁ごと描き、 PNG を PDF の頁に貼る)。 組版の error・font の埋め込み・見せる PC の font に左右されず、 1 回の描き直しが数秒で済む (実測)。 和文は `FontProperties(fname=<ヒラギノの .ttc>)` で太さごとに指定すれば通る。 代わりに、 文字は選べず検索もできない、 折り返しは自分で切る、 という制約がある = 後で直して配るデッキは Beamer で組み直す。 確かめ方は同じ = PDF から頁を画像に起こして見る (§9)
+  - 表紙一面のモチーフの線 (波・流線) を題字と同じ高さに置くときは、 曲線を題字の右から始め、 振幅を滑らかに立ち上げる。 画面の端から引くと、 振幅の小さい裾が細い線になって題字の下を横切る (実測)

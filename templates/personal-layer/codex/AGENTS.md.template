@@ -1,0 +1,20 @@
+# Personal Codex routing overlay
+
+This owner-private layer-3 file is selected only by an explicit
+`setup-codex.sh --personal-layer <this-layer>` invocation. It enters the local
+layer-4 global composite; never copy it into a shared or public repository.
+
+## Personal-source routing
+
+When a task requires owner-specific preferences, identity, account handling,
+cross-repository state, or an operational rule, locate this layer from the
+generated header. Search its `CLAUDE.md` index, then read only the relevant
+linked source before acting.
+
+Keep only trigger + imperative read pointer stubs here. A bare Markdown link is
+not transcluded, while copied rule bodies create a second source of truth.
+Detailed rules stay in their owning files and current state stays in the
+relevant repository's `SESSION.md`. Contract:
+the `claude-config` repository's
+`codex/PARITY.md#instruction-entrypoint-kernel`, located through the generated
+`public-source` header.

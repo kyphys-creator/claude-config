@@ -1,0 +1,120 @@
+<!-- doc-meta
+when: Office file (Excel/Word/PDF/PowerPoint) 仕事に入るとき最初に開く入口
+category: office
+summary: Office ファイル (Excel/Word/PDF/PowerPoint) ハンドリング**入口マップ** = 様式仕事に入るとき最初に開く単一 router (= 考え方→principles / 罠→automation の symptom-index / 権限→claude-code-permissions / skill vs 手動 / PDF 化 wrapper / **PDF 読み取り〔表は layout-aware 抽出 ladder、 plain get_text 禁止 = pdf-table-layout-aware-reading〕** / 記入後の機械監査〔diff-form-xlsx/docx〕/ e-Rad)。 中身は持たず全て pointer、 新規 office 関連 file の入口
+-->
+# Office ファイル (Excel / Word / PDF / PowerPoint) ハンドリング — 入口マップ
+
+行政・学術様式の Excel / Word / PDF / PowerPoint を機械で扱う作業の **最初に開く単一の入口 (router)**。
+中身の正本は各 home file に置き、 本 file は「**どこに何があるか**」 の pointer に徹する
+(= [`docs/convention-design-principles.md` §2](../docs/convention-design-principles.md#no-duplicate-rules) 「定義は1箇所、 他はポインタ」)。
+
+> **なぜ専用の入口が要るか**: office files の処理は (a) **見た目が契約** (= reviewer は rendered PDF を見る、 値が正しくても layout が崩れれば差し戻される) / (b) **道具ごとに守れる地層が違う** (= openpyxl は drawing を破壊、 python-docx は破損 docx を作りうる) / (c) **lossy な解釈器の連鎖** (= xlsx → openpyxl → Excel → PDF → printer の各段で別パーサが別解釈) — の 3 性質ゆえに 1 章だけ読んでも安全に書けない。 規約・道具・原則が複数 file に分かれているのを束ねる入口が要る。
+
+---
+
+## <a id="pre-flight-checklist"></a>0. 弄る前のチェックリスト (参照順)
+
+| # | 問い | 参照先 (層 1) |
+|---|---|---|
+| ⓪ **考え方** | 初見の様式 / slug の無い罠 / 道具選択に迷う? | [`office-automation-principles.md`](office-automation-principles.md) (= 様式=見た目が契約 / file=地層 / lossy 解釈器連鎖 / 道具選択の梯子 / 検証 3 層モデル / 「記入後は審査員の目で閉じる」 / 人間系原則 〔既知情報 prefill・print-last・記入分担 4 区分・受理側で閉じる〕) |
+| ① **権限** | その file は作業ルート (cwd) の外 (`~/Downloads` / `~/Desktop` / `~/Documents` / `~/Dropbox` 等) か? | [`claude-code-permissions.md`](claude-code-permissions.md) (= `additionalDirectories` の 3 frontend 切り分け 〔CLI settings.json / Claude Code デスクトップ Tool policy / macOS TCC〕)。 ⚠️ Office 自身の「ファイル アクセスを許可」 (folder grant) ダイアログは別系統 → 変換 wrapper は [`office-pregranted-staging-dir`](office-automation.md#office-pregranted-staging-dir) (= Office の group container 経由、 dialog ゼロ) が default、 in-place で Word に触らせる時だけ [`docx-tmp-sandbox-deny`](office-automation.md#docx-tmp-sandbox-deny) (docx は project 配下で開く) |
+| ② **skill か手動か** | 単純な読み書き・整形・形式変換か / 行政学術様式の精密 fill か | [下記 §3](#skill-vs-manual) |
+| ③ **手順・落とし穴** | openpyxl / python-docx / 様式改変防止 / 検証 | **本丸** = [`office-automation.md`](office-automation.md)。 まず [症状 → 対処 早見表 (`#symptom-index`)](office-automation.md#symptom-index) で逆引き (= Excel crash / 日付 serial 印字 / 標題消失 / PDF -50/-1712/-609 等を症状から slug・既存 script に飛べる)。 各 subsection は安定 slug-anchor を持ち、 全 slug ↔ title ↔ related は併設 [`office-automation.index.yaml`](office-automation.index.yaml) (validator で dangling/orphan 0) |
+| ④ **PDF 化** | xlsx / docx / pptx → 提出 PDF | [下記 §2](#pdf-conversion) |
+| ⑤ **記入後の機械監査** | 様式に値を fill した後、 ラベル上書き / 空欄 / 配置崩れが残っていないか? | [下記 §4](#completion-audit) (原則 + script) |
+| ⑥ **e-Rad 経由** | JST / 科研費 / 財団等の研究費応募で e-Rad に書類を上げる? | [`erad-submission.md`](erad-submission.md) (= 制度横断で効く e-Rad 挙動・字数・書式・つまずきどころ) |
+| ⑦ **入手・提出の経路** | 雛形が Google Drive folder 配布? / 提出先が Google Form? | 入手 = [`google-api-direct-access.md#drive-folder-bulk-download`](google-api-direct-access.md#drive-folder-bulk-download) (folder 一括 DL + manifest)。 提出 = [`google-forms-automation.md#respondent-side-constraints`](google-forms-automation.md#respondent-side-constraints) (= **提出前にリポへ snapshot 保存** / 回答回数制限 = 再回答不可・訂正は別経路 / account domain 縛り) |
+| ⑧ **同じ様式を何度も出す** | その様式を人や回ごとに繰り返し出す? 提出済みを base にする / 黙って上書きする / 規則が doc に写される事故を止めたい? | [`form-case-pipeline.md`](form-case-pipeline.md) (= 案件 pipeline `formcase`: 提出状態を data に持ち 〔document → group → issue〕、 凍結を content-addressed にし、 規則の home を spec 1 つにして doc は生成 view、 出力の前に gate。 engine = [`scripts/formcase/`](../scripts/formcase/)) |
+| ⑨ **様式に checkbox (form control) がある / 雛形が元から紙に出すものを守る** | 箱が消える・辺が欠ける・✓ が紙で読めない? 標題・見出し・図形が黙って消えるのを機械で止めたい? | [`office-automation.md#excel-form-control-render`](office-automation.md#excel-form-control-render) (= Excel は箱を枠の大きさの画像で刷る、 3 つの罠) + [`form-case-pipeline.md#fidelity`](form-case-pipeline.md#fidelity) (= 出力と素刷りの差は記入の宣言で説明できるものだけ、 build と印刷の前に機械で照合) |
+
+---
+
+## <a id="traps-procedures-home"></a>1. 罠と手順の正本 = `office-automation.md`
+
+[`office-automation.md`](office-automation.md) が全 gotcha の正本。 まず [`#symptom-index`](office-automation.md#symptom-index) で症状逆引き。 主要カテゴリ:
+
+- **開始前**: [`form-dump-first`](office-automation.md#form-dump-first) (推測で書かず構造を全 dump) / [`template-provenance-check`](office-automation.md#template-provenance-check) (= テンプレ・前例の素性確認: 記入済み混入 / 旧版 stale / drawing 喪失の 3 罠)
+- **openpyxl の罠**: [`merged-cell-write-topleft`](office-automation.md#merged-cell-write-topleft) / [`datetime-cell-hash-overflow`](office-automation.md#datetime-cell-hash-overflow) / [`xlsx-locked-by-excel`](office-automation.md#xlsx-locked-by-excel) / [`openpyxl-destroys-drawings`](office-automation.md#openpyxl-destroys-drawings) (= 標題 textbox 全消失、 様式 fill は Excel osascript 経由が default) / [`openpyxl-clears-formula-cache`](office-automation.md#openpyxl-clears-formula-cache)
+- **form control (checkbox) の描画**: [`excel-form-control-render`](office-automation.md#excel-form-control-render) (= 枠 ≤ 16pt で辺が欠ける / 枠の高さを足すと箱が下がる / control 自身の ✓ は紙で読めない → vector で重ねる。 pipeline の段 = [`form-case-pipeline.md#fidelity`](form-case-pipeline.md#fidelity))
+- **Excel (osascript) write の罠**: [`excel-osascript-cell-write`](office-automation.md#excel-osascript-cell-write) (= -609 回避) / [`excel-write-string-autoconvert`](office-automation.md#excel-write-string-autoconvert) (= 日付文字列→serial、 apostrophe prefix)
+- **様式改変の主因**: [`label-vs-input-antipattern`](office-automation.md#label-vs-input-antipattern) / [`label-overwrite-bug`](office-automation.md#label-overwrite-bug) / [`diff-form-xlsx-detection`](office-automation.md#diff-form-xlsx-detection) (= xlsx 機械検出、 fill 後必須) / [`diff-form-docx-detection`](office-automation.md#diff-form-docx-detection) (= **docx 機械検出**、 ラベル欄上書き / 見出し消失 / 箇条書き空欄 / labeled 列空) / [`embedded-instruction-in-label`](office-automation.md#embedded-instruction-in-label)
+- **docx**: [`docx-fill-xml-edit`](office-automation.md#docx-fill-xml-edit) / [`docx-paragraph-split`](office-automation.md#docx-paragraph-split) (= 段落は共有の部品 `scripts/lib/docx_paragraphs.py` で切る、 自己終了の空段落 `<w:p .../>` が記入行 = その場の正規表現は見落として段落を足し、 頁がはみ出す) / [`docx-layout-unverified`](office-automation.md#docx-layout-unverified) (= 変換が止まっても「見た目は未確認」 で先へ進まない、 Word の画面・本人の書き出しの順) / [`docx-checkbox-content-control`](office-automation.md#docx-checkbox-content-control) / [`docx-pdf-stale-cache`](office-automation.md#docx-pdf-stale-cache) (= 再生成後は Word quit) / [`docx-password-roundtrip-edit`](office-automation.md#docx-password-roundtrip-edit) (= PW 暗号化 form の 5 step round-trip)
+- **pptx fill**: [`pptx-fill`](office-automation.md#pptx-fill) (= 入口) → [`pptx-shape-tree-and-path`](office-automation.md#pptx-shape-tree-and-path) (= group recursion + path addressing + EMU + CJK char/line 概算) / [`pptx-example-slide-as-palette`](office-automation.md#pptx-example-slide-as-palette) (= 塗り例スライドから font/color/size を採取、 空 placeholder 継承は透明字 trap) / [`pptx-scheme-color-guard`](office-automation.md#pptx-scheme-color-guard) (= .rgb は SchemeColor で AttributeError) / [`pptx-explicit-size-not-autofit`](office-automation.md#pptx-explicit-size-not-autofit) (= auto_size 非動作、 明示 size + word_wrap + 文字量予算) / [`pptx-clear-and-ppr-propagation`](office-automation.md#pptx-clear-and-ppr-propagation) (= tf.clear() + add_paragraph() は pPr 継承しない、 deepcopy 注入) / [`pptx-cross-shape-ppr-borrow`](office-automation.md#pptx-cross-shape-ppr-borrow) / [`pptx-double-bullet-trap`](office-automation.md#pptx-double-bullet-trap) (= 「・」 手入力禁止) / [`pptx-hint-fixed-position-trap`](office-automation.md#pptx-hint-fixed-position-trap) (= 薄字 hint は消さない選択が妥当)
+- **pptx export**: [`pptx-keynote-preferred-for-export`](office-automation.md#pptx-keynote-preferred-for-export) (= PowerPoint AppleScript は script dict が古く -50 error、 Keynote 経由が堅牢、 sibling [`pptx-to-pdf-powerpoint`](office-automation.md#pptx-to-pdf-powerpoint) は fidelity-first) / [`pptx-png-via-pdf-sips`](office-automation.md#pptx-png-via-pdf-sips) (= PNG は PDF → sips 2400px) / [`pptx-reload-workflow`](office-automation.md#pptx-reload-workflow) (= fill loop の close all + reopen)
+- **PDF / 視認義務**: [`pdf-visual-confirm`](office-automation.md#pdf-visual-confirm) (= 全変換 1 回ごとに目視) / [`image-budget-exhaustion`](office-automation.md#image-budget-exhaustion) / [`pdf-text-match-nfkc`](office-automation.md#pdf-text-match-nfkc) (= 互換字形 false negative 回避) / [`excel-pdf-bottom-border-drop`](office-automation.md#excel-pdf-bottom-border-drop) (= 枠が下に開く → `close-pdf-form-boxes.py`)
+- **PDF 読み取り (= 受領 PDF から値を取る、 読み側も fill 側と同格の工程)**: **散文を grep できる text にするだけなら** [`scripts/pdf-to-text.py`](../scripts/pdf-to-text.py) (= 合字 `ﬁﬂﬀﬃﬄ` 展開 + 行末ハイフン結合 〔連続・頁境界も〕 + 柱と頁番号の除去 + `--reflow` / `--para-starts` で段落復元。 ⚠️ 合字の直後で空白が落ちた語 〔`offas` = off as〕 は PDF 側の欠落で直せない = 報告して `--replace` で名指し)。 **表・多段組は別物** = [`pdf-table-layout-aware-reading`](office-automation.md#pdf-table-layout-aware-reading) (= **表・多段組は plain `get_text()` 禁止** — words+bbox y-band → dict → find_tables → clip の抽出 ladder、 行帰属は y-band 一致を確認してから主張、 「読めない」 結論は ladder 全段の後)
+- **紙印刷**: [`pdf-prefill-direct`](office-automation.md#pdf-prefill-direct) (= 紙だけ要る時は雛形 PDF + fitz 印字、 汎用 engine = `pdf_form_fill.py`) / [`print-raster-pdf`](office-automation.md#print-raster-pdf) (= 600dpi ラスタ化で printer font 化け回避) / **刷る直前 = [`print-preflight`](office-automation.md#print-preflight)** (= `scripts/pdf-print-preflight.py` で頁数・font を機械確認 → RGB raster → crop 目視 → remote user には全頁 PNG → 1 枚ずつ。 刷り直しが続いた実測の RCA)
+- **押印・署名**: [`signature-not-stamp`](office-automation.md#signature-not-stamp) / [`physical-seal-required`](office-automation.md#physical-seal-required)
+- **多 sheet**: [`all-sheet-sweep`](office-automation.md#all-sheet-sweep)
+
+## <a id="pdf-conversion"></a>2. PDF 化 (層 1 wrapper)
+
+| 変換 | wrapper | 機構の正本 |
+|---|---|---|
+| xlsx → PDF | [`scripts/xlsx-to-pdf.sh`](../scripts/xlsx-to-pdf.sh) (= LibreOffice soffice → macOS Excel osascript fallback) | [`office-automation.md#xlsx-to-pdf-script`](office-automation.md#xlsx-to-pdf-script) |
+| docx → PDF | [`scripts/docx-to-pdf.sh`](../scripts/docx-to-pdf.sh) (= macOS では Word AppleScript 駆動が default、 `--pages` で明示 Pages、 非 macOS は LibreOffice) | [`office-automation.md#docx-to-pdf-pages`](office-automation.md#docx-to-pdf-pages) + [`docx-pdf-stale-cache`](office-automation.md#docx-pdf-stale-cache) (= stale cache / cold-start 対処) |
+| pptx → PDF | [`scripts/pptx-to-pdf.sh`](../scripts/pptx-to-pdf.sh) (= PowerPoint native export 優先、 LibreOffice fallback) | [`office-automation.md#pptx-to-pdf-powerpoint`](office-automation.md#pptx-to-pdf-powerpoint) (= 網掛け / pattern fill を潰さない要件は native 一択) |
+
+🔑 3 wrapper の macOS Office 経路は **事前 grant 済み staging dir 経由が default** (= Office 3 app が共有する group container に copy → export → copy back、 Office の「ファイル アクセスを許可」 dialog が案件 dir ごとに出るのを design-out、 `--no-stage` で旧 in-place)。 機構・実測・注意は [`office-automation.md#office-pregranted-staging-dir`](office-automation.md#office-pregranted-staging-dir)、 lib = [`scripts/lib/office-staging.sh`](../scripts/lib/office-staging.sh) (+ python 鏡像 `office_staging.py`)。
+🚫 **wrapper 以外 (手書き osascript・案件ごとの driver) も staging 経由が規則で、 in-place の open / save は hook が deny する** — 直し方 (`scripts/office-stage-run.sh` / helper) と例外の書き方は [`office-automation.md#office-inplace-guard`](office-automation.md#office-inplace-guard)。
+🚫 **user が開いている Excel / Word / PowerPoint を quit・kill しない、 前面に出さない** — reset は開いている文書を聞いてから自分のものだけ quit、 起動は `open -g`、 AppleScript に `activate` を書かない (wrapper と `office-stage-run.sh` は組み込み済) → [`office-automation.md#office-app-reset-guard`](office-automation.md#office-app-reset-guard) / app を問わない一般則 = [`macos-gui-app-automation.md`](macos-gui-app-automation.md)。
+
+⚠️ **docx は「Word 体裁が契約」 の正式書類が大半** ゆえ Pages re-typeset は重なり artifact を生む。 default を Word に倒している (2026-06 反転)。 詳細・新規 docx automation script を書く時の reflex は [`office-automation-principles.md` tool-selection-ladder](office-automation-principles.md#tool-selection-ladder) 参照。
+
+⚠️ **提出は xlsx/docx 本体、 PDF は確認・印刷・後参照用** ([`pdf-snapshot-xlsx-submission`](office-automation.md#pdf-snapshot-xlsx-submission))。
+
+## <a id="skill-vs-manual"></a>3. skill vs 手動の使い分け
+
+判断表 (一般処理は skill / 様式精密 fill は手動 / PDF 抽出は pdf skill / 提出 PDF 化は §2 wrapper) は [`office-automation-principles.md` tool-selection-ladder](office-automation-principles.md#tool-selection-ladder) の `⚙️ skill が使える環境では` 表を参照。
+
+## <a id="completion-audit"></a>4. 記入後は「審査員の目」 で閉じる (= 機械監査と最終確認)
+
+- 原則: [`office-automation-principles.md` reviewer-eye-completion](office-automation-principles.md#reviewer-eye-completion) 「記入後は『審査員の目』 で閉じる」
+- xlsx 機械監査: [`scripts/diff-form-xlsx.py`](../scripts/diff-form-xlsx.py)
+- docx 機械監査: [`scripts/diff-form-docx.py`](../scripts/diff-form-docx.py) (Word で雛形と記入済みを描いて頁数・様式の字のずれ・紙の font まで見る。 exit 3 = 描けなかった = 見た目は未確認で、 通過ではない = [`docx-layout-unverified`](office-automation.md#docx-layout-unverified))
+
+## <a id="scripts-list"></a>5. 検証・変換 script 一覧 (層 1: `claude-config/scripts/`)
+
+| script | 用途 / 機構正本 |
+|---|---|
+| [`diff-form-xlsx.py`](../scripts/diff-form-xlsx.py) | 様式 xlsx の label 上書き (= 様式改変) を雛形 diff で検出 (`LABEL_OVERWRITE=exit1`)。 fill 後必ず実行 → [`#diff-form-xlsx-detection`](office-automation.md#diff-form-xlsx-detection) |
+| [`diff-form-docx.py`](../scripts/diff-form-docx.py) | 様式 docx の記入ミスを blank diff で検出 (ラベル欄上書き / 見出し消失 = HARD、 空の箇条書き / 全空 labeled 列 = surface)。 `--selftest` 内蔵 → [`#diff-form-docx-detection`](office-automation.md#diff-form-docx-detection)。 段落の増加 (自己終了の空段落を数える)・足した run の欧文の font・Word で描いた頁数と様式の字のずれ・紙の新しい font も HARD、 描けなければ exit 3 (= 見た目は未確認)、 描画つきで通った file を記録し `--receipt-status` が答える |
+| [`lib/docx_paragraphs.py`](../scripts/lib/docx_paragraphs.py) | docx の XML を段落に切る共有の部品 (自己終了の空段落を 1 段落と数え、 textbox の中の段落と重ねない。 `top_level` / `replace` / `counts` / CLI `dump`) → [`#docx-paragraph-split`](office-automation.md#docx-paragraph-split) |
+| [`scan-form-instructions.py`](../scripts/scan-form-instructions.py) | label 内 embedded instruction を category 別抽出 → [`#embedded-instruction-in-label`](office-automation.md#embedded-instruction-in-label) |
+| [`xlsx-to-pdf.sh`](../scripts/xlsx-to-pdf.sh) | xlsx → PDF (soffice → Excel fallback、 Excel 経路は staging 経由) |
+| [`docx-to-pdf.sh`](../scripts/docx-to-pdf.sh) | docx → PDF (macOS Word 忠実版 default、 `--pages` で Pages、 非 mac LibreOffice、 Word 経路は staging 経由) |
+| [`pptx-to-pdf.sh`](../scripts/pptx-to-pdf.sh) | pptx → PDF (PowerPoint native 優先、 LibreOffice fallback、 PowerPoint 経路は staging 経由) |
+| [`lib/office-staging.sh`](../scripts/lib/office-staging.sh) / [`lib/office_staging.py`](../scripts/lib/office_staging.py) | Office 駆動 script 共通の **事前 grant 済み staging dir** helper (= sandbox の folder-grant dialog を design-out、 新規 Office automation script はこれを source) → [`#office-pregranted-staging-dir`](office-automation.md#office-pregranted-staging-dir) |
+| [`office-stage-run.sh`](../scripts/office-stage-run.sh) | 手書きの Office 駆動 command を staging 経由で 1 回走らせる (`<file> -- osascript x.applescript {}`)。 前後に app guard (背景起動・自分が起動した app だけ quit・前面を返す)。 in-place は [`hooks/office-inplace-guard.py`](../hooks/office-inplace-guard.py) が deny → [`#office-inplace-guard`](office-automation.md#office-inplace-guard) |
+| [`lib/office-app-guard.sh`](../scripts/lib/office-app-guard.sh) | Office app の安全な reset・背景起動・後始末 (`state` / `reset` / `launch` / `release` / `close-ours` / `has-path`、 python は `office_staging.office_app()`) → [`#office-app-reset-guard`](office-automation.md#office-app-reset-guard) |
+| [`check-office-staging.py`](../scripts/check-office-staging.py) | staging が使えない (= wrapper が in-place に落ちる / 落ちた) の検出 (live probe + fallback log の未 ack、 0 件は沈黙) + **`--e2e` = このマシンで 3 wrapper が staging 経由で通るかを 1 コマンドで実機確認** (新しいマシン・OS / Office 更新の後) → [`#office-pregranted-staging-dir`](office-automation.md#office-pregranted-staging-dir) |
+| [`close-pdf-form-boxes.py`](../scripts/close-pdf-form-boxes.py) | Excel→PDF で落ちた下罫線 (= 承認/印影欄の box が開く) を全検出して閉じる → [`#excel-pdf-bottom-border-drop`](office-automation.md#excel-pdf-bottom-border-drop) |
+| [`check-form-static-text.py`](../scripts/check-form-static-text.py) | **雛形が元から紙に出すもの** (図形の標題・区分の枠・様式番号・㊞) が出力 PDF に在るか = openpyxl で保存した workbook / temp から刷った紙の見出し消失・枠で末尾 1 字が切れた様式番号を拾う (2026-09-24 追記。 他の検査は書いたものしか見ない) → [`#drawings-lost-in-temp-pdf`](office-automation.md#drawings-lost-in-temp-pdf)。 2026-09-25 から `--filled 案件.xlsx` (書き換えていない cell の見出しが出力に在るか) / `--blank 素刷り.pdf` (雛形を道具を通さず app で刷った PDF と画像・線の数を比べる、 Excel は立体の checkbox の箱を画像として、 平らな箱は vector で描く) / docx 雛形 (textbox・header・footer の字) も → 不変条件と層 = [`form-case-pipeline.md#fidelity`](form-case-pipeline.md#fidelity) `--blank` = 素刷りとの画像の数・位置の写像・form control の箱 (`--expect-checked` = 印のある箱と読める印の数、 `box_shifts` = 箱の offset)、 `--mark-checked` = 印の入った箱に ✓ を vector で重ねる → [`#excel-form-control-render`](office-automation.md#excel-form-control-render) |
+| [`lib/office_census.py`](../scripts/lib/office_census.py) | xlsx / docx / pptx の**紙に出るもの** (図形・図形の字・form control・画像・条件付き書式・数式の cache…) を zip の XML で数え、 前後の差 (= 道具の保存で消えたもの) を出す。 openpyxl / python-docx で数えない (読む時点で捨てる)。 formcase の temp・他人の xlsx への書込み・下の fleet 検出が同じ関数を呼ぶ (2026-09-25) |
+| [`find-openpyxl-writers.py`](../scripts/find-openpyxl-writers.py) | 「openpyxl で読んで保存する script」 × 「その雛形が図形・form control・画像を持つ」 を repo を跨いで列挙する fleet 検出 (紙から黙って消える経路の棚卸し、 走査する repo は呼び元が渡す) → [`#cross-repo-sweep`](office-automation.md#cross-repo-sweep) |
+| [`pdf_form_fill.py`](../scripts/pdf_form_fill.py) | 雛形 PDF への直接印字 engine (= anchor 印字 / NFKC 照合 / 600dpi ラスタ化 / 内蔵検証)、 紙単票向け → [`#pdf-prefill-direct`](office-automation.md#pdf-prefill-direct) |
+| [`check-docx-integrity.py`](../scripts/check-docx-integrity.py) | docx の Word「破損」 判定 (Word 不要・決定論) → [`#docx-checkbox-content-control`](office-automation.md#docx-checkbox-content-control) |
+| [`xlsx-zip-set-cells.py`](../scripts/xlsx-zip-set-cells.py) | xlsx / xlsm の値セルだけを zip 直編集 (Excel も openpyxl も使わない、 他 member は byte 同一、 読み戻し + integrity gate 内蔵、 [`#xlsx-cell-value-zip-surgery`](office-automation.md#xlsx-cell-value-zip-surgery)) |
+| [`check-xlsx-integrity.py`](../scripts/check-xlsx-integrity.py) | xlsx の Excel「破損」 判定 (Excel 不要・決定論)、 zip 直編集 xlsx の納品前 gate |
+| [`normalize-docx-decl.py`](../scripts/normalize-docx-decl.py) / [`docx_decl_patch.py`](../scripts/docx_decl_patch.py) | docx XML 宣言を Word 形式へ正規化 (= 厳格 Word の「破損」 回避) |
+| [`check-office-automation-index.py`](../scripts/check-office-automation-index.py) | `office-automation.md` の slug ↔ `index.yaml` の dangling/orphan 検証 |
+
+## <a id="env-specific-overflow"></a>6. 環境固有・個別実装の追補 (層 1 では持たない)
+
+以下は機械別の install 状態・特定マシンの観察・実装例 (個別 project の生成 driver) など、 universal でない情報。 個人層・project 層が home:
+
+- **作業ルート外フォルダの permission**: `additionalDirectories` の機械別登録状態 → 個人層 `dev-environment.md` 等
+- **app の install 状態 / 機種別 automation 権限の付与状況**: `dev-environment.md` 等
+- **生成 driver の実装例**: 各 project の `scripts/` (= 単票 PDF 直印字・多項目 workbook 一括生成・印刷セット checklist 等)
+- **過去の事故 incident 記録**: `staging-incidents.md` 等
+
+---
+
+## 関連
+
+- 考え方の正本: [`office-automation-principles.md`](office-automation-principles.md)
+- 罠の正本: [`office-automation.md`](office-automation.md) + [`office-automation.index.yaml`](office-automation.index.yaml)
+- 権限の正本: [`claude-code-permissions.md`](claude-code-permissions.md)
+- e-Rad: [`erad-submission.md`](erad-submission.md)
+- 4 層モデル: [`docs/personal-layer.md`](../docs/personal-layer.md) (= layer 1 の本 file は layer 3 を参照しない設計、 環境固有は各層側に追補)

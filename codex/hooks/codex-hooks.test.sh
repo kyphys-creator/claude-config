@@ -1,0 +1,815 @@
+#!/usr/bin/env bash
+# codex-hooks.test.sh — Codex hook schema and adapter behavior tests
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Report the failing line and command instead of a silent exit 1.
+. "$SCRIPT_DIR/../../scripts/lib/test-err-trap.sh"
+TEMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TEMP_ROOT"' EXIT
+# The real guard state must not change: one stage once ran the adapter without the test's state dir, and its two
+# denials were written to the owner's denied-log on every run (measured: lines of the test's session in the real log).
+# Without MANUSCRIPT_CLAIM_GUARD_STATE_DIR the guard writes under ~/.claude/state/manuscript-claim-guard.
+REAL_DENIED_LOG="${HOME}/.claude/state/manuscript-claim-guard/denied-log.jsonl"
+real_denied_lines() { if [ -f "$REAL_DENIED_LOG" ]; then wc -l < "$REAL_DENIED_LOG" | tr -d ' '; else echo 0; fi; }
+REAL_DENIED_BEFORE="$(real_denied_lines)"
+
+python3 -m json.tool "$SCRIPT_DIR/hooks.json" >/dev/null
+grep -q 'pre_tool_policy.py' "$SCRIPT_DIR/hooks.json"
+grep -q 'resume_context.py' "$SCRIPT_DIR/hooks.json"
+grep -q 'session_provenance.py' "$SCRIPT_DIR/hooks.json"
+test -f "$SCRIPT_DIR/session_stamp.py"
+test -f "$SCRIPT_DIR/first_prompt_stamp.py"
+test -f "$SCRIPT_DIR/first_turn_stamp_check.py"
+grep -q 'session_touch.py' "$SCRIPT_DIR/hooks.json"
+python3 - "$SCRIPT_DIR/hooks.json" <<'PY'
+import json
+import sys
+
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+assert any(
+    hook.get("command", "").endswith('session_touch.py" acknowledge')
+    for group in hooks["UserPromptSubmit"] for hook in group.get("hooks", [])
+)
+assert any(
+    group.get("matcher") == "Bash"
+    and any("session_provenance.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["PreToolUse"]
+)
+assert any(
+    group.get("matcher") == "Bash"
+    and any("session_touch.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["PreToolUse"]
+)
+assert any(
+    group.get("matcher") == "apply_patch"
+    and any("session_touch.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["PreToolUse"]
+)
+assert any(
+    any("session_provenance.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["SessionStart"]
+)
+assert any(
+    any("session_provenance.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["UserPromptSubmit"]
+)
+assert any(
+    any("first_prompt_stamp.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["UserPromptSubmit"]
+)
+assert any(
+    any("first_turn_stamp_check.py" in hook.get("command", "") for hook in group.get("hooks", []))
+    for group in hooks["Stop"]
+)
+for matcher in ("Bash", "apply_patch"):
+    assert any(
+        group.get("matcher") == matcher
+        and any("manuscript_claim_guard.py" in hook.get("command", "") for hook in group.get("hooks", []))
+        for group in hooks["PreToolUse"]
+    ), matcher
+PY
+test -f "$SCRIPT_DIR/manuscript_claim_guard.py"
+
+PUBLIC_REPO="$TEMP_ROOT/public"
+mkdir -p "$PUBLIC_REPO/.git" "$PUBLIC_REPO/.claude"
+touch "$PUBLIC_REPO/.claude/public-repo.marker"
+make_pretool_input() {
+  TEST_REPO="$1" TEST_KIND="$2" python3 - <<'PY'
+import json
+import os
+
+values = {
+    "email": "owner" + "@" + "example.edu",
+    "absolute-path": "/Users/" + "owner",
+    "ipv4": "203.0.113." + "9",
+    "token": "gh" + "p_" + ("a" * 30),
+    "discord": "<@" + "123456789012345678" + ">",
+    "allowlisted-email": "noreply" + "@" + "github.com",
+    "removed-email": "owner" + "@" + "example.edu",
+}
+kind = os.environ["TEST_KIND"]
+prefix = "-" if kind == "removed-email" else "+"
+command = (
+    "*** Begin Patch\n"
+    "*** Update File: README.md\n"
+    "@@\n"
+    f"{prefix}{values[kind]}\n"
+    "*** End Patch"
+)
+print(
+    json.dumps(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "cwd": os.environ["TEST_REPO"],
+            "tool_input": {"command": command},
+        }
+    )
+)
+PY
+}
+
+assert_denied() {
+  local kind="$1"
+  local expected_category="$2"
+  local output="$TEMP_ROOT/deny-${kind}.json"
+  make_pretool_input "$PUBLIC_REPO" "$kind" |
+    python3 "$SCRIPT_DIR/pre_tool_policy.py" > "$output"
+  python3 - "$output" "$expected_category" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+result = payload["hookSpecificOutput"]
+assert result["hookEventName"] == "PreToolUse"
+assert result["permissionDecision"] == "deny"
+assert sys.argv[2] in result["permissionDecisionReason"]
+PY
+}
+
+assert_silent() {
+  local repository="$1"
+  local kind="$2"
+  local output="$TEMP_ROOT/silent-${kind}.json"
+  make_pretool_input "$repository" "$kind" |
+    python3 "$SCRIPT_DIR/pre_tool_policy.py" > "$output"
+  [ ! -s "$output" ]
+}
+
+assert_denied email email
+assert_denied absolute-path 'absolute macOS path'
+assert_denied ipv4 'public IPv4 address'
+assert_denied token 'token prefix'
+assert_denied discord 'Discord identifier'
+assert_silent "$PUBLIC_REPO" allowlisted-email
+assert_silent "$PUBLIC_REPO" removed-email
+
+PRIVATE_REPO="$TEMP_ROOT/private"
+mkdir -p "$PRIVATE_REPO/.git"
+assert_silent "$PRIVATE_REPO" email
+
+TOUCH_REMOTE="$TEMP_ROOT/touch-remote.git"
+TOUCH_REPO="$TEMP_ROOT/touch"
+git init -q --bare "$TOUCH_REMOTE"
+git clone -q "$TOUCH_REMOTE" "$TOUCH_REPO"
+# Name the branch: CI's git defaults to master, Apple Git's system config to main.
+git -C "$TOUCH_REPO" symbolic-ref HEAD refs/heads/main
+git -C "$TOUCH_REPO" config user.name Test
+git -C "$TOUCH_REPO" config user.email "test""@""example.invalid"
+printf 'base\n' > "$TOUCH_REPO/edited.txt"
+git -C "$TOUCH_REPO" add edited.txt
+git -C "$TOUCH_REPO" commit -qm 'Initial fixture'
+git -C "$TOUCH_REPO" push -qu origin HEAD:main
+git -C "$TOUCH_REPO" branch --set-upstream-to=origin/main main >/dev/null
+
+make_touch_input() {
+  TEST_REPO="$1" TEST_SESSION="$2" TEST_EVENT="$3" TEST_TOOL="$4" TEST_COMMAND="$5" \
+    python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "hook_event_name": os.environ["TEST_EVENT"],
+    "tool_name": os.environ["TEST_TOOL"],
+    "session_id": os.environ["TEST_SESSION"],
+    "cwd": os.environ["TEST_REPO"],
+    "tool_input": {
+        "command": os.environ["TEST_COMMAND"],
+        "workdir": os.environ["TEST_REPO"],
+    },
+}))
+PY
+}
+
+make_stop_input() {
+  TEST_REPO="$1" TEST_SESSION="$2" TEST_ACTIVE="$3" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "hook_event_name": "Stop",
+    "session_id": os.environ["TEST_SESSION"],
+    "cwd": os.environ["TEST_REPO"],
+    "stop_hook_active": os.environ["TEST_ACTIVE"] == "true",
+}))
+PY
+}
+
+# Dirty after an apply_patch baseline blocks completion, including when the task
+# starts in a parent workspace and the patch path identifies the nested repo.
+DIRTY_PATCH="*** Begin Patch
+*** Update File: $TOUCH_REPO/edited.txt
+*** End Patch"
+make_touch_input "$TEMP_ROOT" dirty-session PreToolUse apply_patch "$DIRTY_PATCH" \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+printf 'uncommitted\n' >> "$TOUCH_REPO/edited.txt"
+make_stop_input "$TOUCH_REPO" dirty-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-dirty.json"
+python3 - "$TEMP_ROOT/nudge-dirty.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["decision"] == "block"
+assert "dirty" in payload["reason"]
+assert "CONVENTIONS.md#completion-git-gate" in payload["reason"]
+PY
+
+# Identical readable dirt is notified once even when it belongs to this task.
+# The automatic continuation does not receive the same full warning again.
+make_stop_input "$TOUCH_REPO" dirty-session true \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-active.json"
+python3 - "$TEMP_ROOT/nudge-active.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload == {}
+PY
+
+# A write attempt to the same unresolved path does not repeat the notification.
+make_touch_input "$TEMP_ROOT" dirty-session PreToolUse apply_patch "$DIRTY_PATCH" \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+make_stop_input "$TOUCH_REPO" dirty-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-same-path.json"
+python3 - "$TEMP_ROOT/nudge-same-path.json" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {}
+PY
+
+git -C "$TOUCH_REPO" restore edited.txt
+make_stop_input "$TOUCH_REPO" dirty-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-clean.json"
+python3 - "$TEMP_ROOT/nudge-clean.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {}
+PY
+
+# A not-yet-existing nested directory still resolves through its nearest
+# existing ancestor to the enclosing repository.
+NESTED_PATCH="*** Begin Patch
+*** Add File: $TOUCH_REPO/new/deep/file.txt
+*** End Patch"
+make_touch_input "$TEMP_ROOT" nested-session PreToolUse apply_patch "$NESTED_PATCH" \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+NESTED_STATE="$(TEST_SESSION=nested-session python3 - <<'PY'
+import hashlib
+import os
+print(hashlib.sha256(os.environ["TEST_SESSION"].encode()).hexdigest() + ".json")
+PY
+)"
+python3 - "$TEMP_ROOT/state/$NESTED_STATE" "$TOUCH_REPO" <<'PY'
+import json
+import os
+import sys
+
+repos = json.load(open(sys.argv[1], encoding="utf-8"))["repos"]
+assert os.path.realpath(sys.argv[2]) in repos
+PY
+
+# A commit-only call is remembered and the resulting ahead state blocks Stop.
+make_touch_input "$TOUCH_REPO" ahead-session PreToolUse Bash 'git commit -m split' \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+printf 'ahead\n' > "$TOUCH_REPO/ahead.txt"
+git -C "$TOUCH_REPO" add ahead.txt
+git -C "$TOUCH_REPO" commit -qm 'Ahead fixture'
+make_stop_input "$TOUCH_REPO" ahead-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-ahead.json"
+python3 - "$TEMP_ROOT/nudge-ahead.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["decision"] == "block"
+reason = payload["reason"]
+assert "commit and push were split into separate calls" in reason
+assert "ahead=1, behind=0" in reason
+PY
+
+# The later push resolves the gate; this proves the previous Stop, not a vague
+# reminder, detects the unsafe gap between commit and a separate push call.
+git -C "$TOUCH_REPO" push -qu origin HEAD:main
+make_stop_input "$TOUCH_REPO" ahead-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-pushed.json"
+python3 - "$TEMP_ROOT/nudge-pushed.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {}
+PY
+
+# An unchanged pre-existing dirty path is not attributed to this task. A
+# separate explicit-path commit can be pushed while that baseline dirt remains.
+printf 'pre-existing user work\n' >> "$TOUCH_REPO/edited.txt"
+make_touch_input "$TOUCH_REPO" baseline-dirty-session PreToolUse Bash 'git commit -m owned -- owned.txt' \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+printf 'owned\n' > "$TOUCH_REPO/owned.txt"
+git -C "$TOUCH_REPO" add owned.txt
+git -C "$TOUCH_REPO" commit -qm 'Owned fixture' -- owned.txt
+git -C "$TOUCH_REPO" push -qu origin HEAD:main
+make_stop_input "$TOUCH_REPO" baseline-dirty-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-baseline-dirty.json"
+python3 - "$TEMP_ROOT/nudge-baseline-dirty.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {}
+PY
+git -C "$TOUCH_REPO" restore edited.txt
+
+# A fetched upstream advance is classified as behind, while ls-remote verifies
+# that the comparison uses the live remote branch head.
+OTHER_REPO="$TEMP_ROOT/other"
+git clone -q "$TOUCH_REMOTE" "$OTHER_REPO"
+git -C "$OTHER_REPO" config user.name Test
+git -C "$OTHER_REPO" config user.email "test""@""example.invalid"
+git -C "$OTHER_REPO" checkout -q main
+make_touch_input "$TOUCH_REPO" behind-session PreToolUse apply_patch "$DIRTY_PATCH" \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+printf 'local work\n' >> "$TOUCH_REPO/edited.txt"
+printf 'remote work\n' > "$OTHER_REPO/remote.txt"
+git -C "$OTHER_REPO" add remote.txt
+git -C "$OTHER_REPO" commit -qm 'Remote fixture'
+git -C "$OTHER_REPO" push -qu origin HEAD:main
+git -C "$TOUCH_REPO" fetch -q origin
+make_stop_input "$TOUCH_REPO" behind-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-behind.json"
+python3 - "$TEMP_ROOT/nudge-behind.json" <<'PY'
+import json
+import sys
+
+reason = json.load(open(sys.argv[1], encoding="utf-8"))["reason"]
+assert "behind=1" in reason
+assert "local HEAD" in reason
+PY
+
+# A review copy cloned from a local working tree cannot push to its checked-out
+# branch (Git refuses by default), so its head is not compared; task dirt still blocks.
+WORK_COPY="$TEMP_ROOT/work-copy"
+git clone -q "$OTHER_REPO" "$WORK_COPY"
+git -C "$WORK_COPY" config user.name Test
+git -C "$WORK_COPY" config user.email "test""@""example.invalid"
+make_touch_input "$WORK_COPY" workcopy-session PreToolUse Bash 'git commit -m review' \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+printf 'review\n' > "$WORK_COPY/review.txt"
+git -C "$WORK_COPY" add review.txt
+git -C "$WORK_COPY" commit -qm 'Review fixture'
+printf 'task dirt\n' > "$WORK_COPY/review.txt"
+make_stop_input "$WORK_COPY" workcopy-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-workcopy-dirty.json"
+python3 - "$TEMP_ROOT/nudge-workcopy-dirty.json" <<'PY'
+import json
+import sys
+
+reason = json.load(open(sys.argv[1], encoding="utf-8"))["reason"]
+assert "dirty" in reason, reason
+assert "!= origin/" not in reason, reason
+PY
+git -C "$WORK_COPY" restore review.txt
+make_stop_input "$WORK_COPY" workcopy-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-workcopy.json"
+python3 - "$TEMP_ROOT/nudge-workcopy.json" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {}
+PY
+
+# Once the source checkout accepts pushes to its current branch, the heads are
+# compared again.
+git -C "$OTHER_REPO" config receive.denyCurrentBranch updateInstead
+make_touch_input "$WORK_COPY" workcopy-push-session PreToolUse Bash 'git commit -m again' \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+printf 'again\n' > "$WORK_COPY/again.txt"
+git -C "$WORK_COPY" add again.txt
+git -C "$WORK_COPY" commit -qm 'Again fixture'
+make_stop_input "$WORK_COPY" workcopy-push-session false \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" nudge \
+  > "$TEMP_ROOT/nudge-workcopy-push.json"
+python3 - "$TEMP_ROOT/nudge-workcopy-push.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["decision"] == "block"
+assert "!= origin/main" in payload["reason"], payload["reason"]
+PY
+
+# stale-state prune: a >30-day-old file is removed on the next track, a fresh one survives
+STALE_FILE="$TEMP_ROOT/state/stale-session.json"
+printf '/nonexistent\n' > "$STALE_FILE"
+touch -t 202601010000 "$STALE_FILE"
+make_touch_input "$TOUCH_REPO" prune-session PreToolUse Bash 'git status' \
+  | CODEX_SESSION_TOUCH_STATE_DIR="$TEMP_ROOT/state" python3 "$SCRIPT_DIR/session_touch.py" track
+[ ! -e "$STALE_FILE" ]
+ls "$TEMP_ROOT/state"/*.json >/dev/null
+
+python3 -B "$SCRIPT_DIR/session_touch.test.py"
+
+PROVENANCE_STATE="$TEMP_ROOT/provenance-state"
+printf '%s' '{"hook_event_name":"SessionStart","session_id":"codex-test-session","model":"gpt-test"}' \
+  | CLAUDE_CONFIG_SESSION_PROVENANCE_STATE_DIR="$PROVENANCE_STATE" \
+    python3 "$SCRIPT_DIR/session_provenance.py"
+grep -qx 'model=gpt-test' "$PROVENANCE_STATE/codex-test-session.env"
+printf '%s' '{"hook_event_name":"UserPromptSubmit","session_id":"codex-test-session","model":"gpt-test-prompt"}' \
+  | CLAUDE_CONFIG_SESSION_PROVENANCE_STATE_DIR="$PROVENANCE_STATE" \
+    python3 "$SCRIPT_DIR/session_provenance.py"
+grep -qx 'model=gpt-test-prompt' "$PROVENANCE_STATE/codex-test-session.env"
+printf '%s' '{"hook_event_name":"PreToolUse","session_id":"codex-test-session","model":"gpt-test-2","effort":{"level":"xhigh"}}' \
+  | CLAUDE_CONFIG_SESSION_PROVENANCE_STATE_DIR="$PROVENANCE_STATE" \
+    python3 "$SCRIPT_DIR/session_provenance.py"
+grep -qx 'model=gpt-test-2' "$PROVENANCE_STATE/codex-test-session.env"
+grep -qx 'effort=xhigh' "$PROVENANCE_STATE/codex-test-session.env"
+
+STAMP="$(CODEX_APP_TOOLS_PIPE_PATH="$TEMP_ROOT/fake-app-pipe" \
+  CODEX_SESSION_ID="codex-test-session" \
+  CLAUDE_CONFIG_SESSION_PROVENANCE_STATE_DIR="$PROVENANCE_STATE" \
+  python3 "$SCRIPT_DIR/session_stamp.py")"
+python3 - "$STAMP" <<'PY'
+import socket
+import sys
+
+host = socket.gethostname().split(".")[0]
+assert sys.argv[1] == (
+    f"🖥 {host} · Codex desktop · account unknown · session codex-te "
+    "· model gpt-test-2 · effort xhigh"
+)
+PY
+
+THREAD_STATE="$TEMP_ROOT/thread-state"
+mkdir -p "$THREAD_STATE"
+python3 - "$THREAD_STATE/state_9.sqlite" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+connection.execute(
+    "CREATE TABLE threads (id TEXT PRIMARY KEY, model TEXT, reasoning_effort TEXT)"
+)
+connection.execute(
+    "INSERT INTO threads VALUES (?, ?, ?)",
+    ("sqlite-test-session", "gpt-thread-state", "medium"),
+)
+connection.commit()
+connection.close()
+PY
+STAMP_THREAD_STATE="$(env -u CODEX_APP_TOOLS_PIPE_PATH -u CODEX_SQLITE_HOME \
+  CODEX_HOME="$THREAD_STATE" CODEX_SESSION_ID="sqlite-test-session" \
+  CLAUDE_CONFIG_SESSION_PROVENANCE_STATE_DIR="$TEMP_ROOT/no-provenance-cache" \
+  python3 "$SCRIPT_DIR/session_stamp.py")"
+python3 - "$STAMP_THREAD_STATE" <<'PY'
+import socket
+import sys
+
+host = socket.gethostname().split(".")[0]
+assert sys.argv[1] == (
+    f"🖥 {host} · Codex surface unknown · account unknown · session sqlite-t "
+    "· model gpt-thread-state · effort medium"
+)
+PY
+
+STAMP_UNKNOWN="$(env -u CODEX_APP_TOOLS_PIPE_PATH -u CODEX_SESSION_ID -u CODEX_THREAD_ID \
+  -u CODEX_SQLITE_HOME \
+  CODEX_HOME="$TEMP_ROOT/no-codex-home" python3 "$SCRIPT_DIR/session_stamp.py")"
+case "$STAMP_UNKNOWN" in
+  *'Codex surface unknown · account unknown · session unknown · model unknown · effort unknown') ;;
+  *) echo "unexpected unknown stamp: $STAMP_UNKNOWN" >&2; exit 1 ;;
+esac
+
+printf '%s' '{"hook_event_name":"SessionStart","source":"startup","session_id":"codex-test-session","model":"gpt-test","effort":{"level":"high"}}' \
+  | CODEX_APP_TOOLS_PIPE_PATH="$TEMP_ROOT/fake-app-pipe" \
+    python3 "$SCRIPT_DIR/resume_context.py" > "$TEMP_ROOT/resume.json"
+python3 - "$TEMP_ROOT/resume.json" <<'PY'
+import json
+import socket
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+context = payload["hookSpecificOutput"]["additionalContext"]
+host = socket.gethostname().split(".")[0]
+assert f"The worker host for this session is {host}." in context
+assert (
+    f"🖥 {host} · Codex desktop · account unknown · session codex-te "
+    "· model gpt-test · effort high"
+) in context
+assert "first user-visible reply" in context
+assert "codex:codex-test-session, model=gpt-test, effort=high" in context
+assert "CLAUDE_CONFIG_AGENT_MODEL=gpt-test" in context
+assert "verify it on this host with hostname" in context
+assert "do not request step-by-step confirmation" in context
+assert "stopping point, next action" in context
+assert "no durable records or separate closure report" in context
+assert "CONVENTIONS.md#auto-update-protocol" in context
+assert "repository-root AGENTS.md first" in context
+assert "nested root AGENTS.md manually" in context
+assert "shell cd does not prove it was in the startup chain" in context
+PY
+
+printf '%s' '{"hook_event_name":"SessionStart","source":"compact","session_id":"codex-test-session","model":"gpt-test"}' \
+  | CODEX_APP_TOOLS_PIPE_PATH="$TEMP_ROOT/fake-app-pipe" \
+    python3 "$SCRIPT_DIR/resume_context.py" > "$TEMP_ROOT/compact.json"
+python3 - "$TEMP_ROOT/compact.json" <<'PY'
+import json
+import sys
+
+context = json.load(open(sys.argv[1], encoding="utf-8"))["hookSpecificOutput"]["additionalContext"]
+assert "first user-visible reply" not in context
+assert "account unknown" not in context
+PY
+
+# Manuscript claims and authority rules: same predicate as the Claude hook and the Git pre-commit.
+# Synthetic manuscript and transcript only. Semantic home: conventions/manuscript-claim-ownership.md.
+MCG_REPO="$TEMP_ROOT/mcg-paper"
+MCG_HOME="$TEMP_ROOT/mcg-home"
+mkdir -p "$MCG_REPO/src" "$MCG_HOME/.codex/sessions/2026/01/01"
+git init -q "$MCG_REPO"
+printf '%s\n' '\documentclass{article}' '\begin{document}' '\title{A toy model of heat flow}' \
+  '\begin{abstract}' 'We find that the toy lattice conducts heat. The conductivity grows linearly.' '\end{abstract}' \
+  '\section{Method}' 'Body.' '\begin{align}' 'u &= v \label{eq:uv}' '\end{align}' '\end{document}' \
+  > "$MCG_REPO/src/main.tex"
+git -C "$MCG_REPO" add -A
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
+  git -C "$MCG_REPO" commit -q -m init
+printf '%s\n' '{"type":"event_msg","payload":{"type":"user_message","message":"二文目は削ってよい"}}' \
+  > "$MCG_HOME/.codex/sessions/2026/01/01/rollout-2026-01-01T00-00-00-cdx-mcg.jsonl"
+mcg_patch() {  # $1 = removed abstract line, $2 = added line
+  MCG_REPO="$MCG_REPO" MCG_OLD="$1" MCG_NEW="$2" python3 - <<'PY'
+import json
+import os
+
+patch = (
+    "*** Begin Patch\n*** Update File: src/main.tex\n@@\n \\begin{abstract}\n"
+    f"-{os.environ['MCG_OLD']}\n+{os.environ['MCG_NEW']}\n*** End Patch"
+)
+print(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "session_id": "cdx-mcg",
+                  "cwd": os.environ["MCG_REPO"], "tool_input": {"command": patch}}))
+PY
+}
+mcg_decision() {
+  MANUSCRIPT_CLAIM_GUARD_STATE_DIR="$TEMP_ROOT/mcg-state" MANUSCRIPT_CLAIM_GUARD_HOME="$MCG_HOME" \
+    python3 "$SCRIPT_DIR/manuscript_claim_guard.py" | grep -q '"permissionDecision": "deny"' && echo deny || echo allow
+}
+MCG_FULL='We find that the toy lattice conducts heat. The conductivity grows linearly.'
+# negative control: dropping a claim from the abstract without approval is denied
+[ "$(mcg_patch "$MCG_FULL" 'We find that the toy lattice conducts heat.' | mcg_decision)" = deny ]
+# article-only copyedit passes
+[ "$(mcg_patch "$MCG_FULL" 'We find that a toy lattice conducts heat. The conductivity grows linearly.' | mcg_decision)" = allow ]
+# a patch whose removed line is not in the file (the tool itself would fail) is not a protected change
+[ "$(mcg_patch 'We never find this.' 'Anything.' | mcg_decision)" = allow ]
+# after the author's verbatim words are recorded for this session and region, the same patch passes
+MANUSCRIPT_CLAIM_GUARD_STATE_DIR="$TEMP_ROOT/mcg-state" MANUSCRIPT_CLAIM_GUARD_HOME="$MCG_HOME" \
+  python3 "$SCRIPT_DIR/../../scripts/manuscript-claim-guard.py" approve --session codex:cdx-mcg \
+  --file "$MCG_REPO/src/main.tex" --region abstract --change 'drop the second sentence' --quote '二文目は削ってよい' >/dev/null
+[ "$(mcg_patch "$MCG_FULL" 'We find that the toy lattice conducts heat.' | mcg_decision)" = allow ]
+# Bash git commit carries the same predicate: an equation changed through the shell, another session, no approval
+MCG_BASH="$(MCG_REPO="$MCG_REPO" python3 -c 'import json,os; print(json.dumps({"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"cdx-other","cwd":os.environ["MCG_REPO"],"tool_input":{"command":"git -C "+os.environ["MCG_REPO"]+" commit -a -m x"}}))')"
+python3 - "$MCG_REPO/src/main.tex" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read().replace("u &= v", "u &= -v")
+open(path, "w", encoding="utf-8").write(text)
+PY
+[ "$(printf '%s' "$MCG_BASH" | mcg_decision)" = deny ]
+
+# The native Desktop path may omit tool workdir while reporting only task cwd.
+MANUSCRIPT_CLAIM_GUARD_STATE_DIR="$TEMP_ROOT/mcg-state" MANUSCRIPT_CLAIM_GUARD_HOME="$MCG_HOME" \
+  MCG_REPO="$MCG_REPO" MCG_ADAPTER="$SCRIPT_DIR/manuscript_claim_guard.py" python3 - <<'PY'
+import json, os, subprocess, sys
+repo = os.environ['MCG_REPO']
+def inspect(command, workdir=None):
+    ti = {'command': command}
+    if workdir is not None:
+        ti['workdir'] = workdir
+    event = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'session_id': 'cdx-cwd',
+             'cwd': os.path.dirname(repo), 'tool_input': ti}
+    result = subprocess.run([sys.executable, os.environ['MCG_ADAPTER']], input=json.dumps(event),
+                            text=True, capture_output=True, check=True)
+    output = json.loads(result.stdout)['hookSpecificOutput'] if result.stdout.strip() else {}
+    return output.get('permissionDecision'), output.get('permissionDecisionReason', '')
+for directory in (None, '', 'relative'):
+    decision, reason = inspect('git commit -a -m x', directory)
+    assert decision == 'deny' and 'working directory' in reason, (directory, decision, reason)
+for command, directory in [('git commit -a -m x', repo), ('git -C ' + repo + ' commit -a -m x', None)]:
+    decision, reason = inspect(command, directory)
+    assert decision == 'deny' and 'inspection unavailable' not in reason, (command, decision, reason)
+for command in ('git status', 'git add --dry-run .', 'git commit --dry-run'):
+    decision, reason = inspect(command)
+    assert decision != 'deny', (command, reason)
+print('Codex working-directory contract: 8 cases passed')
+PY
+
+# Stop uses recorded content and final-answer phase, preserving the legacy unphased format.
+python3 - "$SCRIPT_DIR" "$TEMP_ROOT" <<'PY'
+import datetime, importlib.util, json, os, subprocess, sys
+from pathlib import Path
+hooks, root = Path(sys.argv[1]), Path(sys.argv[2])
+engine = hooks.parent.parent / 'scripts/manuscript-claim-guard.py'
+spec = importlib.util.spec_from_file_location('reporting_test', engine)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+state = root / 'reporting-state'; state.mkdir()
+sid = 'codex-reporting-fixture'; tr = root / (sid + '.jsonl')
+now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+entry = {'kind':'change','repo':'/tmp/synthetic/demo','file':'CLAUDE.md','sha':'fixture',
+         'removed':['Keep the review record.'],'n':{'removed':1},'session':'codex:'+sid,'at':now}
+(state / m.ADDITIVE_LOG).write_text(json.dumps(entry) + '\n')
+user = {'type':'event_msg','timestamp':'2000-01-01T00:00:00Z',
+        'payload':{'type':'user_message','message':'Check this fixture.'}}
+env = dict(os.environ, MANUSCRIPT_CLAIM_GUARD_STATE_DIR=str(state))
+def transcript(partial, final):
+    lines = [user]
+    for phase,text in [('commentary',partial),('final_answer',final)]:
+        lines.append({'type':'response_item','timestamp':now,'payload':{'type':'message','role':'assistant',
+                      'phase':phase,'content':[{'type':'output_text','text':text}]}})
+    tr.write_text(''.join(json.dumps(e,ensure_ascii=False)+'\n' for e in lines))
+def stop(final):
+    p = subprocess.run([sys.executable,str(hooks/'manuscript_claim_guard.py'),'--stop'],
+        input=json.dumps({'session_id':sid,'transcript_path':str(tr),'last_assistant_message':final}),
+        capture_output=True,text=True,check=True,env=env)
+    return json.loads(p.stdout) if p.stdout.strip() else {}
+line = m.additive_line(entry)
+transcript(line, 'Done.')
+blocked = stop('Done.')
+assert blocked.get('decision') == 'block', 'commentary must not discharge final reporting'
+assert '"last_assistant_message": true' in blocked['reason'], 'diagnostic reports key presence'
+assert '"transcript_path": true' in blocked['reason'] and str(tr) not in blocked['reason'], 'diagnostic omits field values'
+transcript('Done.', 'CLAUDE.md を変えた。')
+assert stop('CLAUDE.md を変えた。').get('decision') == 'block', 'vague report must not discharge reporting'
+transcript('Done.', line)
+assert stop(line) == {}, 'canonical final report must pass'
+assert len(json.loads((state/m.ADDITIVE_HANDLED).read_text())['handled']) == 1
+print('Codex Stop: commentary, vague final and complete final controls passed')
+# One physical final is present in both the rollout and Stop input; count it once.
+(state / m.ADDITIVE_HANDLED).unlink()
+second = dict(entry, sha='fixture-second', removed=['Keep the review record, including another item.'])
+(state / m.ADDITIVE_LOG).write_text(json.dumps(entry) + '\n' + json.dumps(second) + '\n')
+transcript('Done.', line)
+assert stop(line).get('decision') == 'block', 'one physical final line cannot disclose two records'
+assert len(json.loads((state/m.ADDITIVE_HANDLED).read_text())['handled']) == 1
+assert stop(line.replace(' ', '  ')).get('decision') == 'block', 'whitespace-normalized event is not a second physical answer'
+assert len(json.loads((state/m.ADDITIVE_HANDLED).read_text())['handled']) == 1
+assert stop(line).get('decision') == 'block', 'the next Stop cannot reuse a previously consumed line'
+assert len(json.loads((state/m.ADDITIVE_HANDLED).read_text())['handled']) == 1
+transcript('Done.', line + '\n' + line)
+assert stop(line + '\n' + line) == {}, 'two physical lines must disclose two matching records'
+assert len(json.loads((state/m.ADDITIVE_HANDLED).read_text())['handled']) == 2
+print('Codex Stop: one line per record, event/rollout deduplication and repeated Stop controls passed')
+
+# Exercise runtime CLI exit codes and the shell caller with a deterministic app-server.
+audit = hooks.parent.parent/'scripts/audit-codex-hook-runtime.py'
+caller = hooks.parent.parent/'scripts/audit-codex-integration.sh'
+server = root/'fixture-app-server'
+server.write_text('''#!/usr/bin/env python3
+import json, os, sys
+if '--version' in sys.argv:
+    print('codex fixture')
+    raise SystemExit(0)
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    if request.get('method') == 'initialize':
+        result = {}
+    else:
+        records = [{'eventName':'preToolUse','matcher':name,'enabled':True,'trustStatus':'trusted',
+                    'source':'user','command':'python3 manuscript_claim_guard.py'} for name in ['Bash','apply_patch']]
+        records.append({'eventName':'stop','matcher':None,'enabled':True,
+                        'trustStatus':os.environ.get('FIXTURE_STOP_TRUST','untrusted'),
+                        'source':'user','command':'python3 manuscript_claim_guard.py --stop'})
+        result = {'data':[{'hooks':records,'errors':[]}]}
+        if os.environ.get('FIXTURE_BROKEN'):
+            result = {'data':[None]}
+    print(json.dumps({'id':request['id'],'result':result}),flush=True)
+''')
+server.chmod(0o755)
+for trust, rc in [('untrusted',1),('trusted',0)]:
+    p = subprocess.run([sys.executable,str(audit),'--codex',str(server)],
+        capture_output=True,text=True,env=dict(os.environ,FIXTURE_STOP_TRUST=trust))
+    report = json.loads(p.stdout)
+    assert p.returncode == rc, (trust,p.returncode,p.stdout,p.stderr)
+    assert report.get('missing') == (['stop'] if rc else []), report
+    assert report['live_dispatch'] == 'not_tested'
+p = subprocess.run([sys.executable,str(audit),'--codex',str(server)],
+    capture_output=True,text=True,env=dict(os.environ,FIXTURE_BROKEN='1'))
+assert p.returncode == 3 and json.loads(p.stdout)['configuration'] == 'inspection_unavailable', (p.returncode,p.stdout,p.stderr)
+p = subprocess.run(['bash',str(caller),'--runtime','--codex',str(server)],capture_output=True,text=True)
+assert p.returncode != 0 and 'MISSING: Codex authority hook(s): stop' in p.stdout, (p.returncode,p.stdout,p.stderr)
+print('Codex audit: untrusted Stop, trusted Stop, failure exit and caller display passed')
+cache = root/'trust-cache.json'
+for trust, broken, prefix, rc in [('trusted',False,'',0),('untrusted',False,'🔴',1),('trusted',True,'⚠️',3)]:
+    env = dict(os.environ, FIXTURE_STOP_TRUST=trust)
+    if broken:
+        env['FIXTURE_BROKEN'] = '1'
+    p = subprocess.run([sys.executable,str(audit),'--codex',str(server),'--cache',str(cache),'--surface'],
+                       capture_output=True,text=True,env=env)
+    assert p.returncode == rc, (p.returncode,p.stderr)
+    assert p.stdout.startswith(prefix) if prefix else not p.stdout, p.stdout
+    saved = cache.read_bytes()
+    # A cached read must not try even an explicitly missing executable.
+    q = subprocess.run([sys.executable,str(audit),'--codex',str(root/'absent'),'--cache',str(cache),'--read-cache','--surface'],
+                       capture_output=True,text=True)
+    assert q.returncode == rc and q.stdout == p.stdout and cache.read_bytes() == saved, (q.returncode,q.stdout,q.stderr)
+    report = json.loads(saved)
+    assert report['binary'] == str(server.resolve()) and report['binary_version'] == 'codex fixture'
+    from datetime import datetime, timezone, timedelta
+    report['checked_at'] = (datetime.now(timezone.utc)-timedelta(days=3)).isoformat()
+    cache.write_text(json.dumps(report))
+    q = subprocess.run([sys.executable,str(audit),'--cache',str(cache),'--read-cache','--surface'],capture_output=True,text=True)
+    assert '古い' in q.stdout, q.stdout
+print('Codex audit: cache round-trip, read-only states and stale observations passed')
+PY
+
+# Approval sources: generated hook feedback is not an author's message.
+python3 - "$SCRIPT_DIR/../../scripts/manuscript-claim-guard.py" "$TEMP_ROOT" "$MCG_REPO" <<'PY'
+import json, os, pathlib, subprocess, sys
+engine, root, repo = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+human = 'Keep the existing constraints and fix the parser.'
+generated = 'Generated feedback cannot authorize a change.'
+envelope = '<hook_prompt hook_run_id="stop:1:synthetic">' + generated + '</hook_prompt>'
+env = dict(os.environ, MANUSCRIPT_CLAIM_GUARD_STATE_DIR=str(root / 'source-state'),
+           MANUSCRIPT_CLAIM_GUARD_HOME=str(root / 'source-home'))
+for carrier in ('event_msg', 'response_item'):
+    sid = 'source-' + carrier
+    tr = root / (sid + '.jsonl')
+    def row(text):
+        payload = ({'type':'user_message','message':text} if carrier == 'event_msg' else
+                   {'type':'message','role':'user','content':[{'type':'input_text','text':text}]})
+        return {'type':carrier,'payload':payload}
+    tr.write_text('\n'.join(json.dumps(row(t)) for t in (human, envelope)) + '\n')
+    args = [sys.executable, str(engine), 'approve', '--session', 'codex:' + sid,
+            '--transcript', str(tr), '--file', str(repo / 'src/main.tex'), '--region', 'abstract',
+            '--change', 'synthetic source check']
+    def run(*extra):
+        return subprocess.run(args + list(extra), capture_output=True, text=True, env=env)
+    p = run('--latest')
+    assert p.returncode == 0, (carrier, p.returncode, p.stderr)
+    state = root / 'source-state' / 'approvals' / ('codex-' + sid + '.jsonl')
+    rows = [json.loads(s) for s in state.read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]['quote'] == human, (carrier, rows)
+    before = state.read_bytes()
+    p = run('--quote', generated)
+    assert p.returncode == 4 and state.read_bytes() == before, (carrier, p.returncode, p.stderr)
+    with tr.open('a') as f:
+        f.write(json.dumps(row('Leave the parser unchanged.')) + '\n')
+    p = run('--quote', human)
+    assert p.returncode == 5 and state.read_bytes() == before, (carrier, p.returncode, p.stderr)
+    tr.write_text(json.dumps(row(envelope)) + '\n')
+    p = run('--latest')
+    assert p.returncode == 4 and state.read_bytes() == before, (carrier, p.returncode, p.stderr)
+    print('R5:', carrier, 'latest human, generated quote rejection, recency and hook-only checks passed')
+PY
+
+python3 - "$SCRIPT_DIR/../../scripts/manuscript-claim-guard.py" "$TEMP_ROOT" "$MCG_REPO" <<'PY'
+import json, os, pathlib, subprocess, sys
+engine, root, repo = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+human = 'Keep the constraints and repair the parser.'
+body = 'PRIVATE_GENERATED_BODY_DO_NOT_PRINT'
+env = dict(os.environ, MANUSCRIPT_CLAIM_GUARD_STATE_DIR=str(root/'tag-state'), MANUSCRIPT_CLAIM_GUARD_HOME=str(root/'tag-home'))
+for carrier in ('event_msg','response_item'):
+    sid = 'tags-' + carrier
+    tr = root/(sid+'.jsonl')
+    def row(text):
+        payload = {'type':'user_message','message':text} if carrier == 'event_msg' else {
+            'type':'message','role':'user','content':[{'type':'input_text','text':text}]}
+        return {'type':carrier,'payload':payload}
+    tr.write_text('\n'.join(json.dumps(row(t)) for t in [human,'<turn_aborted>'+body,'<foo bar="1">'+body])+'\n')
+    args = [sys.executable,str(engine),'approve','--session','codex:'+sid,'--transcript',str(tr),
+            '--file',str(repo/'src/main.tex'),'--region','abstract','--change','synthetic tag check']
+    p = subprocess.run(args+['--latest'],capture_output=True,text=True,env=env)
+    assert p.returncode == 0, (p.returncode,p.stderr)
+    state=root/'tag-state/approvals'/('codex-'+sid+'.jsonl')
+    assert json.loads(state.read_text().splitlines()[-1])['quote']==human
+    saved=state.read_bytes()
+    p=subprocess.run(args+['--quote',body],capture_output=True,text=True,env=env)
+    assert p.returncode==4 and state.read_bytes()==saved, (p.returncode,p.stderr)
+    assert 'foo=1' in p.stderr and 'turn_aborted=1' in p.stderr and body not in p.stderr
+    tr.write_text(json.dumps(row('<foo/>'+body))+'\n')
+    p=subprocess.run(args+['--latest'],capture_output=True,text=True,env=env)
+    assert p.returncode==4 and 'foo=1' in p.stderr and body not in p.stderr and state.read_bytes()==saved
+print('Approval sources: unknown tags excluded, latest human retained and body-free diagnostics passed')
+PY
+
+REAL_DENIED_AFTER="$(real_denied_lines)"
+if [ "$REAL_DENIED_AFTER" != "$REAL_DENIED_BEFORE" ]; then
+  # another session's guard may write while the test runs; a test line is told by its session name
+  if tail -n "$((REAL_DENIED_AFTER - REAL_DENIED_BEFORE))" "$REAL_DENIED_LOG" | grep '"codex:cdx-' >/dev/null; then
+    echo "FAIL: the test wrote to the real denied-log ($REAL_DENIED_LOG): give every adapter call MANUSCRIPT_CLAIM_GUARD_STATE_DIR" >&2
+    exit 1
+  fi
+fi
+echo "Codex hook tests passed"

@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# docx-to-pdf.sh — Word docx/doc → PDF 変換（macOS 既定 Word 忠実版 → --pages で Pages → 非 macOS LibreOffice、Word 経路は事前 grant 済み staging dir 経由で sandbox dialog を回避、office-automation.md#docx-to-pdf-pages）
+# docx-to-pdf.sh — convert a Word document (docx/doc) to PDF, cross-platform.
+#
+# Sibling of xlsx-to-pdf.sh (spreadsheets). python-docx / textutil can read or
+# edit a .docx but cannot RENDER a PDF; producing a visual copy (to show, to
+# attach, or to hand a form to someone to fill in) needs a real engine. This
+# picks one automatically.
+#
+# Why a docx-specific script (not just "run soffice"):
+#   On macOS, LibreOffice is often NOT installed (Microsoft Office + Pages are),
+#   and office-automation.md marks LibreOffice as "not recommended on mac".
+#   Reaching for `soffice` first is the exact failure mode this script prevents —
+#   call this and it uses the right engine for the platform.
+#
+# Engine selection:
+#   macOS (default) : Microsoft Word via osascript — layout-faithful, for a
+#                     reviewer-facing copy. Handles the stale-cache + cold-start
+#                     gotchas (unique staged path + background `open -g` + wait
+#                     until listed). Never quits/kills a Word that holds documents
+#                     this script did not open, never comes to the front
+#                     (office-automation.md#office-app-reset-guard).
+#                     ⭐ docx は「Word 体裁が契約」 の正式書類 (= 行政・学術・社内
+#                     様式) が大半なので、 default は Word 忠実版に倒す
+#                     (2026-06-23 反転、 office-automation.md §docx-pdf-stale-cache
+#                     「context-first reflex」 = Pages の re-flow で官公署様式の
+#                     見出し/表の重なり artifact を踏んだ RCA)。
+#   --pages         : Pages.app via AppleScript — layout NON-faithful (= re-flow).
+#                     content check (= 値が入ったか) のみで体裁不問 + Word 不在
+#                     環境 + cold-start 嫌い のいずれかなら明示で選ぶ。
+#   --word          : (backward compat、 default 反転前の旧 flag) no-op、 即 shift。
+#   non-macOS       : LibreOffice (soffice / libreoffice) on PATH.
+#
+# 🔑 Word engine runs through a PRE-GRANTED STAGING DIR (2026-08-21):
+#   Word is App-Sandboxed and pops its own "ファイル アクセスを許可" dialog the first
+#   time it has to WRITE into a folder (= the PDF export; reading the docx is fine).
+#   Every new project dir → a new dialog, and a remote operator cannot click it.
+#   So the docx is copied into the Office App Group container
+#   (~/Library/Group Containers/UBF8T346G9.Office/claude-office-staging/<unique>/),
+#   which is inside Word's sandbox = no grant needed; the PDF is exported there and
+#   copied back next to the source. Caller-visible API is unchanged.
+#   --no-stage / CLAUDE_OFFICE_STAGING=0 restores the in-place behaviour;
+#   CLAUDE_OFFICE_STAGING_DIR=<dir> overrides the root (= a fixed dir you granted
+#   once by hand). Lib = scripts/lib/office-staging.sh,
+#   doc = office-automation.md#office-pregranted-staging-dir.
+#
+# When the Word route fails it prints what is now unverified (page count, wrapped
+# lines, fonts on paper) and the next routes to try (実測 = a failed conversion was
+# taken as the end of the visual check and the form was shown broken;
+# office-automation.md#docx-layout-unverified). The layout check itself =
+# diff-form-docx.py (renders the blank and the filled form with this script).
+#
+# Refs: conventions/office-automation.md  #docx-to-pdf-pages  #docx-pdf-stale-cache
+#
+# Usage:
+#   docx-to-pdf.sh [--pages|--word] [--no-stage] <input.docx> [output.pdf]
+#     output.pdf  defaults to <input> with a .pdf extension, next to the source.
+set -euo pipefail
+
+ENGINE_PAGES=0
+NO_STAGE=0
+while :; do
+  case "${1:-}" in
+    --pages)    ENGINE_PAGES=1; shift ;;
+    --word)     shift ;;   # backward compat: default is now Word, so --word is no-op
+    --no-stage) NO_STAGE=1; shift ;;
+    *) break ;;
+  esac
+done
+
+SRC="${1:?usage: docx-to-pdf.sh [--pages|--word] [--no-stage] <input.docx> [output.pdf]}"
+SRC="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
+[ -f "$SRC" ] || { echo "❌ not found: $SRC" >&2; exit 1; }
+PDF="${2:-${SRC%.*}.pdf}"
+case "$PDF" in /*) : ;; *) PDF="$(pwd)/$PDF" ;; esac
+rm -f "$PDF"
+
+# staging lib (= 無ければ no-op で in-place 続行)
+STAGING_LIB="$(cd "$(dirname "$0")" && pwd)/lib/office-staging.sh"
+if [ -f "$STAGING_LIB" ]; then
+  # shellcheck source=lib/office-staging.sh
+  . "$STAGING_LIB"
+else
+  office_stage_file() { return 1; }; office_stage_cleanup() { :; }; office_stage_prune() { :; }; office_stage_report_fallback() { :; }
+fi
+# app guard (= user の文書を持つ Word を quit / kill しない + 前面に出さない、 office-automation.md#office-app-reset-guard)。
+# Word 経路は必須 (render_word が無ければ止まる)、 Pages 経路は前面を返す関数だけ使う
+GUARD_LIB="$(cd "$(dirname "$0")" && pwd)/lib/office-app-guard.sh"
+if [ -f "$GUARD_LIB" ]; then
+  # shellcheck source=lib/office-app-guard.sh
+  . "$GUARD_LIB"
+else
+  office_front_remember() { :; }; office_front_restore() { :; }
+fi
+if [ "$NO_STAGE" = 1 ]; then CLAUDE_OFFICE_STAGING=0; export CLAUDE_OFFICE_STAGING; fi
+
+warn_tmp_input() {
+  # Word.app sandbox は /tmp 配下を grant 永続化できない (= 「ファイル アクセスを許可」
+  # ダイアログの button が disabled で押せない、 conventions/office-automation.md
+  # §docx-tmp-sandbox-deny)。 staging が効かず in-place で Word を当てる時だけ warn。
+  case "$SRC" in
+    /tmp/*|/private/tmp/*)
+      echo "⚠️  docx-to-pdf: input is under /tmp ($SRC) and staging is unavailable" >&2
+      echo "    Word.app sandbox cannot persist /tmp folder grants — permission dialog" >&2
+      echo "    will appear and may be ungrantable. Move docx under your project dir" >&2
+      echo "    (= ~/<repo>/...) or enable staging (office-automation.md#office-pregranted-staging-dir)." >&2
+      ;;
+  esac
+}
+
+unverified_note() {
+  # 変換が止まった = 見た目 (頁数・行の折れ・紙の font) を確かめる経路が 1 つ落ちただけ。 ここで目視をやめて
+  # 「見た目は未確認」 と台帳に書いて先へ進むと、 崩れた様式を本人に見せる (実測、 office-automation.md#docx-layout-unverified)
+  echo "" >&2
+  echo "⏸ 見た目 (頁数・行の折れ・紙の font) は未確認のまま = この docx を本人に見せる・送る段に進まない。 次を上から:" >&2
+  echo "   1. 上の ❌ の理由を直せるなら直してもう一度 (同じ手を 3 回は叩かない)" >&2
+  echo "   2. Word の画面で見る: 写しを project 配下に置き open -g -a \"Microsoft Word\" <写し> →" >&2
+  echo "      computer-use の app_screenshot で状態バーの「1/N ページ」 と各頁を見る" >&2
+  echo "   3. 本人に Word で PDF に書き出してもらい、 diff-form-docx.py --filled-pdf / --blank-pdf で照合する" >&2
+  echo "   Pages・LibreOffice の PDF は組み直すので頁数の判定に使わない。" >&2
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+soffice_bin() { if have soffice; then echo soffice; elif have libreoffice; then echo libreoffice; fi; }
+
+render_pages() {
+  # Robust macOS automation; uses the verified `export ... as PDF` form.
+  # Background (no `activate`) through Pages' OWN sandbox container: Pages is sandboxed and is not part of the
+  # Office group container, so a file elsewhere needs a grant it can only ask for in a dialog — with `activate`
+  # gone that dialog stays hidden and `open` returns missing value / -1712 (measured). Copied into
+  # ~/Library/Containers/com.apple.iWork.Pages/Data/tmp/<unique>/ it opens and exports without any dialog
+  # (measured, Pages 14.5). If that container is missing, fall back to the old in-place + `activate` path.
+  # Pages is quit at the end only when this run launched it and no document is open
+  # (macos-gui-app-automation.md#ask-before-quit / #background-launch).
+  local rc=0 pdir="$HOME/Library/Containers/com.apple.iWork.Pages/Data/tmp" d="" psrc="$SRC" ppdf="$PDF"
+  local fg=1 launched=0 ticks=0
+  office_front_remember
+  if [ -d "$pdir" ] && d="$(mktemp -d "$pdir/claude-stage-XXXXXX" 2>/dev/null)" \
+     && cp -p "$SRC" "$d/$(basename "$SRC")"; then
+    psrc="$d/$(basename "$SRC")"; ppdf="$d/$(basename "$PDF")"; fg=0
+  else
+    [ -n "$d" ] && rm -rf "$d"; d=""
+    echo "⚠️  docx-to-pdf --pages: Pages container not available → in-place + activate (Pages comes to the front)" >&2
+  fi
+  if [ "$fg" = 0 ] && [ "$(osascript -e 'application id "com.apple.iWork.Pages" is running' 2>/dev/null)" != true ]; then
+    open -g -b com.apple.iWork.Pages && launched=1
+    until osascript -e 'tell application id "com.apple.iWork.Pages" to count of documents' >/dev/null 2>&1; do
+      [ "$ticks" -ge 120 ] && break
+      sleep 0.5; ticks=$((ticks + 1))
+    done
+  fi
+  osascript - "$psrc" "$ppdf" "$fg" <<'AS' >/dev/null || rc=$?
+on run argv
+  set srcPath to item 1 of argv
+  set pdfPath to item 2 of argv
+  with timeout of 200 seconds
+    tell application id "com.apple.iWork.Pages"
+      if item 3 of argv is "1" then activate
+      set theDoc to open (POSIX file srcPath)
+      delay 2
+      export theDoc to (POSIX file pdfPath) as PDF
+      close theDoc saving no
+    end tell
+  end timeout
+  return "ok"
+end run
+AS
+  if [ "$rc" -eq 0 ] && [ "$ppdf" != "$PDF" ]; then
+    if [ -f "$ppdf" ]; then cp -p "$ppdf" "$PDF"; else echo "❌ Pages reported success but no PDF: $ppdf" >&2; rc=1; fi
+  fi
+  if [ "$launched" = 1 ]; then
+    # 数え直しと quit を同じ osascript で (= 間に user が文書を開いたら quit しない、 saving no は付けない)
+    osascript -e 'tell application id "com.apple.iWork.Pages" to if (count of documents) is 0 then quit' >/dev/null 2>&1 || true
+  fi
+  [ -n "$d" ] && rm -rf "$d"
+  office_front_restore "Pages.app"
+  return "$rc"
+}
+
+render_word() {
+  # Word engine: stale in-memory cache + cold-start failures
+  # (office-automation.md #docx-pdf-stale-cache). Defenses: guarded reset (quit only
+  # when Word holds nothing but staged copies — never kill, office-automation.md
+  # #office-app-reset-guard) → background launch → shell `open -g` (file association
+  # = cold-start safe, -g = stays behind) → wait until the document is listed → save
+  # THAT document (matched by path, never `active document` = could be the user's),
+  # wrapped in `with timeout` (default AppleEvent timeout is 60s — too short for
+  # cold-start). save-as syntax is Word-version dependent.
+  #
+  # Staging (office-automation.md #office-pregranted-staging-dir): copy the docx
+  # into the pre-granted dir, export there, copy the PDF back. The unique subdir
+  # also keeps Word's in-memory cache from matching a previous run's path (= the
+  # reason the old full kill existed).
+  local wsrc="$SRC" wpdf="$PDF" ticks=0
+  office_stage_prune 7
+  if office_stage_file "$SRC"; then
+    wsrc="$OFFICE_STAGED"
+    wpdf="$OFFICE_STAGE_DIR/$(basename "$PDF")"
+    echo "staging: $OFFICE_STAGE_DIR (pre-granted, no sandbox dialog)" >&2
+  else
+    office_stage_report_fallback "$SRC"   # 予期せぬ fallback = ⚠️ stderr + fallback log (意図的 --no-stage は沈黙)
+    warn_tmp_input
+  fi
+  [ -f "$GUARD_LIB" ] || { echo "❌ missing $GUARD_LIB (required: without it this script cannot tell whether Word holds your work)" >&2; return 1; }
+  office_front_remember
+  office_app_reset word
+  if office_app_has_path word "$wsrc"; then
+    echo "❌ Word already has this document open: $wsrc — close it in Word first (this script will not close your document)." >&2
+    return 1
+  fi
+  if ! office_app_launch_background word; then
+    echo "❌ Word did not start / answer in the background." >&2
+    office_app_failure_hint word
+    unverified_note
+    return 1
+  fi
+  open -g -a "Microsoft Word" "$wsrc"
+  until office_app_has_path word "$wsrc"; do
+    if [ "$ticks" -ge 120 ]; then
+      echo "❌ Word did not list the document within 60 s: $wsrc" >&2
+      office_app_close_ours word "$wsrc"; office_app_release word; office_front_restore "Microsoft Word.app"
+      office_app_failure_hint word
+      unverified_note
+      return 1
+    fi
+    sleep 0.5; ticks=$((ticks + 1))
+  done
+  sleep 2   # layout settle after load (the old fixed warm-up was 6 s from a cold kill)
+  if ! osascript - "$wsrc" "$wpdf" <<'AS' >/dev/null; then
+on run argv
+  set srcPath to item 1 of argv
+  set pdfPath to item 2 of argv
+  with timeout of 240 seconds
+    tell application id "com.microsoft.Word" to set n to (count of documents)
+    repeat with i from 1 to n
+      tell application id "com.microsoft.Word" to set fn to (full name of document i) as text
+      if fn does not start with "/" and fn contains ":" then set fn to POSIX path of fn
+      if fn is srcPath then
+        -- the document this script opened, matched by path (never `active document`)
+        tell application id "com.microsoft.Word"
+          save as document i file name pdfPath file format format PDF
+          close document i saving no
+        end tell
+        return "ok"
+      end if
+    end repeat
+  end timeout
+  error "document not open in Word: " & srcPath
+end run
+AS
+    echo "" >&2
+    echo "❌ Word AppleScript automation failed (cold-start / -1712 timeout / -609 connection)." >&2
+    office_app_close_ours word "$wsrc"
+    office_app_release word
+    office_front_restore "Microsoft Word.app"
+    office_app_failure_hint word
+    echo "   Fallback (office-automation.md §docx-pdf-stale-cache fallback 1):" >&2
+    echo "   open the file in Word manually and use File > 名前を付けて保存 > PDF。" >&2
+    echo "   srcfile: $SRC" >&2
+    [ "$wsrc" != "$SRC" ] && echo "   staged copy kept for diagnosis: $OFFICE_STAGE_DIR" >&2
+    unverified_note
+    return 1
+  fi
+  office_app_release word
+  office_front_restore "Microsoft Word.app"
+  if [ "$wpdf" != "$PDF" ]; then
+    [ -f "$wpdf" ] || { echo "❌ Word reported success but no PDF in staging: $wpdf" >&2; unverified_note; return 1; }
+    cp -p "$wpdf" "$PDF"
+    office_stage_cleanup
+  fi
+}
+
+render_soffice() {
+  local bin outdir profile gen
+  bin="$(soffice_bin)"; [ -n "$bin" ] || return 1
+  outdir="$(dirname "$PDF")"
+  profile="$(mktemp -d)"; trap 'rm -rf "$profile"' RETURN
+  "$bin" --headless -env:UserInstallation="file://$profile" \
+      --convert-to pdf --outdir "$outdir" "$SRC" >/dev/null
+  gen="$outdir/$(basename "${SRC%.*}").pdf"
+  [ "$gen" = "$PDF" ] || mv -f "$gen" "$PDF"
+}
+
+if [ "$(uname)" = "Darwin" ]; then
+  if [ "$ENGINE_PAGES" = 1 ]; then
+    [ -d "/Applications/Pages.app" ] || { echo "❌ --pages requested but /Applications/Pages.app not found" >&2; exit 1; }
+    render_pages
+  elif osascript -e 'tell application "Finder" to exists application file id "com.microsoft.Word"' 2>/dev/null | grep -qi true; then
+    render_word
+  elif [ -d "/Applications/Pages.app" ]; then
+    render_pages   # Word 不在 → Pages fallback (legacy install profile)
+  elif have soffice || have libreoffice; then
+    render_soffice
+  else
+    echo "❌ macOS engine missing: install Microsoft Word (default), or pass --pages with Pages.app installed." >&2
+    exit 1
+  fi
+else
+  if have soffice || have libreoffice; then
+    render_soffice
+  else
+    echo "❌ No conversion engine: install LibreOffice (soffice), or run on macOS (Pages/Word)." >&2
+    exit 1
+  fi
+fi
+
+[ -f "$PDF" ] || { echo "❌ conversion produced no PDF: $PDF" >&2; exit 1; }
+echo "PDF: $PDF"
+ls -la "$PDF"

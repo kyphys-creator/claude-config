@@ -1,0 +1,88 @@
+<!-- doc-meta
+when: Google Classroom をプログラムから操作するとき (クラスの作成・名簿からの招待・お知らせや課題の投稿・提出の読み取り) + 学期はじめにクラスを用意するとき + API で作った課題の設定が画面で変えられないと気づいたとき
+category: infra
+summary: Classroom API の実測済み挙動 = 先生はクラスを ACTIVE で直接作れる / 学生を直接追加できず招待のみ (全員に mail) / 教師は別クラスで見えている数値 userId で招待すると住所の推測が要らない / API で作った課題は期限後締切を画面で ON にできないが API で作ったクラスに画面で作った課題なら ON にできる / お知らせの Drive 添付は共有設定不要 / お知らせは下書き (DRAFT) で作れて受講者に見えず、 状態を指定しない一覧には出ない / 添付の中身は Drive の同じ file を上書きして差し替える (再投稿しない) / クラスのカレンダーの予定件数が「第何回か」 の正本 / 作ったばかりのクラスのカレンダーは先生の Android に予定 0 件で先に届くことがある / 期限は UTC で返る / ヘッダー画像は API に項目が無い / scope ごとの読める・書ける範囲
+-->
+# Google Classroom API の実測済み挙動
+
+教員アカウントで Classroom API (v1) を叩くときに、 docs だけからは読み取りにくい挙動の集。 接続の setup (OAuth client・token の置き場) は [`google-api-direct-access.md`](google-api-direct-access.md)、 URL を書くときは [`google-url.md`](google-url.md)。 「実測」 と書いた項目は Workspace for Education の教員アカウント 1 件で確かめたもの。 印の無い項目は API の仕様から書いたもので未実測。 組織の管理設定で変わりうる箇所は ⚠️ を付けた。
+
+## <a id="scopes"></a>scope と、 それで何ができるか
+
+| scope | 読める / できる | 足りないと起きること |
+|---|---|---|
+| `classroom.courses.readonly` | クラス一覧・詳細 | 作成・変更はできない (= 「作れない」 の原因はたいていこれ。 実測 = 作成の tool を持たない読むだけの構成で止まった) |
+| `classroom.courses` | クラスの作成・変更 (名前・section・状態 = ARCHIVED 等) | — |
+| `classroom.rosters.readonly` | 学生・教師の一覧 (userId と氏名、 実測) | 招待はできない |
+| `classroom.rosters` | 招待の作成 | — |
+| `classroom.profile.emails` | 一覧に mail address が付く | 無いと一覧は userId と氏名だけ。 address で突き合わせるには 1 人ずつ逆に引く = [#roster-match-by-address](#roster-match-by-address) (実測) |
+| `classroom.announcements` | お知らせの読み書き | — |
+| `classroom.coursework.students` | 課題の作成・提出の読み書き | — |
+| `classroom.courseworkmaterials` (`.readonly`) | 授業の「資料」 欄の読み書き (読むだけなら `.readonly`) | 課題・お知らせの scope では資料欄は読めない = `courseWorkMaterials.list` が 403 insufficient scopes (実測)。 共同の先生が資料欄に置いた物を「無い」 と言わない |
+
+scope を足したら token を取り直す (consent を 1 回)。 同じ OAuth client を使う他の道具 (提出の取り込み等) は scope が広がっても壊れない。
+
+## <a id="create-course"></a>クラスの作成
+
+- `courses.create` に `ownerId: "me"` と `courseState: "ACTIVE"` を渡すと、 そのまま ACTIVE で返る (実測)。 ⚠️ 組織によっては PROVISIONED で返る → 所有者本人なら `courses.patch` (`updateMask: courseState`) で ACTIVE にできる。 両方を扱う実装にしておく
+- 作った直後は誰にも見えない (学生は参加コードか招待で入る)。 返り値の `enrollmentCode` が参加コード
+- **ヘッダー画像 (テーマ) は API に項目が無い** (実測 = `courses.get` の返す field に theme / photo が無い) = 画面の「カスタマイズ → 写真をアップロード」 で貼る。 画像は横長 4:1 (例 1600×400) で、 左下にクラス名が白字で重なるので左下は暗く・模様を少なくすると読める
+
+## <a id="class-calendar"></a>クラスのカレンダーに授業の予定を入れる
+
+- クラスを作ると、 そのクラス用の Google カレンダーが自動で作られる (`courses.get` の `calendarId` = `c_classroom…@group.calendar.google.com`、 実測)。 先生のアカウントは owner。 課題の期限はここに自動で載るが、 **授業の時間そのものは載らない** → 毎週の予定を 1 件入れておくと、 学生の Google カレンダーに授業が並ぶ
+- 形 = 毎週の繰り返し 1 件 (`RRULE:FREQ=WEEKLY;UNTIL=<最終回の開始 (UTC)>;BYDAY=<曜日>`) + 授業の無い日を `EXDATE;TZID=<地域>:<日付T時刻>,...` で除く (休暇・休講日・オンデマンド週・補講日・自分の休講)。 除く日は学年暦から拾う
+- クラスのカレンダーは timeZone が UTC で作られる (実測) → event 側に地域の timeZone を明示する。 `UNTIL` は UTC、 `EXDATE` は TZID 付きの現地時刻で書く
+- 入れたら `singleEvents=true` で展開して、 回数と日付の並びを学年暦と照合する (EXDATE の書き損じは展開しないと見えない)
+- 補講のように日付が確定していない回は入れず、 確定してから単発で足す
+- <a id="class-calendar-student-visible"></a>**クラスのカレンダーの予定は受講者にも見える** (説明欄も): 先生だけの覚え書き (次の回の冒頭で言う訂正・準備の段取り) を授業の予定の説明に書かない。 先生の個人のカレンダーに別の予定として入れ、 そちらに通知を付ける
+- <a id="class-calendar-location"></a>**予定の場所 (location) に実施教室を入れる**: 学生のカレンダーで授業の行に教室が出る。 教室は教務システムの値を、 時間割の表 (コマごとの room) に写してから入れる = 教室が変わったら表を直して入れ直す、 の順にする (カレンダーを先に直すと表と食い違う)。 繰り返し予定は**親の予定の location を patch すると全回に入る** (実測、 展開した各回が親の値を返す)。 1 回だけ教室が変わる日は、 その回だけを直す (1 回だけ変えた回が後の親の patch でどうなるかは未実測 = 一括で入れ直す道具は、 親と違う場所を持つ回を報告だけにして触らない)
+- <a id="class-calendar-lecture-number"></a>**このカレンダーは「第何回か」 の正本にできる**: 学期はじめからの、 開始時刻つきで 30 分以上の予定の件数がその日の回数 (Classroom が自動で入れる課題の期限は 1 分の予定、 終日の予定もあるので数えない)。 部品 = [`scripts/lib/class_meetings.py`](../scripts/lib/class_meetings.py) の `lecture_number`。 記録 (板書・動画) の続き番号と食い違ったら止める使い方 = [`chalkboard-photo-archive.md#numbering`](chalkboard-photo-archive.md#numbering)
+- <a id="class-calendar-phone"></a>⚠️ **先生の Android 端末では、 作ったばかりのクラスのカレンダーが「名前だけ・予定 0 件」 で先に届くことがある** (実測): Google 純正でないカレンダーアプリ (端末の共通のカレンダー置き場を読むもの) で予定が出ない。 アカウントの同期のカレンダーも、 カレンダーごとの「同期」 も全部オンのままでこう見えた。 Google カレンダーのアプリを開くと同期が走って中身が届いた (仕組みは推測)。 → 予定を入れたら先生の端末で件数を 1 回見て、 0 件ならそのアプリを 1 回開く。 「端末に届かない」 を調べる前提として、 ⚠️ Google のアカウントの予定は iCloud を通らない (Mac で見えているのは Mac に Google のアカウントを直接登録しているから、 iCloud の CalDAV で同期する端末からは見えない)
+- 別の自分のアカウントにカレンダーを共有して見せる (`acl.insert`) のは、 agent の auto mode が「権限の付与」 として止めることがある (実測)。 見せたい端末に元のアカウントが入っていないかを先に確かめる (入っていれば共有は要らない)
+
+## <a id="late-submission-lock"></a>API で作った課題と「期限後に提出を締め切る」
+
+- API で作った課題 (courseWork) には `associatedWithDeveloper: true` が永続的に付き、 画面の「期限後に提出を締め切る」 が灰色になる (「サードパーティ製ツールからの提出は締め切ることができません」)。 DRAFT で作っても外れない = **期限後の締切が要る課題は画面で作る**
+- 「API で作って、 締切の設定だけ後から画面で変える」 も成り立たない (画面のスイッチが灰色のまま)。 API の側にも項目が無い: 公式の discovery (`https://classroom.googleapis.com/$discovery/rest?version=v1` の `schemas.CourseWork.properties`) で期限まわりは `dueDate` / `dueTime` / `submissionModificationMode` だけ、 公式ガイド (Grades) も締切後の提出を止めるのは Classroom アプリの設定と書く (実測)。 API が変わったかを確かめるときは、 説明の要約でなくこの discovery の項目を見る
+- これは課題単位の制限で、 **API で作ったクラスそのものには及ばない**: API で作ったクラスの中で画面から作った課題は、 締切を ON にできる (実測)。 クラスを API で用意して、 毎週の課題は画面で作る、 という分業が成り立つ
+- ⚠️ 未検証: 同じ課題の「生徒はクラスメイトに返信できます」 も同じ制限を受けるか (画面で投稿するときに同じ文言が出るかを見れば分かる)
+- API の既定値が画面の既定値と違う項目: `submissionModificationMode` は API の既定が `MODIFIABLE_UNTIL_TURNED_IN` (提出後は編集不可)、 画面の既定は「生徒は解答を編集できます」 = `MODIFIABLE`。 画面と同じにしたいなら明示する
+- 締切の要らない課題 (配点つきの任意レポート・下書き・一括投稿) は API で作ってよい
+
+## <a id="invite-members"></a>メンバーの追加 = 招待だけ
+
+- **先生は学生を直接追加できない**: `courses.students.create` は管理者か、 参加コードを持つ本人の自己登録用。 先生からは `invitations.create` (`role: STUDENT | TEACHER`) で招待する
+- 招待すると **Google が招待した全員に mail を出す** = 取り消せない外向きの送信。 対象と人数を人に見せて OK をもらってから送る。 実装は既定を dry-run にする
+- 招待を受け入れた時点でクラスに入る。 送った直後でもすぐ参加する人がいるので (実測)、 検算は「参加済み + 承諾待ちの招待 (`invitations.list`) = 招待した数」 で見る
+- <a id="roster-match-by-address"></a>**名簿と参加者の突き合わせは、 address を userId にして 1 人ずつ引く** (実測): 一覧 (`courses.students.list`) は `classroom.profile.emails` が無いと address を返さないが、 `courses.students.get` と `invitations.list` は userId に address を受け付ける (前者は参加していなければ 404)。 名簿の address ごとに「参加済み / 承諾待ち / 未招待」 を決め、 一覧の userId から「参加済みだが名簿に無い人」 (LA・聴講・参加コードで入った人) も出す。 1 人 2 呼び出しなので招待と同じく数本並列にする。 学期途中に履修登録が増えたら、 名簿を取り直してこの突き合わせで未招待を拾う (読むだけ。 招待は人に見せてから)
+- 招待は 1 人 1 回の API 呼び出しで、 1 回に 1 秒強かかる (実測) = 1 クラス分を逐次で送ると分単位になる → 数本を並列にする (結果は入力順に並べ、 失敗と「済み」 を集計して返す)
+- すでに招待済み・参加済みの人への招待は `ALREADY_EXISTS` で返る (未実測) = 実装はこれを失敗でなく「済み」 として数える
+- **`userId` は mail address でも数値の userId でもよい** (実測): 1 人が複数の address (学内の複数ドメイン等) を持つと、 どれが Classroom のアカウントか推測になる。 以前のクラスの教師一覧 (`courses.teachers.list`) に出ている数値 userId で招待すれば、 同じアカウントに確実に届く
+- 名簿 (教務システムの CSV 等) の address で学生を一括招待するのが学期はじめの定形。 旧課程・新課程で時間割番号や科目名が分かれる科目は、 名簿を科目名で絞ると片方が落ちる → コマ (曜日・時限) で束ねる
+
+## <a id="announcement-attachments"></a>お知らせにファイルを添付する
+
+- `courses.announcements.create` の `materials` に `{driveFile: {driveFile: {id}, shareMode: "VIEW"}}` を入れる (実測)。 file は先生本人の Drive に上げておくだけでよく、 **共有設定は要らない** (Classroom が受講者に閲覧権限を付ける)
+- Drive への upload に使う token (例: `drive.file` scope の別 token) と Classroom の token が別でも、 同じアカウントなら添付できる (実測)
+- <a id="attach-adds-teachers-group"></a>Drive の file を添付すると (下書きでも)、 Classroom がクラスの先生のグループ (`teachers_…@<domain>` の group) を file の編集者に加える (実測) = 共同の先生もそのまま編集できる。 受講者の権限は下書きの段階では付かない。 添付した後に `permissions.list` で確かめられる
+- 添付の代わりに Dropbox 等の共有リンクを本文に貼る運用もある。 添付は Classroom の中で開けて、 受講者以外には見えない
+- <a id="readback-after-post"></a>お知らせも投稿した瞬間にクラス全員に見える: 文面と添付を人に見せてから投稿し、 投稿後は `announcements.get` で読み戻して本文と添付を照合する (貼り付けで文が落ちる事故の検出 = [`paste-destined-plain-text.md`](paste-destined-plain-text.md))。 照合は目で読まず機械で: engine の `checkAnnouncement` (下書きの file の本文と 1 字残らず同じか・添付の Drive の id が同じか。 違えば最初に食い違う位置と前後を返す) を CLI の口から回す。 下書きの末尾の改行は無視する (投稿する側が落とすため)
+- <a id="draft-announcement"></a>**お知らせは下書き (`state: "DRAFT"`) で作れる** (実測): 受講者には見えず、 授業中に先生が画面の下書きから「投稿」 を押せば公開される = 授業で見せる資料を前夜に入れておく用途に向く (公開の判断を当日に残せる)。 ⚠️ 下書きには `alternateLink` が返らない (作成結果から URL を取る処理はそこで落ちる。 作成は成功しているので**再実行しない** = 二重に作る)。 ⚠️ `announcements.list` は状態を指定しないと公開済みしか返さず、 下書きが見えない (実測) = 読み戻しは `announcementStates: ["DRAFT", "PUBLISHED"]` を付けて一覧し、 `announcements.get` で本文を照合する。 共同で教える先生 (クラスの owner を含む) にも下書きは見え、 その先生が投稿できる (実測 = 共同の先生が下書きを見つけて投稿した) = 公開の判断を自分で持ちたいなら、 下書きを入れたことと誰が投稿するかを相手に伝える
+- <a id="archived-course-announcement"></a>**archive したクラスにお知らせを出す = 一時的に `ACTIVE` に戻して投稿し、 出したのを確かめてから `ARCHIVED` に戻す** (実測: `courses.patch` 〔`updateMask: courseState`〕 で ACTIVE → 投稿 → ARCHIVED の順で通った)。 ARCHIVED のまま投稿を試した記録は無い (archive したクラスは読むだけ、 という画面の挙動に拠った = API では未確認)。 状態を変える `courses.patch` は外への書き込みで、 auto mode の classifier は本人が承認を書いた session でしか通さない (別の session に取り次いだ承認は届かない = [`claude-code-permissions.md#relayed-approval-does-not-reach`](claude-code-permissions.md#relayed-approval-does-not-reach)、 実測)。 クラスの id は下書きのメモから写さず、 archive したクラスも含めた一覧で引き直す (メモの id は誤っていて `Requested entity was not found` で落ちた、 実測)
+- <a id="replace-attachment-in-place"></a>**添付の中身だけ差し替える = Drive の同じ file を上書きする** (実測): `files.update(fileId, media_body=…)` で中身を入れ替えると、 お知らせは添付の同じ file を指したまま = 投稿し直さない (受講者に通知が飛ばない)。 添付の表示名は Drive の file 名のまま、 前の版は Drive の版履歴に残る。 `drive.file` scope の token でも、 同じ OAuth client で上げた file なら書ける。 上書きの前に Drive 側の `md5Checksum` が「差し替える前の手元の file」 と一致するかを見て、 違う file を上書きしないようにする。 上書き後は `md5Checksum` が新しい file と一致することを見る。 ⚠️ Google ドキュメント (Drive 上の native の文書) には `md5Checksum` が無い = 上書きの前に `modifiedTime` と `lastModifyingUser` が自分の最後の書き込みのままかを見る (共同の先生が編集していたら上書きしない = その人の編集が消える)。 docx を native の文書として上げ直すなら `files.update` に docx の mimeType で渡す (実測)。 末尾に書き足すだけなら Docs API (`documents.batchUpdate`) のほうが上書きより安全だが、 project で Docs API が有効でないと使えない (実測)
+
+## <a id="read-submissions"></a>提出の読み取り
+
+- 短答課題の提出は `studentSubmissions.list`。 締切前は未提出の submission が `CREATED` で並ぶだけ = 取り込み件数 0 を「提出が無い」 と読まない ([`debugging-discipline.md`](debugging-discipline.md) の dedup の話と同じ)
+- `assignedGrade` は返却 (`RETURNED`) 後にだけ入る。 返却前の採点は `draftGrade`
+- <a id="who-graded"></a>**誰が点を付けたか** = 各 submission の `submissionHistory[].gradeHistory` (`actorUserId` = 点を変えた先生、 `gradeChangeType` = 下書きの点か返却した点か、 `pointsEarned`、 `gradeTimestamp`)。 `actorUserId` は `courses.teachers.list` で名前に直す。 共同で教えるクラスで「この点は誰が入れたか」 を相手に聞く前に引ける。 ⚠️ `pointsEarned` の無い履歴は、 0 点を付けたのか点を空に戻したのかを区別できない (実測) = 今の値は `draftGrade` / `assignedGrade` で見る。 ⚠️ 履歴の無いまま点の入っている submission がある (実測) = 履歴だけで全件の帰属は決まらない。 数えるだけの道具 = engine の `gradeHistory` (学生の名前を出さない)
+- <a id="short-answers-by-theme"></a>**短答の回答を名前なしで取り、 テーマ別に数える** = engine の `shortAnswers` (submission ごとに文字列 1 つ、 userId は返さない。 提出済み 〔`TURNED_IN` / `RETURNED`〕 でなければ "" = list の長さが課題の対象の人数) → [`scripts/short-answer-themes.py`](../scripts/short-answer-themes.py) (テーマの表で人数・どの項目にも入らない語・docx)。 課題の id は engine の `listCourseWork`
+- 画面の「ファイルを開いていない」 は API に無い
+- 画面で作った課題を読み戻して確かめられるのは、 タイトル・本文・期限・状態・点数 (`maxPoints`。 無ければ採点なし) まで。 本文だけでなく点数も、 同じ科目の前の回の課題と揃っているかを照合する (実測 = 本文は一致し、 点数だけが未設定だった)。 **`dueDate` / `dueTime` は UTC** (日本時間 23:59 の期限は `dueTime` 14:59 で返る、 実測)。 「期限後に提出を締め切る」 などの画面のスイッチは読み戻しの対象にならない (= 画面で見る)
+- 課題の投稿後の照合は engine の `checkCourseWork(classroom, courseId, courseWorkId, expected)` で再実行できる。`expected` は `title`・`description`・`maxPoints`・タイムゾーン付きの `dueAt` を持ち、採点なしと期限なしはそれぞれ `null`。`state` の既定は `PUBLISHED`、`workType` も指定すれば照合する。本文は末尾の改行だけを除いて比較し、欠落箇所を返す。期限は UTC に揃えて比較する。結果は項目ごとの一致・取得値と、API では検証できない `lateSubmissionLock` を分けて返す。画面で本人が変えた題や期限が案と違った場合は、その違いを本人に示し、採用された値を照合用の記録へ反映する。
+- <a id="grade-ui-created-coursework"></a>**画面で作った課題の点は API で書けない**: `studentSubmissions.patch` (`draftGrade`) は 403 `@ProjectPermissionDenied` で返る (実測、 `classroom.coursework.students` の scope があっても)。 API が点・返却を書けるのは、 同じ OAuth client の project で作った課題だけ。 点を機械で付けたい課題は API で作る必要があるが、 そうすると「期限後に提出を締め切る」 を画面で入れられない ([#late-submission-lock](#late-submission-lock)) = どちらを取るかを課題を作る前に決める。 画面で作った課題の点は画面で付ける (読むのは API でできる)。 browser 自動化で付けるなら、 「すべての生徒の解答」 の一覧の各行の「<名前> さんの成績を追加」 ボタンを 1 つずつ押す → 少し待つ → 点を打つ → Enter (実測)。 Enter の後に次の行へ移った focus にそのまま打つだけだと、 点の入らない行が出る (実測 = 3 行に 1 行ほど落ちた)。 ボタンの名前を、 API で取った提出者の名前と突き合わせてから押す (未提出の人は自動の 0 点が下書きで入っていて、 このボタンには出ない、 実測)。 終わったら API で `draftGrade` を数えて照合する
+
+## 実装の置き場所
+
+engine = [`scripts/lib/classroom-courses.mjs`](../scripts/lib/classroom-courses.mjs) (クラスの作成・変更・招待・添付つきお知らせとその読み戻しの照合・名簿と参加者の突き合わせ・採点の履歴の集計・課題の一覧・短答の回答の取り出し)。 googleapis の classroom client を引数で受け取るので、 この module 自体は外部 module を import しない = 認証と googleapis の install は呼び元が持つ。 hermetic test = [`scripts/lib/classroom-courses.test.mjs`](../scripts/lib/classroom-courses.test.mjs) (偽の client、 `node` で直接実行)。 MCP server と CLI (認証・引数の解釈・提出の取り込み) は owner の private な MCP 設定 repo (`gmail-mcp-config`) にあり、 engine を re-export の shim で読む。 上の挙動はその実装で確かめたもの。

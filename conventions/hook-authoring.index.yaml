@@ -1,0 +1,389 @@
+# Stable slug index -- AUTO-GENERATED from the doc by scripts/generate-doc-index.py.
+# id/level/title are DERIVED from the markdown (edit the md + re-run, do NOT hand-edit
+# them here). legacy (a section's original §-number = a permanent forwarding address),
+# related, and any other hand field are PRESERVED. See convention-design-principles §14.7 (= #inbound-ref-robustness).
+# Validated by scripts/check-office-automation-index.py (dangling=0 / orphan=0).
+sections:
+  - id: hook-category-intro
+    level: 2
+    title: "概論: hook は他の script と質的に異なる category"
+  - id: naming-convention
+    legacy: "0"
+    level: 2
+    title: "§0. naming convention: suffix で behavior を区別"
+    related: [hook-category-intro]
+  - id: shebang-set-policy
+    level: 3
+    title: "§0 補足: shebang / set 方針"
+  - id: substitution-fallback-stdout-mixing
+    level: 3
+    title: "§0 補足 2: `$(a || b)` fallback は「a の部分 stdout」 を混入させる — BSD/GNU 分岐は exit code でなく出力検証で"
+  - id: err-trap-inline-conditional-substitution
+    level: 3
+    title: "§0 補足 3: `trap 'exit 0' ERR` × 条件付き inline 置換 = 値が空の環境でだけ hook が silent 死"
+  - id: gate-hook-unreadable-input
+    level: 3
+    title: "§0 補足 4: gate hook は「読めない入力」 で死んではいけない — 1 file の異常が repo 全体の commit を止める"
+  - id: set-e-test-failure-report
+    level: 3
+    title: "§0 補足 5: `set -e` の test は落ちた行を自己申告させる — 無言の exit 1 は CI log に test 名しか残さない"
+  - id: replay-real-tool-output
+    level: 3
+    title: "§0 補足 5b: 新しい hook の test — 件数が 0 でも通る集計にしない、 合成の入力に加えて実際の tool の出力も流す"
+  - id: test-root-not-parent-dir
+    level: 3
+    title: "§0 補足 6: test は自分の repo を「checkout の親 dir」 経由で指さない — worktree で落ち、 live を検査する"
+  - id: surface-filter-keeps-errors
+    level: 3
+    title: "§0 補足 7: 自動適用の出力を絞って surface する hook は、 stderr を合流させてエラーの行も拾う"
+  - id: fake-platform-commands-in-path
+    level: 3
+    title: "§0 補足 8: macOS 専用の installer は偽の platform command を PATH の先頭に置いて test する"
+  - id: exec-probe-test-techniques
+    level: 3
+    title: "§0 補足 9: exec の可否を本体を走らせずに調べる・OS の kill を test で再現する・旧版で歯を確かめる"
+  - id: hook-stdin-pipe-sigpipe
+    level: 3
+    title: "§0 補足 10: hook に stdin を pipe で渡す test は、 書き手の死に方を hook の判定として読む (`pipefail` × SIGPIPE = 141)"
+  - id: test-isolates-live-machine-state
+    level: 3
+    title: "§0 補足 11: test は、 本番の run と共有する machine-global な資源を自分専用にする"
+  - id: hook-cost-per-item
+    level: 3
+    title: "§0 補足 12: hook の処理時間を入力の件数に比例させない — 件ごとに外部 process を呼ばない"
+  - id: pretooluse-timeout-fail-open
+    level: 3
+    title: "§0 補足 13: PreToolUse hook の timeout 超過は素通り (実測) — 測り方と、 hook file が読み込みで死ぬ場合も同じ"
+  - id: hook-git-env-cross-repo
+    level: 3
+    title: "§0 補足 14: hook から別 repo に git を打つときは `GIT_INDEX_FILE` を外す"
+  - id: tmp-path-not-absence-marker
+    level: 3
+    title: "§0 補足 12: test の一時 dir の path を「無いこと」 の印にしない — Linux の `mktemp -d` は `/tmp` の下"
+  - id: bash32-heredoc-parser-bug
+    legacy: "1"
+    level: 2
+    title: "§1. bash 3.2 の `$(...)` + heredoc body の quote escape parser bug"
+  - id: bash32-problem
+    level: 3
+    title: "問題"
+    related: [bash32-reproducer, bash32-workaround, bash32-debug-difficulty]
+  - id: bash32-reproducer
+    level: 3
+    title: "Reproducer (= 2026-05-20 実遭遇)"
+    related: [bash32-problem, bash32-workaround]
+  - id: bash32-workaround
+    level: 3
+    title: "回避策"
+    related: [bash32-problem, bash32-reproducer]
+  - id: bash32-case-in-command-substitution
+    level: 3
+    title: "`$(...)` の中の `case` のパターンは `(` を前置する (`-n` を通り、 実行時にだけ落ちる)"
+  - id: bash32-brace-expansion-in-cmdsub
+    level: 3
+    title: "`\"$(f \"...\")\"` の中の二重引用の文字列が brace 展開される (test の入力 JSON が黙って壊れる)"
+  - id: bash32-vs-runtime-backtick-expansion
+    level: 3
+    title: "bash 3.2 parser bug と runtime backtick 展開を同じ事故にしない"
+  - id: bash32-debug-difficulty
+    level: 3
+    title: "Debug が困難な理由 / メタ規律"
+    related: [bash32-problem, bash32-workaround]
+  - id: delivery-audit-4-axes
+    legacy: "2"
+    level: 2
+    title: "§2. hook 配信正常性の 4 軸 audit (= 1 軸欠けて silent malfunction)"
+    related: [delivery-audit-problem, delivery-audit-example, delivery-audit-method, partial-install-state]
+  - id: delivery-audit-problem
+    level: 3
+    title: "問題"
+    related: [delivery-audit-method, tool-matcher-coverage-boundary]
+  - id: delivery-audit-example
+    level: 3
+    title: "実例 (= 2026-05-20 retroactive 発覚)"
+    related: [delivery-audit-method]
+  - id: delivery-audit-method
+    level: 3
+    title: "防止策 / audit method"
+    related: [delivery-audit-example, tool-matcher-coverage-boundary]
+  - id: installer-tracked-stub
+    level: 3
+    title: "installer は git が track している file を書き換えない (2026-09-12)"
+  - id: killed-hook-stub
+    level: 3
+    title: "macOS に exec で kill される hook は、 同じ中身の新しい inode に作り直す (2026-09-19)"
+  - id: tool-matcher-coverage-boundary
+    legacy: "2-supplement"
+    level: 3
+    title: "§2 補足: tool-matcher の coverage boundary — Bash/script write は Edit/Write guard を素通りする"
+    related: [delivery-audit-method]
+  - id: disableallhooks-kill-switch
+    level: 3
+    title: "§2 補足 2: `disableAllHooks` kill switch — root 限定で入ると「frontend 差」 に化ける"
+  - id: marker-detection-scan-whole-turn
+    level: 3
+    title: "§2 補足 3: 抑止 marker は turn の転写全体から拾う — assistant text だけを見ると呼ぶ側が可視面を汚す"
+  - id: matcher-regex-partial-match
+    level: 3
+    title: "§2 補足 4: matcher の当たり方 — 英数字と `|` 以外の字が 1 つあると正規表現の部分一致になり、 tool の改名では黙って死ぬ"
+  - id: warn-mode-spec-uncertainty
+    legacy: "3"
+    level: 2
+    title: "§3. PreToolUse warn mode 出力の spec uncertainty"
+    related: [warn-mode-problem, warn-mode-implementation, warn-mode-dry-run]
+  - id: warn-mode-problem
+    level: 3
+    title: "問題"
+    related: [warn-mode-implementation]
+  - id: warn-mode-implementation
+    level: 3
+    title: "実装推奨"
+    related: [warn-mode-problem, warn-mode-dry-run]
+  - id: warn-mode-dry-run
+    level: 3
+    title: "Dry-run 観察事項 (= warn hook 投入後に user に依頼)"
+    related: [warn-mode-implementation]
+  - id: partial-install-state
+    legacy: "4"
+    level: 2
+    title: "§4. Partial install state (= §2 の specific failure mode、 注意喚起)"
+    related: [delivery-audit-4-axes, partial-install-problem, partial-install-prevention]
+  - id: partial-install-problem
+    level: 3
+    title: "問題"
+    related: [partial-install-prevention]
+  - id: partial-install-prevention
+    level: 3
+    title: "防止策"
+    related: [partial-install-problem]
+  - id: additive-wiring-needs-retirement
+    level: 3
+    title: "§4 補足: 足すだけの配線には、 退役の経路が別に要る"
+  - id: new-hook-protected-bundle
+    level: 3
+    title: "§4 補足 2: 層1 に新しい hook を足す変更は保護された file の束 — 候補を写しで置き、 再生成した索引も 1 件として承認を取る"
+  - id: hook-architectural-rationale
+    legacy: "5"
+    level: 2
+    title: "§5. hook の架構的根拠 — 第 2 視点としての harness"
+    related: [self-reference-impossibility, narrative-vs-mechanism-visibility, discipline-cannot-replace-hook]
+  - id: self-reference-impossibility
+    legacy: "5.1"
+    level: 3
+    title: "5.1 単一視点 self-reference の geometric 不能"
+    related: [hook-architectural-rationale]
+  - id: narrative-vs-mechanism-visibility
+    legacy: "5.2"
+    level: 3
+    title: "5.2 narrative-vs-mechanism の非対称 visibility"
+    related: [hook-architectural-rationale]
+  - id: discipline-cannot-replace-hook
+    legacy: "5.3"
+    level: 3
+    title: "5.3 規律で hook を代替できない (= 逆も真)"
+    related: [hook-architectural-rationale]
+  - id: discipline-narrative-reduction
+    legacy: "6"
+    level: 2
+    title: "§6. hook 投入後の規律 narrative 縮退判定"
+    related: [defense-equation, reduction-prerequisites, reduction-procedure, reduction-factors]
+  - id: defense-equation
+    legacy: "6.1"
+    level: 3
+    title: "6.1 4 状態の防御 equation"
+    related: [discipline-narrative-reduction]
+  - id: reduction-prerequisites
+    legacy: "6.2"
+    level: 3
+    title: "6.2 縮退の前提条件 — (P1) + (P2) 両必須"
+    related: [discipline-narrative-reduction, defense-equation]
+  - id: reduction-procedure
+    legacy: "6.3"
+    level: 3
+    title: "6.3 段階的縮退の推奨手順"
+    related: [discipline-narrative-reduction]
+  - id: reduction-factors
+    legacy: "6.4"
+    level: 3
+    title: "6.4 縮退判定で考慮する factor"
+    related: [discipline-narrative-reduction]
+  - id: shared-matcher-mock-pattern
+    legacy: "7"
+    level: 2
+    title: "§7. Shared matcher library + mock-personal-layer test pattern"
+    related: [shared-matcher-problem, shared-matcher-pattern, placement-flowchart, mock-personal-layer-fixture, shared-matcher-motivation, leak-prevention-rules]
+  - id: shared-matcher-problem
+    level: 3
+    title: "問題"
+    related: [shared-matcher-pattern]
+  - id: shared-matcher-pattern
+    level: 3
+    title: "Pattern"
+    related: [shared-matcher-problem, mock-personal-layer-fixture]
+  - id: placement-flowchart
+    level: 3
+    title: "配置決定 flowchart"
+  - id: mock-personal-layer-fixture
+    level: 3
+    title: "Mock-personal-layer test fixture の最小実装 (= bash)"
+    related: [shared-matcher-pattern]
+  - id: shared-matcher-motivation
+    level: 3
+    title: "設計動機 (= 2026-05-26 RCA)"
+    related: [shared-matcher-problem]
+  - id: leak-prevention-rules
+    level: 3
+    title: "関連 leak prevention rule"
+    related: [shared-matcher-mock-pattern]
+  - id: chain-hook-early-exit
+    legacy: "8"
+    level: 2
+    title: "§8. chain hook は primary hook の early-exit で silent skip される"
+    related: [chain-hook-example]
+  - id: chain-hook-example
+    level: 3
+    title: "実例 (2026-06-06 RCA)"
+    related: [chain-hook-early-exit]
+  - id: chain-hook-prevention
+    level: 3
+    title: "防止策"
+  - id: engine-failure-must-not-block
+    level: 3
+    title: "§8.1 engine を呼ぶ BLOCK は exit code だけで止めない — 壊れた engine が全 repo の commit を止める (2026-09-13)"
+  - id: engine-edit-is-deploy
+    level: 3
+    title: "§8.2 git hook の engine は作業ツリーから呼ばれる — 保存した瞬間が配布、 commit は配布 gate ではない (2026-09-13)"
+  - id: build-dependent-behavior
+    legacy: "9"
+    level: 2
+    title: "§9. hook の挙動は build 依存 — 同 session snapshot + feature 差 (= upstream docs を鵜呑みにしない)"
+    related: [new-hook-session-snapshot, build-dependent-docs-drift, frontend-dependent-cowork]
+  - id: new-hook-session-snapshot
+    legacy: "9.1"
+    level: 3
+    title: "9.1 新規 hook は同 session で live 発火しない (= session 開始時 snapshot)"
+    related: [build-dependent-behavior]
+  - id: build-dependent-docs-drift
+    legacy: "9.2"
+    level: 3
+    title: "9.2 同種の「docs と乖離」 build 依存 feature"
+    related: [build-dependent-behavior]
+  - id: rewritten-input-execution-receipt
+    level: 3
+    title: "書き換えた入力・実行の記録・モデルの受領を分ける"
+  - id: command-rewrite-hook-checks
+    level: 3
+    title: "Bash の command を書き換えて通す hook — 文字として書いた語を書き換えない・当てる前に shell で構文を見る"
+  - id: frontend-dependent-cowork
+    legacy: "9.3"
+    level: 3
+    title: "9.3 frontend 依存 — desktop app の hook 出力 honor は**反転して見えた (主因は root 限定の kill switch)。 前提にせず session ごとに測れ**"
+    related: [build-dependent-behavior]
+  - id: sessionstart-model-by-launch-path
+    legacy: "9.4"
+    level: 3
+    title: "9.4 SessionStart の入力の項目は起動の経路で変わる — `model` が入らない起動がある"
+  - id: hook-no-go-judgment
+    legacy: "10"
+    level: 2
+    title: "§10. hook を見送る判定 — trigger が「意図」 を識別できないなら chronic false positive が fleet を毀損する"
+    related: [hook-no-go-problem, no-go-judgment-criteria, no-go-example]
+  - id: hook-no-go-problem
+    level: 3
+    title: "問題"
+    related: [no-go-judgment-criteria]
+  - id: no-go-judgment-criteria
+    level: 3
+    title: "判定"
+    related: [hook-no-go-problem, no-go-example]
+  - id: no-go-example
+    level: 3
+    title: "実例 (2026-06-13)"
+    related: [no-go-judgment-criteria]
+  - id: parallel-hooks-no-ordering
+    level: 2
+    title: "§11. 同一 event の hook 群は並列に走る — 他 hook の副作用 (pull / 生成 file) を前提にした hook は stale data を読む"
+  - id: parallel-hooks-problem
+    level: 3
+    title: "問題"
+  - id: parallel-hooks-example
+    level: 3
+    title: "実例 (2026-09-05)"
+  - id: parallel-hooks-prevention
+    level: 3
+    title: "防止策"
+  - id: parallel-hooks-related
+    level: 3
+    title: "関連"
+  - id: text-pattern-stop-hook
+    level: 2
+    title: "§12. 発話を見る Stop hook — 句で当てる前に過去の発話で校正し、 引用の例示を除く"
+  - id: cross-session-hook-concurrency
+    level: 2
+    title: "§13. 並列 session の同じ hook は同時に走る — 状態を書き換える hook は資源ごとの lock を取り、 取れなければ skip と言う"
+  - id: cross-session-hook-problem
+    level: 3
+    title: "問題"
+  - id: cross-session-hook-example
+    level: 3
+    title: "実例 (2026-09-12)"
+  - id: cross-session-hook-prevention
+    level: 3
+    title: "防止策"
+  - id: cross-session-hook-related
+    level: 3
+    title: "関連"
+  - id: opt-in-side-effect-hook
+    level: 2
+    title: "§14. 人に向けた副作用だけの hook (音・通知) は層1 に既定 off で置き、 marker で opt-in"
+  - id: injection-digest-and-relay
+    level: 2
+    title: "§15. SessionStart の注入を 1 ブロックに畳み、 期限の近い item は人に伝えたかを Stop で問う"
+  - id: typed-confirmation-in-git-hook
+    level: 2
+    title: "§16. git hook の「打ち込みで確認」 は、 機械で確かめられる事実なら機械で確かめる"
+  - id: typed-confirmation-problem
+    level: 3
+    title: "問題"
+  - id: typed-confirmation-prevention
+    level: 3
+    title: "防止策"
+  - id: stop-hook-addendum-not-reemission
+    level: 2
+    title: "§17. Stop hook は返事の「全文の出し直し」 を要求しない — 不足の追記だけ、 または返事の前に要求を出す (2026-09)"
+  - id: shared-state-file-merge
+    level: 2
+    title: "§18. 並列の session の hook が同じ state file を読んで書くなら、 lock の中で読み直して合わせる (2026-09)"
+  - id: command-flag-normalization
+    level: 2
+    title: "§19. command の option を当てる hook は、 略形と同じ効果の別経路まで正規化してから当てる"
+  - id: git-fixture-pinned-dates
+    level: 2
+    title: "§20. test の git fixture は日付を固定する — 同じ秒に作った 2 つの履歴は同じ sha になる"
+  - id: autofix-hook-path-commit-stale-index
+    level: 2
+    title: "§21. 自動修正して再 stage する pre-commit と `git commit -- <path>` を合わせると、 本当の index に修正前の版が残る"
+  - id: git-race-fixture-via-hooks
+    level: 2
+    title: "§22. git の race (HEAD が動く窓) を test で決定的に再現する — fixture の repo の hook に相手の commit を打たせる"
+  - id: dry-run-model-authored-script
+    level: 2
+    title: "§23. model が書いた script を hook が空回しするとき、 node の `vm` は隔離にならない — 起動の flag で閉じる"
+  - id: ps-process-anchor
+    level: 2
+    title: "§24. hook が「動いている process」 を `ps` で数えるときは、 interpreter・script・subcommand の位置に anchor する"
+  - id: consent-before-first-stop
+    level: 2
+    title: "§25. 「止めた後に本人が話せば通す」 関門は、 止めより前に出た本人の言葉も読む"
+  - id: trailer-needs-final-newline
+    level: 2
+    title: "§26. commit message に trailer を足す git hook は、 message を改行で終えてから書く"
+  - id: message-display-hook
+    level: 2
+    title: "§27. 表示だけを差し替える hook (MessageDisplay) — 返事の文を画面に出す前に書き換える"
+  - id: unblock-message-from-tested-ways
+    level: 2
+    title: "§28. 止める hook が「こうすれば解ける」 と言う文は、 試験が 1 つずつ試す語の組から作る"
+  - id: related-docs
+    level: 2
+    title: "関連"

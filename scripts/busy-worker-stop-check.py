@@ -1,0 +1,751 @@
+#!/usr/bin/env python3
+"""busy-worker-stop-check.py — 動いている (busy) worker session を止める操作 (`claude stop|kill|rm <id>`、 desktop の stop_session / archive_session) を、 本人に聞く前の 1 回目は止める (hook の engine。 正本 = conventions/multi-session-coordination.md#ask-before-stopping-a-busy-worker)。
+
+Why (実測): 見え方や model を直すために、 動いている worker を止めて起こし直すと、 止めた worker が読み込みに使った分の
+使用料がそのまま無駄になる (起こし直した session は同じ読み込みをもう一度やる)。 止めた worker の記録は残り、
+`claude --resume <id>` や attach で続きを出せる = 止めずに済む道がたいてい在る。 止めるかは費用を払う本人が決める。
+止める側の session は「直したい」 気持ちで動いているので、 散文の規則だけでは手が先に出る。
+
+述語:
+  - Bash: command に `claude … stop|kill|rm` がある → command の中の session id らしい語 (8 桁以上の 16 進) を全部拾い、
+    live の registry (全 config dir、 scripts/lib/session_model.py) で status = busy のものだけを対象にする
+    (for 文の id の並びも拾う。 終わって idle の worker の片付けは止めない)。
+  - mcp `…__stop_session` / `…__archive_session`: tool_input.session_id (`local_…` か transcript id) の status が busy なら対象。
+    ただし archive_session の相手が busy のときは、 止める文が「turn の終わりを待ってから畳む」 (child-wrap-check.py --wait)
+    で、 本人に聞かせず、 本人の発言でも通さない (turn が終われば下の owner の判定に進む)。 archive は turn を止めないので
+    使用料の無駄は起きず、 app も turn の途中の session の archive を断る (app の code を読んだ範囲。 実測: 子が turn の途中だったのは親が直前に送った
+    message に答えていたためで、 旧い文は親に本人へ聞かせようとし、 26 秒後の archive は何もせずに通った)。
+  - 対象があれば、 その target について「止めた時刻」 を session ごとの state に記録して止める (exit 2、 理由に model と
+    動いた時間 = 本人に聞く 1 行の材料)。 止めた時刻より後に本人の発言 (人の入力。 他 session からの message・hook の
+    差し戻し・task の通知は数えない) があれば通す = 聞いて答えをもらった後の 2 回目は通る。
+  - archive_session で子が busy でないときは、 子が本人とのやりとりの途中かを見る (scripts/child-wrap-check.py の
+    owner_reasons = 本人も親も答えていない問い・本人だけが答えられる問い (承認・外部への発信) が残る / 本人が
+    子の窓で発言している = その後の親の message では終わらず、 子が答えてから既定 10 分で終わる)。 該当すれば同じく
+    1 回目は止め、 本人の発言の後は通す (正本 = conventions/multi-session-coordination.md#tidy-after-child-turn-ends)。
+    本人がこの窓 (親の窓) で、 子の理由が始まった時刻 (子の問い・本人の子の窓での最後の発言 = child-wrap-check.py の
+    owner_hold の since) より後に、 子を畳んでよいと言っていれば (CLOSE_WORD = 「閉じていいよ」「畳んで」 など。
+    同じ節が打ち消し・問いなら数えない) 1 回目から通す (実測: 本人の「閉じていいよ」 の 1 分後の archive を、 その言葉が
+    1 回目の止めより前だったために 2 回止めた)。 どの子を指すかは見ない (止めた後の本人の発言で通すのと同じ粒度)。
+  - archive_session で相手が自分の子 (app の記録の親がこの session、 切り離していない) なら、 子に wrap の記録があり、
+    その wrap の turn の後に書いていない (file の編集・commit) かを見る (scripts/child-wrap-check.py の wrap_hold)。 無ければ 1 回目は止め、 照合の理由を全部、 道具の語の
+    まま返し、 子の model の段 (child-wrap-check.py の model_step = 規則が wrap の model を決めていれば送る前に切り替える)、
+    送る文の見本 (child-wrap-check.py の WRAP_ASK_TEXT) と見張りの 1 行を出す。 同じ子への 2 回目 (その間に子が新しく
+    書いていない) は通す。 本人がこの窓で、 親の最後の message より後に wrap を省くと言っていれば (NO_WRAP =「wrap なしで」
+    「締めは要らない」 など) 1 回目から通す。 本人の「閉じていい」「畳んで」 (CLOSE_WORD) は本人の側の理由だけを通し、 wrap の
+    記録の無いことは通さない (実測: 親の本人への問いが「wrap の記録が無い」 を落とし、 本人の「畳んで」 が理由の欠けた問いへの
+    答えになった。 止めたのは app の別の理由だった)。
+  - mcp の stop_session / archive_session は、 上の全部より先に、 相手がこの session の起こした session (自分・その子孫・
+    起こした控え) かを見る (scripts/session-launch-check.py の touch_check = model・effort の切り替えと同じ判定。 起こしていない
+    session は、 本人がこの窓の直近 3 回の発言でその session の id・題を出したときだけ通す。 規約 =
+    conventions/multi-session-coordination.md#touch-only-own-sessions)。 Bash の `claude stop` は app の記録の親を持たないので見ない。
+  - Bash だけ: 本人が直前の発言で止めるよう明示に言ったなら、 command に `# stop-ok: <本人の発言の一部を逐語で>` を
+    付けると、 その文字列が本人の最新の発言に在る時に限って 1 回目から通す (逐語でなければ通さない)。
+
+故障は通す (読めない入力・registry が読めない・例外 = exit 0)。
+env: BUSY_WORKER_STOP_CHECK_DISABLE=1 / BUSY_WORKER_STOP_STATE_DIR (test) / CLAUDE_SESSIONS_DIR・CLAUDE_PROJECTS_DIR (test)。
+self-test: python3 scripts/busy-worker-stop-check.py --selftest
+"""
+from __future__ import annotations
+
+import importlib.util as _ilu
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "lib"))
+import session_model as sm  # noqa: E402
+
+RULE = "claude-config/conventions/multi-session-coordination.md#ask-before-stopping-a-busy-worker"
+CHILD_RULE = "claude-config/conventions/multi-session-coordination.md#tidy-after-child-turn-ends"
+CLI_STOP = re.compile(r"\bclaude\b[^|;&\n]*?\b(stop|kill|rm)\b")   # cheap prefilter only; the command word decides
+# The command word is read after heredoc bodies and quoted strings are blanked (the same reading as
+# hooks/cd-git-write-guard.py): text that only mentions `claude stop <id>` (an echo, a commit message, a document
+# written through a heredoc) is not a stop (measured: a heredoc that quoted the words was stopped).
+QUOTED = re.compile(r"\"(?:\\.|[^\"\\])*\"|'[^']*'")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+SEP = re.compile(r"&&|\|\||;|\||&|\(|\)|\n")
+LEADING_KW = {"do", "then", "else", "elif", "if", "while", "until", "{", "!", "time", "command", "builtin", "exec", "env", "nohup"}
+ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
+ID_TOKEN =re.compile(r"(?<![0-9a-zA-Z_-])([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)(?![0-9a-zA-Z_])")
+STOP_OK = re.compile(r"#\s*stop-ok:\s*(.+?)\s*$", re.M)
+# The app's continuation after a compaction ("This session is being continued from a previous conversation …") is a user
+# entry the app writes, not the person's: it carries isCompactSummary (read below); the text is the fallback (measured: the
+# summary read as the person talking kept a wrapped child with no question from being archived).
+# The brief a session started from another session (start_session, or a card the person pressed) opens with is the
+# requester's text, not the person's: it arrives as a plain prompt like the person's (both carry promptSource "sdk",
+# measured), so its header is the marker (measured: a child started from a pressed card had its brief read as the person
+# talking in the child's window, and the archive of the wrapped child was stopped twice).
+NOT_HUMAN = ("<task-notification", "<cross-session-message", "Another Claude session sent a message", "Stop hook feedback",
+             "<local-command", "<command-name>", "<command-message>", "<side-sessions-event", "[Request interrupted",
+             "This session is being continued from a previous conversation",
+             "Background (from the session that started this one)")
+TAIL_BYTES = 512 * 1024
+REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+
+
+def state_dir() -> str:
+    return os.environ.get("BUSY_WORKER_STOP_STATE_DIR") or os.path.expanduser("~/.claude/state/busy-worker-stop")
+
+
+def _state_path(sid: str) -> str:
+    return os.path.join(state_dir(), re.sub(r"[^A-Za-z0-9_.-]", "_", sid or "unknown") + ".json")
+
+
+def load_state(sid: str) -> dict:
+    try:
+        with open(_state_path(sid), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(sid: str, d: dict) -> None:
+    os.makedirs(state_dir(), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=state_dir(), suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, ensure_ascii=False)
+    os.replace(tmp, _state_path(sid))
+
+
+def _human_text(e: dict) -> str:
+    """The text of a person's prompt in one transcript entry, '' for anything else."""
+    a = e.get("attachment")
+    if isinstance(a, dict):
+        if a.get("type") == "queued_command" and (a.get("origin") or {}).get("kind") == "human":
+            p = a.get("prompt")
+            if isinstance(p, list):
+                p = " ".join(x.get("text", "") for x in p if isinstance(x, dict) and x.get("type") == "text"
+                             and "<system-reminder>" not in x.get("text", ""))
+            return str(p or "")
+        return ""
+    if e.get("type") != "user" or e.get("isMeta") or e.get("isCompactSummary"):
+        return ""
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+            return ""
+        c = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
+                     and not b.get("text", "").lstrip().startswith("<system-reminder>"))
+    if not isinstance(c, str):
+        return ""
+    # A peer session's message is written with the app's reminders first (measured: "Linked sessions now …" runs past
+    # 200 characters), so the marker is looked for after the reminders are dropped.
+    t = REMINDER.sub("", c).strip()
+    if not t or any(t.startswith(x) or x in t[:200] for x in NOT_HUMAN):
+        return ""
+    return t
+
+
+def human_prompts(path: str) -> list[tuple[str, str]]:
+    """(timestamp, text) of each of the person's prompts in the last TAIL_BYTES of a transcript, in file order."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > TAIL_BYTES:
+                fh.seek(size - TAIL_BYTES)
+                fh.readline()
+            raw = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    out = []
+    for line in raw.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        t = _human_text(e)
+        if t:
+            out.append((str(e.get("timestamp") or ""), t))
+    return out
+
+
+def last_human(path: str) -> tuple[str, str]:
+    """(timestamp, text) of the person's latest prompt in a transcript, ('', '') when none is found."""
+    best = ("", "")
+    for ts, t in human_prompts(path):
+        if ts >= best[0]:
+            best = (ts, t)
+    return best
+
+
+# The person's word in the parent's window that the child may be folded (「閉じていいよ」「畳んで」「片づけて」
+# 「アーカイブして」, measured: 「閉じていいよ」 a minute before the archive, which this guard stopped twice because the
+# word came before its first stop). The word does not count when the rest of its clause negates or asks it
+# (「閉じてはだめ」「閉じてほしくない」「閉じてない」「閉じていい？」「閉じていいのかな」; 「閉じないで」 has no match),
+# nor an English "don't archive". Conservative on purpose: a missed word costs one more stop, a wrong one folds a
+# child the person still works with.
+CLOSE_WORD = re.compile(r"(?:閉じ|とじ|片[づ付]け)(?:て|と|ちゃ)|(?:畳|たた)ん(?:で|ど|じゃ)|アーカイブ(?:し|で)"
+                        r"|(?<![A-Za-z])archive(?:\s+(?:it|them|this|that)(?![A-Za-z])|\s*(?:して|しと|しちゃ|でいい))", re.I)
+# (the bare English word is not one: 「archive の hook が止めた」 names the guard, it does not ask for a fold)
+CLOSE_NOT_AFTER = re.compile(r"な|は|ほし|欲し|だめ|ダメ|駄目|いけ|いいの|よいの|いいか|よいか|[？?]")
+CLOSE_NOT_BEFORE = re.compile(r"(?:don'?t|do not|not|never)\s+$", re.I)
+CLAUSE_END = re.compile(r"[。．！!\n、,.]")
+
+
+def close_consent(text: str) -> bool:
+    """Whether a prompt says the child may be folded (CLOSE_WORD, not negated or asked in the rest of its clause)."""
+    for m in CLOSE_WORD.finditer(text or ""):
+        tail = CLAUSE_END.split(text[m.end():], 1)[0][:16]
+        if CLOSE_NOT_AFTER.search(tail) or CLOSE_NOT_BEFORE.search(text[max(0, m.start() - 12):m.start()]):
+            continue
+        return True
+    return False
+
+
+def consent_after(path: str, since: str) -> str:
+    """The timestamp of the person's latest prompt in this window, later than `since`, that says the child may be folded
+    ('' when there is none). `since` = when the child's reason to wait started (child-wrap-check.py owner_hold): a word
+    from before the person went on talking with the child, or before its open ask, does not count."""
+    if not since:
+        return ""
+    hits = [ts for ts, t in human_prompts(path) if ts[:19] > since[:19] and close_consent(t)]
+    return max(hits, default="")
+
+
+def busy_targets(ids: list[str]) -> list[dict]:
+    out, seen = [], set()
+    for t in ids:
+        try:
+            rows = sm.resolve(t)
+        except Exception:
+            rows = []
+        for r in rows:
+            if r.get("status") != "busy" or r["sessionId"] in seen:
+                continue
+            seen.add(r["sessionId"])
+            try:
+                d = sm.describe(r)
+            except Exception:
+                d = r
+            out.append(d)
+    return out
+
+
+def _blank(m: re.Match) -> str:
+    return re.sub(r"[^\n]", " ", m.group(0))
+
+
+def stops_a_session(cmd: str) -> bool:
+    """Whether a segment of the command runs `claude … stop|kill|rm` (the command word is `claude` or a path to it,
+    after variable assignments and control words; heredoc bodies and quoted strings do not count)."""
+    masked = QUOTED.sub(_blank, HEREDOC.sub(_blank, cmd))
+    for seg in SEP.split(masked):
+        words = seg.split()
+        while words and (words[0] in LEADING_KW or ASSIGN.match(words[0])):
+            words = words[1:]
+        if not words or os.path.basename(words[0]) != "claude":
+            continue
+        sub = next((w for w in words[1:] if not w.startswith("-")), "")
+        if sub in ("stop", "kill", "rm"):
+            return True
+    return False
+
+
+def targets_of(inp: dict) -> tuple[list[str], str]:
+    tool, ti = inp.get("tool_name") or "", inp.get("tool_input") or {}
+    if tool == "Bash":
+        cmd = ti.get("command") or ""
+        if not CLI_STOP.search(cmd) or not stops_a_session(cmd):
+            return [], ""
+        masked = HEREDOC.sub(_blank, cmd)   # ids in a for-loop list count; ids inside a heredoc body do not
+        return [m.group(1) for m in ID_TOKEN.finditer(masked)], cmd
+    if tool.endswith("__stop_session") or tool.endswith("__archive_session"):
+        s = (ti.get("session_id") or "").strip()
+        return ([s] if s and s != "self" else []), ""
+    return [], ""
+
+
+def _minutes_since(row: dict) -> str:
+    started = None
+    import glob
+    for sdir in sm.sessions_dirs():
+        for p in glob.glob(os.path.join(sdir, "*.json")):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(d, dict) and d.get("sessionId") == row.get("sessionId"):
+                started = d.get("startedAt")
+                break
+        if started is not None:
+            break
+    if not isinstance(started, (int, float)):
+        return ""
+    return f"{max(0, int((time.time() * 1000 - started) / 60000))} 分前に起動"
+
+
+def touch_gate(inp: dict) -> tuple[int, str]:
+    """stop_session / archive_session of a desktop session this session did not start: the same check as the model
+    and effort setters (scripts/session-launch-check.py touch_check, rule = TOUCH_RULE there). Fail-open."""
+    tool = inp.get("tool_name") or ""
+    if not (tool.endswith("__stop_session") or tool.endswith("__archive_session")):
+        return 0, ""
+    try:
+        spec = _ilu.spec_from_file_location("session_launch_check", os.path.join(HERE, "session-launch-check.py"))
+        slc = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(slc)
+        return slc.touch_check(inp)
+    except Exception:
+        return 0, ""
+
+
+def check(inp: dict) -> tuple[int, str]:
+    rc, txt = touch_gate(inp)
+    if rc:
+        return rc, txt
+    ids, cmd = targets_of(inp)
+    if not ids:
+        return 0, ""
+    busy = busy_targets(ids)
+    if not busy:
+        return owner_check(inp, ids)
+    if (inp.get("tool_name") or "").endswith("__archive_session"):
+        return 2, busy_archive_text(busy, ids[0])
+    sid = inp.get("session_id") or ""
+    st = load_state(sid)
+    h_ts, h_text = last_human(inp.get("transcript_path") or "")
+    m = STOP_OK.search(cmd) if cmd else None
+    if m and m.group(1).strip() and h_text and m.group(1).strip() in h_text:
+        return 0, ""
+    pending = [b for b in busy if not (st.get(b["sessionId"]) and h_ts and h_ts > st[b["sessionId"]])]
+    if not pending:
+        for b in busy:
+            st.pop(b["sessionId"], None)
+        save_state(sid, st)
+        return 0, ""
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    for b in pending:
+        st.setdefault(b["sessionId"], now)
+    save_state(sid, st)
+    lines = []
+    for b in pending:
+        bits = [b.get("model") or "model 不明", _minutes_since(b), b.get("name") or ""]
+        lines.append(f"  - {b['sessionId'][:8]}: " + " / ".join(x for x in bits if x))
+    return 2, ("🛑 busy-worker-stop-check: 動いている worker を止める操作なので、 本人に聞く前の 1 回目は止めた。\n"
+               + "\n".join(lines) + "\n"
+               "  止めると、 その worker が読み込みに使った分の使用料が無駄になる (起こし直すと同じ読み込みをもう一度やる)。"
+               " 見え方を変えたいだけなら止めずに済む道がある (記録は残る = `claude attach <id>` / `claude --resume <id>`)。\n"
+               "  本人に 1 行で聞く: 何を (上の model と動いた時間)、 なぜ止めたいか、 止めずに済む道。 本人が答えた後なら同じ操作は通る。\n"
+               "  本人が直前の発言で止めるよう明示に言っているなら、 Bash の command に `# stop-ok: <その発言の一部を逐語で>` を付けて打ち直す。"
+               f" 規約 = {RULE}")
+
+
+def busy_archive_text(busy: list[dict], target: str) -> str:
+    """The stop for archive_session of a session mid-turn. Archiving does not stop the child's turn (the app refuses a
+    mid-turn archive on its own), so no usage is wasted and there is nothing to ask the person: wait for the turn end.
+    Measured: the child was mid-turn only because the parent had just messaged it, and the old text sent the parent to
+    ask the person 26 seconds before the archive went through by itself."""
+    lines = [f"  - {b['sessionId'][:8]}: " + " / ".join(x for x in (b.get("model") or "model 不明", _minutes_since(b),
+                                                                   b.get("name") or "") if x) for b in busy]
+    return ("🛑 busy-worker-stop-check: 畳もうとした session はまだ turn の途中 (app の code でも、 turn の途中の session の archive は断る形)。\n"
+            + "\n".join(lines) + "\n"
+            "  turn の終わりを待ってから畳む = Bash の run_in_background で"
+            f" `python3 ~/Claude/claude-config/scripts/child-wrap-check.py --wait {target}` を出し、 起こされた turn の照合が ✅ なら畳む"
+            " (本人に聞かなくてよい = archive は turn を止めないので、 使用料の無駄は起きない)。"
+            " 待つ間は子に message を送らない (送ると子がまた turn に入る)。"
+            f" 規約 = {CHILD_RULE}")
+
+
+def owner_check(inp: dict, ids: list[str]) -> tuple[int, str]:
+    """archive_session of an idle child that still owes the person (an ask left open, or the person talking with it
+    after the parent's last message): stopped once, passes after the person speaks in this window, and passes at once
+    when the person already said in this window, after the child's reason started, that it may be folded
+    (scripts/child-wrap-check.py owner_hold; rule = CHILD_RULE)."""
+    if not (inp.get("tool_name") or "").endswith("__archive_session") or not ids:
+        return 0, ""
+    try:
+        spec = _ilu.spec_from_file_location("child_wrap_check", os.path.join(HERE, "child-wrap-check.py"))
+        cw = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(cw)
+        hold = cw.owner_hold(ids[0])
+    except Exception:
+        return 0, ""  # fail-open
+    reasons = hold.get("reasons") or []
+    if not reasons:
+        return wrap_check(inp, ids, cw)
+    sid, key = inp.get("session_id") or "", "owner:" + ids[0]
+    st = load_state(sid)
+    if consent_after(inp.get("transcript_path") or "", hold.get("since") or ""):
+        if st.pop(key, None) is not None:
+            save_state(sid, st)
+        return wrap_check(inp, ids, cw)  # the person's word covers the person's side, not a missing wrap
+    h_ts, _ = last_human(inp.get("transcript_path") or "")
+    if st.get(key) and h_ts and h_ts > st[key]:
+        st.pop(key, None)
+        save_state(sid, st)
+        return wrap_check(inp, ids, cw)
+    st.setdefault(key, time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()))
+    save_state(sid, st)
+    try:
+        wr = cw.wrap_hold(ids[0]).get("reason") or ""
+    except Exception:
+        wr = ""
+    return 2, ("🛑 busy-worker-stop-check: 畳もうとした子は、 本人とのやりとりが終わっていないので 1 回目は止めた。\n"
+               + "\n".join("  - " + r for r in reasons + ([wr] if wr else [])) + "\n"
+               "  判断の問いなら親が子に答えを送ってから畳む (送った後なら同じ操作は通る)。 本人だけが答えられる問い"
+               " (承認・外部への発信) と本人が子と話している途中は、 本人に 1 行で伝えて畳んでよいかを聞く (本人が答えた後なら通る。"
+               " 本人がこの窓で、 子の問い・子の窓での最後の発言より後に「閉じていい」 などと言っていれば 1 回目から通る)。"
+               " 照合の全体 = `python3 ~/Claude/claude-config/scripts/child-wrap-check.py "
+               f"{ids[0]}`。 規約 = {CHILD_RULE}")
+
+
+# The person's word in this window that the child is folded without a wrap (「wrap なしで畳んで」「締めは要らない」); it
+# counts only after the parent's last message to the child (an older word was about an older job).
+NO_WRAP = re.compile(r"(?<![A-Za-z])wrap\s*(?:は|を|の)?\s*(?:なし|無し|なく|せず|しないで|しなくて|不要|要らな|いらな|抜き)"
+                     r"|(?:締め|仕上げ)\s*(?:は|を)?\s*(?:なし|無し|せず|ずに|ないで|なくて|不要|要らな|いらな|抜き)", re.I)
+# a question or a complaint about a fold without a wrap is not the person's word to skip it (measured: the person's
+# 「なに、ここもwrapせずに閉じてたの？」 matched NO_WRAP). The sentence is read whole: a question mark at its end, or
+# a question / a denial word in it, drops it; the phrase must be followed by a fold word (CLOSE_WORD, not negated) or end
+# its clause (「締めは要らない」「wrap なしでいい」).
+NO_WRAP_SENTENCE = re.compile(r"[^。！!？?\n]+(?:[。！!？?\n]|$)")
+NO_WRAP_DROP = re.compile(r"なぜ|なんで|何で|どうして|って(?:何|なに)|とは言って|言ってない|言っていない")
+NO_WRAP_END = re.compile(r"^(?:い|く)?\s*(?:です|でいい|でよい|で大丈夫|で結構|でOK)?\s*(?:よ|ね)?\s*$", re.I)
+
+
+def no_wrap_said(text: str) -> bool:
+    """Whether a prompt says the child is folded without a wrap (NO_WRAP in a sentence that is not a question or a
+    complaint, followed by a fold word that is not negated, or ending its clause)."""
+    for sm_ in NO_WRAP_SENTENCE.finditer(text or ""):
+        s = sm_.group(0).strip()
+        if s.endswith(("？", "?")) or NO_WRAP_DROP.search(s):
+            continue
+        m = NO_WRAP.search(s)
+        if not m:
+            continue
+        rest = s[m.end():].rstrip("。！!\n")
+        fold = CLOSE_WORD.search(rest)
+        if fold:
+            tail = CLAUSE_END.split(rest[fold.end():], 1)[0][:16]
+            if not CLOSE_NOT_AFTER.search(tail):
+                return True
+            continue
+        if NO_WRAP_END.match(rest):
+            return True
+    return False
+
+
+def wrap_check(inp: dict, ids: list[str], cw) -> tuple[int, str]:
+    """archive_session of one's own child that has no wrap record, or wrote after its wrap's turn
+    (child-wrap-check.py wrap_hold): stopped once, with the tool's reasons in full and the words to send; the second
+    archive of the same child (no new write since) passes; the person's word in this window, after that message, that
+    the wrap is skipped (NO_WRAP) passes it at once. Measured: the parent's question to the person dropped the
+    tool's 'wrap の記録が無い', the person's 「畳んで」 answered it, and only an unrelated refusal of the app kept the child."""
+    try:
+        hold = cw.wrap_hold(ids[0])
+        me = cw.ds.find(str(inp.get("session_id") or ""))
+        child = cw.ds.find(hold.get("local") or ids[0]) if hold.get("found") else None
+    except Exception:
+        return 0, ""  # fail-open
+    if not hold.get("reason") or not me or not child or hold.get("parent") != me.get("local_id") or child.get("detached"):
+        return 0, ""
+    since = hold.get("last_msg") or hold.get("first") or ""
+    tpath = inp.get("transcript_path") or ""
+    if any(ts[:19] > since[:19] and no_wrap_said(t) for ts, t in human_prompts(tpath)):
+        return 0, ""
+    sid, key, mark = inp.get("session_id") or "", "wrap:" + ids[0], hold.get("key") or since
+    st = load_state(sid)
+    if st.get(key) == mark:  # the same state as at the first stop = the second try passes
+        st.pop(key, None)
+        save_state(sid, st)
+        return 0, ""
+    st[key] = mark
+    save_state(sid, st)
+    try:
+        reasons = cw.check_child(ids[0])["reasons"] or [hold["reason"]]
+    except Exception:
+        reasons = [hold["reason"]]
+    return 2, ("🛑 busy-worker-stop-check: 畳もうとした子に wrap の記録が無い (か、 wrap の turn の後に書いた分がある) ので 1 回目は止めた。"
+               " 照合の理由 (全部、 道具の語のまま):\n" + "\n".join("  - " + r for r in reasons) + "\n"
+               f"  先に wrap を頼む = {cw._then(cw.model_step(child.get('local_id') or ids[0]))}"
+               f"子へ SendMessage で「{cw.WRAP_ASK_TEXT}」 と送り、 同じ turn に Bash の run_in_background で"
+               f" `python3 ~/Claude/claude-config/scripts/child-wrap-check.py --wait {ids[0]}` を出す (起こされた turn の照合が ✅ なら畳む)。"
+               " 本人に畳むかを聞くなら、 上の理由を全部書いて聞く (1 つに選ばない)。 本人がこの窓で「wrap なしで」 などと言えば"
+               " 1 回目から通る。 理由を全部見た上で畳むなら、 同じ操作をもう一度打てば通る。"
+               f" 規約 = {CHILD_RULE}")
+
+
+def main() -> int:
+    if os.environ.get("BUSY_WORKER_STOP_CHECK_DISABLE") == "1":
+        return 0
+    try:
+        inp = json.loads(sys.stdin.read() or "{}")
+    except (ValueError, OSError):
+        return 0
+    if inp.get("hook_event_name") not in (None, "", "PreToolUse"):
+        return 0
+    try:
+        rc, txt = check(inp)
+    except Exception:
+        return 0  # fail-open
+    if rc == 2:
+        sys.stderr.write(txt + "\n")
+    return rc
+
+
+def selftest() -> int:
+    import uuid
+
+    fails = []
+
+    def ok(label: str, cond: bool) -> None:
+        print(("ok: " if cond else "NG: ") + label)
+        if not cond:
+            fails.append(label)
+
+    with tempfile.TemporaryDirectory() as td:
+        sdir, pdir, stdir = (os.path.join(td, x) for x in ("sessions", "projects", "state"))
+        os.makedirs(sdir)
+        os.makedirs(os.path.join(pdir, "-w"))
+        ddir = os.path.join(td, "desktop", "acct", "env")
+        os.makedirs(ddir)
+        os.environ.update(CLAUDE_SESSIONS_DIR=sdir, CLAUDE_PROJECTS_DIR=pdir, BUSY_WORKER_STOP_STATE_DIR=stdir,
+                          CLAUDE_DESKTOP_SESSIONS_DIR=os.path.join(td, "desktop"), CHILD_WRAP_REPOS_GLOB=os.path.join(td, "none"),
+                          SESSION_LAUNCH_STATE_DIR=os.path.join(td, "launch-state"),
+                          SESSION_TOUCH_GATE_OFF_MARKER=os.path.join(td, "no-touch-off"))
+        os.environ.pop("SESSION_TOUCH_GATE", None)
+        busy_id, idle_id = "b0b0b0b0-0000-4000-8000-00000000000b", "a0a0a0a0-0000-4000-8000-00000000000a"
+        for n, (sid_, status) in enumerate(((busy_id, "busy"), (idle_id, "idle"))):
+            with open(os.path.join(sdir, f"{n}.json"), "w", encoding="utf-8") as fh:
+                json.dump({"pid": os.getpid(), "sessionId": sid_, "cwd": "/w", "name": f"worker {n}", "status": status,
+                           "hostSessionId": f"local_{n:08d}-0000-4000-8000-000000000000", "startedAt": int(time.time() * 1000) - 6 * 60000}, fh)
+        with open(os.path.join(pdir, "-w", busy_id + ".jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"model": "claude-fable-5-1"}, "timestamp": "t"}) + "\n")
+        tr = os.path.join(td, "launcher.jsonl")
+
+        def transcript(*rows: tuple[str, str]) -> None:
+            with open(tr, "w", encoding="utf-8") as fh:
+                for ts, text in rows:
+                    fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}, "timestamp": ts}, ensure_ascii=False) + "\n")
+
+        def run(tool: str, ti: dict, sid: str = "L") -> tuple[int, str]:
+            return check({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti, "session_id": sid, "transcript_path": tr})
+
+        transcript(("2026-01-01T00:00:00.000Z", "worker が見えない"))
+        cmd = "CLAUDE_CONFIG_DIR=/x claude stop b0b0b0b0 2>&1 | tail -1"
+        rc, txt = run("Bash", {"command": cmd})
+        ok("busy worker, no answer yet → blocked with model and minutes", rc == 2 and "claude-fable-5-1" in txt and "分前に起動" in txt)
+        rc, _ = run("Bash", {"command": cmd})
+        ok("second try with no new human prompt → still blocked", rc == 2)
+        transcript(("2026-01-01T00:00:00.000Z", "x"), ("2099-01-01T00:00:00.000Z", "うん、止めていいよ"))
+        rc, _ = run("Bash", {"command": cmd})
+        ok("after the person answered → passes", rc == 0)
+        rc, _ = run("Bash", {"command": "for id in a0a0a0a0 c0c0c0c0; do claude stop $id; done"}, sid="L2")
+        ok("finished idle workers in a loop → passes (cleanup)", rc == 0)
+        rc, _ = run("Bash", {"command": "for id in a0a0a0a0 b0b0b0b0; do claude stop $id; done"}, sid="L3")
+        ok("a busy one among the loop's ids → blocked", rc == 2)
+        transcript(("2026-01-01T00:00:00.000Z", "その worker は止めて"))
+        rc, _ = run("Bash", {"command": cmd + "  # stop-ok: その worker は止めて"}, sid="L4")
+        ok("stop-ok quoting the person's latest words → passes", rc == 0)
+        rc, _ = run("Bash", {"command": cmd + "  # stop-ok: 止めてよいと言われた"}, sid="L5")
+        ok("stop-ok with words the person did not say → blocked", rc == 2)
+        rc, _ = run("mcp__ccd_session_mgmt__stop_session", {"session_id": "local_00000000-0000-4000-8000-000000000000"}, sid="L6")
+        ok("desktop stop_session on a busy session → blocked", rc == 2)
+        busy_local = "local_00000000-0000-4000-8000-000000000000"
+        transcript(("2026-01-01T00:00:00.000Z", "閉じて良し"))
+        rc, txt = run("mcp__ccd_session_mgmt__archive_session", {"session_id": busy_local}, sid="LA")
+        ok("archive of a session mid-turn → blocked with 'wait for the turn end', not 'ask the person'",
+           rc == 2 and "turn の終わりを待ってから畳む" in txt and f"--wait {busy_local}" in txt and "本人に 1 行で聞く" not in txt)
+        transcript(("2026-01-01T00:00:00.000Z", "x"), ("2099-01-01T00:00:00.000Z", "閉じていいよ"))
+        rc, _ = run("mcp__ccd_session_mgmt__archive_session", {"session_id": busy_local}, sid="LA")
+        ok("... the person's word after it does not pass a mid-turn archive (the turn end does)", rc == 2)
+        ok("close_consent: 「閉じて良し」 is a fold word (the word in the measured scene)", close_consent("閉じて良し"))
+        idle_local, parent_local = "local_00000001-0000-4000-8000-000000000000", "local_0000000f-0000-4000-8000-000000000000"
+        rc, _ = run("mcp__ccd_session_mgmt__archive_session", {"session_id": idle_local}, sid="L6")
+        ok("archive of an idle session → passes", rc == 0)
+        with open(os.path.join(ddir, idle_local + ".json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": idle_local, "cliSessionId": idle_id, "spawnedFrom": {"sessionId": parent_local}}, fh)
+        with open(os.path.join(pdir, "-w", idle_id + ".jsonl"), "w", encoding="utf-8") as fh:
+            for e in ({"type": "user", "timestamp": "2026-01-01T01:00:00.000Z", "message": {"content":
+                       f'<cross-session-message from="{parent_local}">wrap して終えて</cross-session-message>'}},
+                      {"type": "user", "timestamp": "2026-01-01T01:02:00.000Z", "origin": {"kind": "human"},
+                       "message": {"content": "どうやって消すの？"}}):
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        transcript(("2026-01-01T00:00:00.000Z", "終わった子は畳んで"))
+        rc, txt = run("mcp__ccd_session_mgmt__archive_session", {"session_id": idle_local}, sid="L9")
+        ok("archive of an idle child the person is still talking with → blocked with the words", rc == 2 and "どうやって消すの" in txt)
+        transcript(("2026-01-01T00:00:00.000Z", "x"), ("2099-01-01T00:00:00.000Z", "それはもういい、畳んで"))
+        rc, _ = run("mcp__ccd_session_mgmt__archive_session", {"session_id": idle_local}, sid="L9")
+        ok("after the person answered in this window → passes", rc == 0)
+        arch = "mcp__ccd_session_mgmt__archive_session"
+        transcript(("2026-01-01T01:05:00.000Z", "閉じていいよ。ここもおわったら wrap して閉じて"))
+        rc, _ = run(arch, {"session_id": idle_local}, sid="L10")
+        ok("the person said 「閉じていいよ」 in this window after the child's reason started → passes at the first try", rc == 0)
+        for n, said in enumerate(("閉じていい？", "まだ閉じないで", "閉じてはだめ", "閉じてないよ", "閉じていいのかな", "don't archive it")):
+            transcript(("2026-01-01T01:05:00.000Z", said))
+            rc, _ = run(arch, {"session_id": idle_local}, sid=f"L11{n}")
+            ok(f"a negated or asked word ({said}) → blocked as before", rc == 2)
+        transcript(("2026-01-01T01:01:00.000Z", "閉じていいよ"), ("2026-01-01T01:04:00.000Z", "次はこれ"))
+        rc, _ = run(arch, {"session_id": idle_local}, sid="L12")
+        ok("「閉じていいよ」 before the person's last prompt in the child's window → blocked (the person went on talking there)",
+           rc == 2)
+        transcript(("2026-01-01T01:03:00.000Z", "畳んでいいよ"), ("2026-01-01T01:04:00.000Z", "次はこれ"))
+        rc, _ = run(arch, {"session_id": idle_local}, sid="L13")
+        ok("the word after the child's reason, then an unrelated prompt → passes (the word still stands)", rc == 0)
+        ok("close_consent: the words that say fold",
+           all(close_consent(s) for s in ("畳んでいいよ", "アーカイブして", "片づけといて", "閉じちゃって", "archive it", "閉じて大丈夫")))
+        ok("close_consent: not a fold word", not any(close_consent(s) for s in ("ありがとう", "この file を開いて", "",
+                                                                                "archive の hook が止めた", "the archive guard")))
+        ok("close_consent: an English request to archive", close_consent("archive して") and close_consent("please archive them"))
+        # The measured scene: the person spoke in the child's window, the child answered and
+        # stopped; 21 minutes later the person said 「閉じていいよ」 in the parent's window and the archive a minute after it
+        # was stopped twice under the 30-minute grace. Timestamps are relative to now (the grace is counted from now).
+        def iso(m: float) -> str:
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - m * 60))
+        sc_local, sc_cli = "local_00000005-0000-4000-8000-000000000000", "c0c0c0c0-0000-4000-8000-00000000000c"
+        with open(os.path.join(ddir, sc_local + ".json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": sc_local, "cliSessionId": sc_cli, "spawnedFrom": {"sessionId": parent_local}}, fh)
+        with open(os.path.join(pdir, "-w", sc_cli + ".jsonl"), "w", encoding="utf-8") as fh:
+            for e in ({"type": "user", "timestamp": iso(60), "message": {"content": "Background (from the session that started this one): 依頼"}},
+                      {"type": "user", "timestamp": iso(23), "origin": {"kind": "human"}, "message": {"content": "これで承認します"}},
+                      {"type": "assistant", "timestamp": iso(22), "message": {"content": [{"type": "text", "text": "当てました"}]}},
+                      {"type": "system", "subtype": "stop_hook_summary", "timestamp": iso(22)}):
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        os.environ["CHILD_WRAP_ANSWERED_GRACE_MIN"] = "30"
+        transcript((iso(1), "閉じていいよ。ここもおわったら wrap して閉じて"))
+        rc, _ = run(arch, {"session_id": sc_local}, sid="L14")
+        ok("scene, the old 30-minute grace: 「閉じていいよ」 a minute before → passes at the first try (was stopped twice)", rc == 0)
+        transcript((iso(1), "次はメールを見て"))
+        rc, _ = run(arch, {"session_id": sc_local}, sid="L15")
+        ok("scene, the old 30-minute grace, no word to fold → still blocked (the wait itself is unchanged)", rc == 2)
+        os.environ.pop("CHILD_WRAP_ANSWERED_GRACE_MIN", None)
+        rc, _ = run(arch, {"session_id": sc_local}, sid="L16")
+        ok("scene, the default 10-minute grace: 22 minutes after the child answered → passes with no word", rc == 0)
+        # R6: one's own child with no wrap record after the parent's last message (the parent's window = parent_cli)
+        parent_cli = "f0f0f0f0-0000-4000-8000-00000000000f"
+        with open(os.path.join(ddir, parent_local + ".json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": parent_local, "cliSessionId": parent_cli}, fh)
+
+        def kid(local: str, cli: str, wrap: bool) -> None:
+            with open(os.path.join(ddir, local + ".json"), "w", encoding="utf-8") as fh:
+                json.dump({"sessionId": local, "cliSessionId": cli, "spawnedFrom": {"sessionId": parent_local}}, fh)
+            rows_ = [{"type": "user", "timestamp": "2026-01-01T01:00:00.000Z", "message": {"content": "Background (from the session that started this one): 依頼"}},
+                     {"type": "user", "timestamp": "2026-01-01T01:10:00.000Z", "message": {"content":
+                      f'<cross-session-message from="{parent_local}">{cw_mod.WRAP_ASK_TEXT}</cross-session-message>'}}]
+            if wrap:
+                rows_.append({"type": "assistant", "timestamp": "2026-01-01T01:10:30.000Z", "message": {"content": [
+                    {"type": "tool_use", "id": "w", "name": "Skill", "input": {"skill": "wrap"}}]}})
+            rows_ += [{"type": "assistant", "timestamp": "2026-01-01T01:11:00.000Z", "message": {"content": [{"type": "text", "text": "済み"}]}},
+                      {"type": "system", "subtype": "stop_hook_summary", "timestamp": "2026-01-01T01:11:01.000Z"}]
+            with open(os.path.join(pdir, "-w", cli + ".jsonl"), "w", encoding="utf-8") as fh:
+                for e in rows_:
+                    fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+        spec_ = _ilu.spec_from_file_location("child_wrap_check", os.path.join(HERE, "child-wrap-check.py"))
+        cw_mod = _ilu.module_from_spec(spec_)
+        spec_.loader.exec_module(cw_mod)
+        nw_local, nw_cli = "local_00000006-0000-4000-8000-000000000000", "d0d0d0d0-0000-4000-8000-00000000000d"
+        ww_local, ww_cli = "local_00000007-0000-4000-8000-000000000000", "e0e0e0e0-0000-4000-8000-00000000000e"
+        kid(nw_local, nw_cli, wrap=False)
+        kid(ww_local, ww_cli, wrap=True)
+        transcript(("2026-01-01T01:20:00.000Z", "畳んで"))
+        rc, txt = run(arch, {"session_id": nw_local}, sid=parent_cli)
+        ok("R6: own child, no wrap after the parent's last message → blocked once, the reasons and the words to send"
+           " (the person's 「畳んで」 does not cover a missing wrap)",
+           rc == 2 and "wrap の記録が無い" in txt and cw_mod.WRAP_ASK_TEXT in txt)
+        rc, _ = run(arch, {"session_id": nw_local}, sid=parent_cli)
+        ok("R6: the second archive of the same child → passes", rc == 0)
+        transcript(("2026-01-01T01:20:00.000Z", "wrap なしで畳んで"))
+        rc, _ = run(arch, {"session_id": nw_local}, sid=parent_cli)
+        ok("R6: the person said 「wrap なしで」 after the parent's last message → passes at the first try", rc == 0)
+        transcript(("2026-01-01T01:05:00.000Z", "wrap なしで畳んで"))
+        rc, _ = run(arch, {"session_id": nw_local}, sid=parent_cli)
+        ok("R6: 「wrap なしで」 before the parent's last message (an older job) → blocked", rc == 2)
+        run(arch, {"session_id": nw_local}, sid=parent_cli)
+        rc, _ = run(arch, {"session_id": ww_local}, sid=parent_cli)
+        ok("R6: own child that ran the wrap after the parent's last message → passes", rc == 0)
+        rc, _ = run(arch, {"session_id": nw_local}, sid="L20")
+        ok("R6: not this session's child → passes", rc == 0)
+        transcript(("2026-01-01T00:00:00.000Z", "x"), ("2099-01-01T00:00:00.000Z", "それはもういい、畳んで"))
+        rc, txt = run(arch, {"session_id": idle_local}, sid=parent_cli)
+        ok("R6: the person's 「畳んで」 passes the person's side, then the missing wrap stops it once", rc == 2 and "wrap の記録が無い" in txt)
+        ok("no_wrap_said: the words that skip the wrap", all(no_wrap_said(s) for s in (
+            "wrap なしで畳んで", "締めは要らない", "wrap しないで閉じて", "wrap なしでいい", "wrap は不要です。 閉じちゃって")))
+        ok("no_wrap_said: not those words (no skip, or a question / complaint / denial)", not any(no_wrap_said(s) for s in (
+            "畳んで", "wrap して閉じて", "wrap skill で仕上げて", "なに、ここもwrapせずに閉じてたの？", "wrap しないで閉じるのはやめて",
+            "wrap なしで畳むのはダメ", "wrap せずに閉じないで", "仕上げずに閉じたのはなぜ？", "wrap は要らないとは言ってない",
+            "なんで wrap なしで畳んで、 と言ったの")))
+        transcript(("2026-01-01T01:20:00.000Z", "なに、ここもwrapせずに閉じてたの？"))
+        rc, _ = run(arch, {"session_id": nw_local}, sid=parent_cli)
+        ok("R6: the person's complaint 「…wrapせずに閉じてたの？」 does not pass the missing wrap", rc == 2)
+        run(arch, {"session_id": nw_local}, sid=parent_cli)
+        rc, _ = run("Bash", {"command": "claude agents --json | head"})
+        ok("listing sessions → passes", rc == 0)
+        rc, _ = run("Bash", {"command": "git rm b0b0b0b0.txt"})
+        ok("an id-looking word without `claude … stop` → passes", rc == 0)
+        rc, _ = run("Bash", {"command": 'echo "claude stop b0b0b0b0 (probe)"'}, sid="L7")
+        ok("a quoted mention of `claude stop <id>` → passes", rc == 0)
+        rc, _ = run("Bash", {"command": "python3 - <<'X'\ntext = 'claude stop b0b0b0b0'\nX"}, sid="L7")
+        ok("a heredoc body that mentions it → passes", rc == 0)
+        rc, _ = run("Bash", {"command": "cd /w && CLAUDE_CONFIG_DIR=/x /usr/local/bin/claude stop b0b0b0b0"}, sid="L8")
+        ok("a path to claude after cd and an assignment → blocked", rc == 2)
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"content": "Another Claude session sent a message: stop it"},
+                                 "timestamp": "2099-02-01T00:00:00.000Z"}) + "\n")
+        ok("a peer session's message is not the person's prompt", last_human(tr) == ("", ""))
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"content": "<system-reminder>\n" + "Linked sessions now ... " * 20
+                                 + "\n</system-reminder>\n<cross-session-message from=\"p\">wrap して</cross-session-message>"},
+                                 "timestamp": "2099-02-02T00:00:00.000Z"}) + "\n")
+        ok("a peer session's message behind a long reminder is not the person's prompt", last_human(tr) == ("", ""))
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt": "止めないで",
+                                 "origin": {"kind": "human"}}, "timestamp": "2099-03-01T00:00:00.000Z"}, ensure_ascii=False) + "\n")
+        ok("a prompt absorbed mid-turn counts as the person's", last_human(tr)[1] == "止めないで")
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "isCompactSummary": True, "message": {"content": "要約: 依頼の続き"},
+                                 "timestamp": "2099-04-01T00:00:00.000Z"}, ensure_ascii=False) + "\n")
+        ok("a compaction summary (isCompactSummary) is not the person's prompt", last_human(tr) == ("", ""))
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"content": "This session is being continued from a previous "
+                                 "conversation that ran out of context. The summary below"}, "timestamp": "2099-04-02T00:00:00.000Z"}) + "\n")
+        ok("the compaction continuation text without the flag is not the person's prompt either", last_human(tr) == ("", ""))
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "promptSource": "sdk", "message": {"content":
+                                 "<system-reminder>\nLinked sessions now ...\n</system-reminder>\n"
+                                 "Background (from the session that started this one):\nBoard request r for role x.\n\nTask:\n直して"},
+                                 "timestamp": "2099-04-03T00:00:00.000Z"}) + "\n")
+        ok("the brief of a session started from another session (a pressed card, start_session) is not the person's prompt",
+           last_human(tr) == ("", ""))
+        with open(tr, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "promptSource": "sdk", "message": {"content": "送って"},
+                                 "timestamp": "2099-04-04T00:00:00.000Z"}, ensure_ascii=False) + "\n")
+        ok("... and the person's own prompt with the same promptSource still is", last_human(tr)[1] == "送って")
+        # ---- a session this session did not start (session-launch-check.py touch_check): stop / archive
+        me_cli, me_local = "c0c0c0c0-0000-4000-8000-0000000000c1", "local_0000000c-0000-4000-8000-000000000000"
+        own_local, other_local = "local_0000000d-0000-4000-8000-000000000000", "local_0000000e-0000-4000-8000-000000000000"
+        for local, cli, extra in ((me_local, me_cli, {}),
+                                  (own_local, "d0d0d0d0-0000-4000-8000-0000000000d1", {"spawnedFrom": {"sessionId": me_local, "sideSession": True}}),
+                                  (other_local, "e0e0e0e0-0000-4000-8000-0000000000e1", {})):
+            with open(os.path.join(ddir, local + ".json"), "w", encoding="utf-8") as fh:
+                json.dump({"sessionId": local, "cliSessionId": cli, "title": "窓 " + local[6:14], **extra}, fh)
+        transcript(("2026-01-01T00:00:00.000Z", "締めて"))
+        rc, txt = run("mcp__ccd_session_mgmt__stop_session", {"session_id": other_local}, sid=me_cli)
+        ok("stop_session on a window this session did not start (the owner opened it) → blocked by the touch check",
+           rc == 2 and "起こした session でも" in txt and "本人が開いた窓" in txt)
+        rc, txt = run("mcp__ccd_session_mgmt__archive_session", {"session_id": other_local}, sid=me_cli)
+        ok("archive_session on it → blocked too", rc == 2 and "畳む" in txt)
+        rc, _ = run("mcp__ccd_session_mgmt__stop_session", {"session_id": own_local}, sid=me_cli)
+        ok("stop_session on this session's own idle child → passes", rc == 0)
+        transcript(("2026-01-01T00:00:00.000Z", "e0e0e0e0 は止めて"))
+        rc, _ = run("mcp__ccd_session_mgmt__stop_session", {"session_id": other_local}, sid=me_cli)
+        ok("... the owner named it by its id in this window → passes", rc == 0)
+        for k in ("CLAUDE_SESSIONS_DIR", "CLAUDE_PROJECTS_DIR", "BUSY_WORKER_STOP_STATE_DIR", "CLAUDE_DESKTOP_SESSIONS_DIR",
+                  "CHILD_WRAP_REPOS_GLOB", "SESSION_LAUNCH_STATE_DIR", "SESSION_TOUCH_GATE_OFF_MARKER"):
+            os.environ.pop(k, None)
+        del uuid
+    print("selftest:", "PASS" if not fails else f"{len(fails)} FAIL")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
+    sys.exit(main())

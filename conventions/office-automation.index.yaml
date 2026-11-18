@@ -1,0 +1,783 @@
+# Stable slug index -- AUTO-GENERATED from the doc by scripts/generate-doc-index.py.
+# id/level/title are DERIVED from the markdown (edit the md + re-run, do NOT hand-edit
+# them here). legacy (a section's original §-number = a permanent forwarding address),
+# related, and any other hand field are PRESERVED. See convention-design-principles §14.7 (= #inbound-ref-robustness).
+# Validated by scripts/check-office-automation-index.py (dangling=0 / orphan=0).
+sections:
+  - id: symptom-index
+    level: 2
+    title: "🔑 まず読め + 症状 → 対処 早見表 (= 何も知らない session の入口)"
+    related: [xlsx-to-pdf-script, pdf-prefill-direct, docx-to-pdf-pages, diff-form-xlsx-detection, excel-osascript-cell-write, excel-write-string-autoconvert, excel-pdf-bottom-border-drop, openpyxl-destroys-drawings, openpyxl-clears-formula-cache, xlsx-locked-by-excel, form-dump-first, docx-checkbox-content-control, zip-cp932-filenames, example-sheet-to-real-data]
+  - id: form-dump-first
+    legacy: "0"
+    level: 2
+    title: "開始前に form を **必ず dump する** (= 推測で書かない)"
+    related: [gov-form-input-cell-heuristics]
+  - id: gov-form-input-cell-heuristics
+    level: 2
+    title: "gov-form xlsx の入力セル特定 経験則 (= dump 後の読み方)"
+    related: [form-dump-first, label-overwrite-bug, label-vs-input-antipattern, openpyxl-clears-formula-cache, diff-form-xlsx-detection]
+    origin: "2026-06-30"
+  - id: form-filename-convention
+    legacy: "0.5"
+    level: 2
+    title: "ファイル命名規約 (form 別 registry)"
+  - id: openpyxl-xlsx-fill
+    legacy: "1"
+    level: 2
+    title: "openpyxl xlsx fill の落とし穴"
+  - id: openpyxl-destroys-drawings
+    level: 3
+    title: "⚠️ openpyxl の save は既存の textbox / shape (= 標題・縦書きラベル・図形) を破壊する"
+    related: [excel-osascript-cell-write, label-overwrite-bug, openpyxl-clears-formula-cache]
+  - id: template-base-not-precedent-base
+    level: 3
+    title: "🔥 様式の新規 fill は「配布雛形 base + 3 分離」 — 前回提出したファイルを copy しない"
+    related: [form-dump-first, template-provenance-check, diff-form-xlsx-detection, form-guidance-color-residue]
+    origin: "2026-07-31"
+  - id: form-today-formula-freeze
+    level: 3
+    title: "⚠️ 様式に埋まった `=TODAY()` は fill 完了時に**固定値へ焼く** (= 再生成のたびに日付が動く)"
+    related: [excel-osascript-cell-write, openpyxl-clears-formula-cache, form-dump-first, diff-form-xlsx-detection]
+  - id: seal-color-pdf-overlay
+    level: 3
+    title: "🔥 印影を**赤いまま**印刷するには xlsx に埋めず **PDF 化後に overlay** する (= blackAndWhite 様式の色 trap)"
+    related: [xlsx-image-via-excel, openpyxl-destroys-drawings, pdf-visual-confirm, pdf-mutation-verification-schema]
+  - id: xlsx-image-via-excel
+    level: 3
+    title: "xlsx に画像 (印影・署名) を置くなら Excel osascript — openpyxl `add_image` は **comments を倍増**させ formula cache も消す"
+    related: [openpyxl-destroys-drawings, openpyxl-clears-formula-cache, excel-osascript-cell-write, pdf-visual-confirm]
+  - id: seal-artifact-marker
+    level: 3
+    title: "🔥 印影入りの成果物は「作る時に紙専用の印」 + 「出口で中身を見る gate」 — 規則の文だけでは送られる"
+    related: [seal-color-pdf-overlay, xlsx-image-via-excel, physical-seal-required, unsealed-page-mail-submission]
+  - id: openpyxl-clears-formula-cache
+    level: 3
+    title: "⚠️ openpyxl の save は周辺 cell の formula cache を消す"
+    related: [openpyxl-destroys-drawings, excel-osascript-cell-write, xlsx-to-pdf-script]
+    origin: "2026-06"
+  - id: xlsx-image-insert-excel-paste
+    level: 3
+    title: "計算式を持つ xlsx への画像挿入は Excel 経由 (= openpyxl add_image は cache 復元と両立しない)"
+    related: [openpyxl-clears-formula-cache, openpyxl-destroys-drawings, excel-osascript-cell-write, xlsx-rich-text-underline]
+    origin: "2026-07-02"
+  - id: excel-osascript-cell-write
+    level: 3
+    title: "Excel osascript で cell 値を書く堅牢パターン (= drawing 保護 + -609 回避)"
+    related: [openpyxl-destroys-drawings, openpyxl-clears-formula-cache, xlsx-to-pdf-script, merged-cell-text-clipping]
+  - id: excel-merged-cell-write-anchor
+    level: 3
+    title: "merged cell への AppleScript `set value` は非 anchor だと silent no-op — 書く前に merge 構造を読む"
+    related: [excel-osascript-cell-write, form-dump-first]
+    origin: "2026-07-28"
+  - id: excel-merged-border-anchor-seed
+    level: 3
+    title: "merged cell の罫線は anchor セルの style が「種」 — 物理セルだけ消しても Excel save で復活する"
+    related: [excel-merged-cell-write-anchor, openpyxl-clears-formula-cache, pdf-visual-confirm]
+    origin: "2026-07-28"
+  - id: excel-write-string-autoconvert
+    level: 3
+    title: "Excel 経由 write は文字列を auto-convert する (= 日付文字列が serial 数字で印字される)"
+    related: [openpyxl-destroys-drawings, excel-osascript-cell-write]
+  - id: excel-pdf-bottom-border-drop
+    level: 3
+    title: "⚠️ Excel→PDF はフォーム最下部の結合セル下罫線を落とす (= 承認欄ボックス等が下に開く)"
+    related: [fitz-pdf-toolkit, xlsx-to-pdf-script, excel-osascript-cell-write, symptom-index]
+  - id: excel-form-control-render
+    level: 3
+    title: "⚠️ Excel の form control (checkbox) は立体の箱なら枠の大きさの raster 画像、 平らな箱なら vector で刷られる — 辺の欠け・箱の縦ズレ・読めない ✓ の 3 つの罠"
+  - id: numeric-string-becomes-number
+    level: 3
+    title: "ID 的な数字列は書式を text に固定してから書く (= Excel が数値化して機械照合が落ちる)"
+  - id: merged-cell-text-clipping
+    level: 3
+    title: "⚠️ 結合セルの長文 clipping は shrink_to_fit が効かない → font size を下げる"
+    related: [excel-osascript-cell-write, clear-yellow-fill-marks, pdf-visual-confirm, xlsx-to-pdf-script, merged-cell-write-topleft, openpyxl-destroys-drawings, cross-sheet-formula-chain, wrap-text-needs-row-height, explicit-newline-break]
+  - id: xlimage-size-silent-fail
+    legacy: "1-1"
+    level: 3
+    title: "`XLImage.width` / `.height` setter は silent fail する"
+  - id: sheet-by-name-not-index
+    legacy: "1-1b"
+    level: 3
+    title: "画像挿入は `wb[シート名]` で参照、 `wb.sheetnames[N]` の数値 index は罠"
+    related: [dump-cell-structure-first]
+  - id: image-anchor-onecellanchor
+    legacy: "1-2"
+    level: 3
+    title: "画像 anchor は `OneCellAnchor` + `ext` で完全制御"
+  - id: column-width-units
+    legacy: "1-3"
+    level: 3
+    title: "列幅の単位は Excel \"0-glyph\" units (= 不直感)"
+  - id: wrap-text-needs-row-height
+    legacy: "1-4"
+    level: 3
+    title: "`wrap_text=True` だけでは Excel は行高 auto-fit しない"
+  - id: data-validation-not-enforced
+    legacy: "1-5"
+    level: 3
+    title: "Excel data validation の auto-resize は外部信号で発動しない"
+  - id: external-link-update-prompt
+    level: 3
+    title: "外部リンク入りの様式を開くと Excel が「リンクを更新しますか」 で止まる — `update links do not update links` で開く"
+  - id: xlsx-locked-by-excel
+    legacy: "1-6"
+    level: 3
+    title: "xlsx は Excel に open されている間は openpyxl から save できない"
+  - id: merged-cell-write-topleft
+    legacy: "1-7"
+    level: 3
+    title: "Merged cells への write は top-left のみ有効"
+    related: [form-dump-first]
+  - id: bool-cell-hash-overflow
+    legacy: "1-8"
+    level: 3
+    title: "Boolean checkbox cell は narrow column で `###` 表示"
+  - id: datetime-cell-hash-overflow
+    legacy: "1-8b"
+    level: 3
+    title: "日付 (datetime) を narrow / merged cell に入れると「###」 表示"
+    related: [bool-cell-hash-overflow, diff-form-xlsx-detection, pdf-visual-confirm, xlsx-to-pdf-script]
+  - id: int-vs-str-by-spec
+    legacy: "1-9"
+    level: 3
+    title: "値の型 (`int` vs `str`) は form の仕様で決まる"
+    related: [form-dump-first]
+  - id: print-area-one-page
+    legacy: "1-10"
+    level: 3
+    title: "Print area / page setup を設定して PDF を 1 ページ化"
+    related: [xlsx-to-pdf-script]
+  - id: row-height-409pt-limit
+    legacy: "1-11"
+    level: 3
+    title: "Excel の行高さ上限は 409pt — これを超えると視覚的に「非表示」 化する"
+    related: [wrap-text-needs-row-height]
+    origin: "2026-05"
+  - id: topleftcell-scroll-persist
+    legacy: "1-12"
+    level: 3
+    title: "sheetView.topLeftCell の scroll 位置 persistence"
+    related: [row-height-409pt-limit]
+    origin: "2026-05"
+  - id: xlsx-rich-text-underline
+    legacy: "1-13"
+    level: 3
+    title: "xlsx rich text formatting (= 部分 underline / bold / italic)"
+    origin: "2026-05"
+  - id: pptx-fill
+    level: 2
+    title: "pptx (PowerPoint) fill の落とし穴とテクニック"
+    related: [pptx-to-pdf-powerpoint, openpyxl-xlsx-fill, docx-fill-xml-edit]
+    origin: "2026-07-08"
+  - id: pptx-shape-tree-and-path
+    level: 3
+    title: "Shape tree の再帰 walk + path-based addressing + EMU 座標"
+    related: [pptx-fill, pptx-example-slide-as-palette, pptx-explicit-size-not-autofit, pptx-hint-fixed-position-trap]
+    origin: "2026-07-08"
+  - id: pptx-example-slide-as-palette
+    level: 3
+    title: "Example slide は palette source (font family / color / size を採取)"
+    related: [pptx-fill, pptx-scheme-color-guard, pptx-shape-tree-and-path]
+    origin: "2026-07-08"
+  - id: pptx-scheme-color-guard
+    level: 3
+    title: "SchemeColor / ThemeColor の .rgb アクセスは AttributeError"
+    related: [pptx-example-slide-as-palette, pptx-explicit-size-not-autofit]
+    origin: "2026-07-08"
+  - id: pptx-explicit-size-not-autofit
+    level: 3
+    title: "auto_size (TEXT_TO_FIT_SHAPE) は viewer で shrink されない — 明示 size + word_wrap + 文字量予算"
+    related: [pptx-fill, pptx-shape-tree-and-path, pptx-hint-fixed-position-trap, merged-cell-text-clipping]
+    origin: "2026-07-09"
+  - id: pptx-clear-and-ppr-propagation
+    level: 3
+    title: "tf.clear() + add_paragraph() は pPr を継承しない → deepcopy で propagate"
+    related: [pptx-cross-shape-ppr-borrow, pptx-double-bullet-trap, docx-word-corruption-diagnosis, docx-empty-cell]
+    origin: "2026-07-08"
+  - id: pptx-cross-shape-ppr-borrow
+    level: 3
+    title: "bullet template の無い shape に別 shape の pPr を借用"
+    related: [pptx-clear-and-ppr-propagation, pptx-double-bullet-trap]
+    origin: "2026-07-08"
+  - id: pptx-double-bullet-trap
+    level: 3
+    title: "「・」 手入力 + template bullet = 「• ・」 二重描画"
+    related: [pptx-clear-and-ppr-propagation, pptx-cross-shape-ppr-borrow]
+    origin: "2026-07-09"
+  - id: pptx-hint-fixed-position-trap
+    level: 3
+    title: "Template hint (薄字の注意書き) を消しても空白が固定位置に残る → 消さない選択が妥当"
+    related: [pptx-shape-tree-and-path, pptx-explicit-size-not-autofit, pptx-fill]
+    origin: "2026-07-09"
+  - id: pptx-keynote-preferred-for-export
+    level: 3
+    title: "Keynote AppleScript export ≫ PowerPoint AppleScript export (PDF / PNG 経路)"
+    related: [pptx-png-via-pdf-sips, pptx-reload-workflow, pptx-to-pdf-powerpoint, xlsx-to-pdf-script]
+    origin: "2026-07-08"
+  - id: pptx-png-via-pdf-sips
+    level: 3
+    title: "PNG は PDF → sips 経由 (2400px 長辺 で SNS 品質)"
+    related: [pptx-keynote-preferred-for-export, pptx-to-pdf-powerpoint]
+    origin: "2026-07-08"
+  - id: pptx-reload-workflow
+    level: 3
+    title: "fill → 目視 loop の reload 手順 (close all + reopen)"
+    related: [pptx-keynote-preferred-for-export, pptx-fill]
+    origin: "2026-07-08"
+  - id: xlsx-md-to-pdf
+    legacy: "2"
+    level: 2
+    title: "xlsx / md / pptx → PDF 変換 (macOS)"
+  - id: xlsx-to-pdf-script
+    legacy: "2-1"
+    level: 3
+    title: "xlsx → PDF: `xlsx-to-pdf.sh` (LibreOffice → Excel fallback)"
+    related: [print-area-one-page, pdf-snapshot-xlsx-submission, bool-cell-hash-overflow, datetime-cell-hash-overflow, pdf-visual-confirm]
+  - id: pptx-to-pdf-powerpoint
+    level: 3
+    title: "pptx → PDF: `pptx-to-pdf.sh` (PowerPoint native export = fidelity-first)"
+    related: [xlsx-to-pdf-script, pdf-visual-confirm, image-budget-exhaustion]
+  - id: md-to-pdf-chrome
+    legacy: "2-2"
+    level: 3
+    title: "md → PDF: Chrome headless + Python markdown"
+  - id: pdf-snapshot-xlsx-submission
+    legacy: "2-3"
+    level: 3
+    title: "PDF は確認 / 印刷 / 後参照用、 提出は xlsx 本体"
+  - id: pdf-prefill-direct
+    level: 3
+    title: "雛形 PDF への直接印字 (= drawing 保護の回避経路 3、 紙提出専用)"
+    related: [openpyxl-destroys-drawings, pdf-text-match-nfkc, print-raster-pdf, pdf-prefill-font-match, pdf-prefill-template-prefilled, pymupdf-insert-text-baseline, scan-pdf-pixel-anchor-overlay]
+  - id: pdf-prefill-font-match
+    level: 3
+    title: "overlay フォントは雛形の埋込フォントに合わせる (= 太さ・字形の不揃い防止)"
+    related: [pdf-prefill-direct, pdf-visual-confirm, pymupdf-insert-text-baseline]
+  - id: pdf-prefill-template-prefilled
+    level: 3
+    title: "雛形に既に値がある欄を二重印字しない (= 申請者欄 prefill 済の様式)"
+    related: [pdf-prefill-direct, form-dump-first, scan-pdf-pixel-anchor-overlay, pymupdf-insert-text-baseline]
+  - id: pdf-cell-label-vs-data-disambiguation
+    level: 3
+    title: "PDF 様式の label cell vs data cell の判別 (= 「右隣に書く欄」 罠)"
+    related: [pdf-prefill-direct, label-vs-input-antipattern, label-overwrite-bug, form-dump-first, signature-not-stamp, signature-image-overlay-density, pdf-mutation-verification-schema, scan-pdf-pixel-anchor-overlay]
+    origin: "2026-06-28"
+  - id: pymupdf-insert-text-baseline
+    level: 3
+    title: "PyMuPDF `insert_text` の y 座標は **font baseline** (= visual top/bottom と混同しない)"
+    related: [scan-pdf-pixel-anchor-overlay, pdf-prefill-direct, pdf-prefill-font-match, signature-image-overlay-density, pdf-prefill-template-prefilled]
+    origin: "2026-06-29"
+  - id: scan-pdf-pixel-anchor-overlay
+    level: 3
+    title: "🔥 scan PDF (vector 無し) への text/image overlay の位置決定 (= 既存印字を pixel anchor にして baseline を完全一致) — **重要度最大**"
+    related: [pymupdf-insert-text-baseline, pdf-prefill-direct, pdf-cell-label-vs-data-disambiguation, form-dump-first, pdf-prefill-template-prefilled, signature-not-stamp, physical-seal-required, pdf-mutation-verification-schema, pdf-visual-confirm, print-raster-pdf]
+    origin: "2026-06-29"
+  - id: print-raster-pdf
+    level: 3
+    title: "加工した PDF の印刷は 600dpi ラスタ化してから (= WYSIWYG 保証)"
+    related: [pdf-prefill-direct, scan-pdf-pixel-anchor-overlay]
+  - id: lp-page-ranges-distrust
+    level: 3
+    title: "`lp -o page-ranges` を信用しない (= 印刷は単独ページ PDF を抽出してから)"
+    related: [print-raster-pdf]
+  - id: pdf-text-match-nfkc
+    level: 3
+    title: "PDF text 照合は両辺 NFKC 正規化必須 (= CJK 互換字形の false negative)"
+    related: [pdf-prefill-direct, pdf-visual-confirm, pdf-table-layout-aware-reading]
+  - id: pdf-table-layout-aware-reading
+    level: 3
+    title: "表・多段組 PDF は素の `get_text()` で読まない (= layout-aware 抽出 ladder、 「読めない」 禁止)"
+    related: [pdf-text-match-nfkc, pdf-cell-label-vs-data-disambiguation, merged-cell-text-clipping, pdf-visual-confirm, scan-pdf-pixel-anchor-overlay, symptom-index]
+  - id: pdf-text-fake-spaces
+    level: 3
+    title: "PDF から抜いた字の空白は信用しない (= 新しい版が PDF で届いたときの verbatim 照合)"
+  - id: docx-to-pdf-pages
+    legacy: "2-4"
+    level: 3
+    title: "docx → PDF: Pages.app AppleScript が macOS では最も robust"
+    related: [docx-pdf-stale-cache]
+  - id: docx-pdf-stale-cache
+    legacy: "2-4b"
+    level: 3
+    title: "Word docx → PDF AppleScript の二大故障: stale in-memory cache + cold-start 失敗"
+    related: [docx-to-pdf-pages, docx-checkbox-content-control, manual-review-required, image-budget-exhaustion, docx-password-roundtrip-edit, docx-section-extract-preview, word-applescript-password-open, docx-tmp-sandbox-deny]
+    origin: "2026-06"
+  - id: docx-tmp-sandbox-deny
+    level: 3
+    title: "Word が触る docx は `/tmp` 配下に置かない (= sandbox grant 不能、 project 配下で扱う)"
+    related: [docx-pdf-stale-cache, docx-password-roundtrip-edit, docx-section-extract-preview, docx-to-pdf-pages, office-pregranted-staging-dir]
+    origin: "2026-06"
+  - id: office-pregranted-staging-dir
+    level: 3
+    title: "Office の「ファイル アクセスを許可」 dialog を設計で消す: 事前 grant 済み staging dir (= Office 自身の group container) 経由で変換する"
+    related: [docx-tmp-sandbox-deny, docx-pdf-stale-cache, docx-to-pdf-pages, xlsx-to-pdf-script, pptx-to-pdf-powerpoint, xlsx-image-via-excel, xlsm-macro-export-trap, office-inplace-guard]
+    origin: "2026-08-21"
+  - id: office-inplace-guard
+    level: 3
+    title: "規則: Office に開かせる・保存させるのは staging の内側だけ (in-place は PreToolUse hook が deny)"
+    related: [office-pregranted-staging-dir, excel-osascript-cell-write, xlsx-to-pdf-script, docx-to-pdf-pages, pptx-to-pdf-powerpoint]
+    origin: "2026-09-15"
+  - id: office-app-reset-guard
+    level: 3
+    title: "規則: Office app の quit・kill・前面化は「自分のものだけ」 (reset は開いている文書を聞いてから)"
+    related: [xlsx-to-pdf-script, excel-osascript-cell-write, docx-pdf-stale-cache, pptx-to-pdf-powerpoint, office-pregranted-staging-dir, office-inplace-guard, xlsx-locked-by-excel]
+    origin: "2026-09-15"
+  - id: word-applescript-password-open
+    level: 3
+    title: "Word.app の AppleScript で PW 暗号化 docx を開く / select/find が動かない罠"
+    related: [docx-pdf-stale-cache, docx-section-extract-preview, docx-password-roundtrip-edit]
+    origin: "2026-06"
+  - id: docx-section-extract-preview
+    level: 3
+    title: "機密書類の「必要なところだけ見せる」: 関心 table のみ平文 preview docx を生成して Word.app open"
+    related: [docx-password-roundtrip-edit, word-applescript-password-open, docx-pdf-stale-cache, manual-review-required]
+    origin: "2026-06"
+  - id: docx-fill-xml-edit
+    legacy: "2-5"
+    level: 3
+    title: "docx fill: `python-docx` で XML 直編集 (= 共通パターン)"
+  - id: docx-paragraph-split
+    level: 3
+    title: "docx の段落は共有の部品で切る (= 自己終了の空段落 `<w:p .../>` が記入行)"
+    related: [docx-fill-xml-edit, diff-form-docx-detection, docx-new-run-rfonts-fallback, form-dump-first, docx-pdf-page-compress]
+  - id: docx-password-roundtrip-edit
+    level: 3
+    title: "PW 暗号化 docx を編集して PW 維持で返す: msoffcrypto + python-docx round-trip 5 step"
+    related: [docx-fill-xml-edit, docx-pdf-stale-cache, docx-section-extract-preview, word-applescript-password-open, docx-checkbox-content-control, docx-tmp-sandbox-deny]
+    origin: "2026-06"
+  - id: docx-python-docx-surgical-edit
+    level: 3
+    title: "確定済 docx の外科編集: python-docx で run / 段落を直接いじる"
+    related: [docx-fill-xml-edit, docx-guidance-deletion, docx-checkbox-content-control, docx-pdf-stale-cache, docx-password-roundtrip-edit]
+  - id: docx-tracked-changes-redline
+    level: 3
+    title: "他人の docx を変更履歴つきで直して返す — 直せる所は変更履歴、 本人しか決められない所はコメント"
+    related: [docx-python-docx-surgical-edit, docx-word-corruption-diagnosis, docx-pdf-stale-cache]
+  - id: docx-new-run-rfonts-fallback
+    level: 3
+    title: "python-docx で新規 run を作る時は rFonts を明示する (= docDefault テーマフォント落ち → 様式フォント指定違反)"
+    related: [docx-fill-xml-edit, docx-python-docx-surgical-edit, docx-guidance-deletion, docx-pdf-page-compress, pdf-mutation-verification-schema]
+    origin: "2026-07-17"
+  - id: docx-checkbox-content-control
+    legacy: "2-5b"
+    level: 3
+    title: "☐ チェックは「ただの文字」か「コンテンツコントロール」かを見分ける"
+    related: [docx-fill-xml-edit]
+  - id: docx-word-corruption-diagnosis
+    level: 3
+    title: "Word が「破損」と言うが決定論 check は通る時の真因特定 (= 修復版との diff)"
+    related: [docx-checkbox-content-control, docx-empty-cell, manual-review-required]
+  - id: docx-empty-cell
+    level: 3
+    title: "空セル `<w:tc>`(段落なし)は Word 破損判定源 — 各セルに `<w:p>` を補う"
+    related: [docx-checkbox-content-control, docx-python-docx-surgical-edit, manual-review-required]
+  - id: docx-guidance-deletion
+    legacy: "2-5c"
+    level: 3
+    title: "docx form から記入要領 / ガイダンスを削除する: 構造は残す + content-control を見逃さない + 双方向検証"
+    related: [manual-review-required, docx-pdf-stale-cache, form-guidance-color-residue]
+    origin: "2026-06"
+  - id: form-guidance-color-residue
+    level: 3
+    title: "xlsx form の記入要領は **条件付き書式**で赤い — font 色検査は空振りする"
+    related: [docx-guidance-deletion, manual-review-required, xlsx-visual-unobservable, pdf-visual-confirm]
+    origin: "2026-07-31"
+  - id: erad-forbidden-chars
+    legacy: "2-6"
+    level: 3
+    title: "e-Rad の使用禁止文字 (= 入力フィールド charset 制限)"
+  - id: signature-not-stamp
+    legacy: "2-7"
+    level: 3
+    title: "「署名」 要求は手書き署名 or 電子署名、 認印画像では不可"
+    related: [physical-seal-required, signature-image-overlay-density, pdf-cell-label-vs-data-disambiguation, pdf-prefill-direct, pdf-mutation-verification-schema, pdf-visual-confirm, scan-pdf-pixel-anchor-overlay]
+    origin: "2026-05"
+  - id: physical-seal-required
+    legacy: "2-7b"
+    level: 3
+    title: "紙原本要求の窓口では貼付電子印影は印刷しても拒否される (= 実押印が確実)"
+    related: [signature-not-stamp, pdf-snapshot-xlsx-submission]
+    origin: "2026-06"
+  - id: signature-photo-to-transparent-png
+    level: 3
+    title: "署名: 手書き写真 → 透過 PNG (raw → transparent、 [`signature-image-overlay-density`](#signature-image-overlay-density) の上流)"
+    related: [signature-image-overlay-density, signature-not-stamp, pdf-prefill-direct, pymupdf-insert-text-baseline, pdf-text-match-nfkc]
+    origin: "2026-06-30"
+  - id: signature-image-overlay-density
+    level: 3
+    title: "署名 PNG 挿入時の濃度 boost (= 薄い signature を濃く読ませる、 経路非依存)"
+    related: [signature-not-stamp, pdf-prefill-direct, pdf-cell-label-vs-data-disambiguation, pdf-mutation-verification-schema, pdf-visual-confirm, signature-photo-to-transparent-png]
+    origin: "2026-06-28"
+  - id: placeholder-trailing-underscore
+    legacy: "2-8"
+    level: 3
+    title: "docx template の placeholder 末尾装飾 underscore の cleanup"
+    origin: "2026-05"
+  - id: docx-pdf-page-compress
+    legacy: "2-9"
+    level: 3
+    title: "docx → PDF の page count 圧縮 (= 余白縮小 + 行間 + 末尾空段落削除)"
+    related: [docx-to-pdf-pages, docx-pdf-stale-cache, pdf-visual-confirm, docx-checkbox-content-control, print-area-one-page, form-dump-first]
+    origin: "2026-05"
+  - id: tts-review
+    legacy: "3"
+    level: 2
+    title: "提案書を音声で確認 (macOS `say` で TTS)"
+  - id: common-discipline
+    legacy: "4"
+    level: 2
+    title: "共通の規律"
+  - id: dump-cell-structure-first
+    legacy: "4-1"
+    level: 3
+    title: "xlsx 内部の cell 構造を **常に最初に dump** する"
+  - id: char-limit-formula-check
+    legacy: "4-2"
+    level: 3
+    title: "字数制限は cell 末尾の formula で常時確認"
+  - id: visual-check-by-user
+    legacy: "4-3"
+    level: 3
+    title: "user 視覚確認は computer-use ではなく user に依頼"
+  - id: label-vs-input-antipattern
+    legacy: "5"
+    level: 2
+    title: "**label vs input row anti-pattern** (= 様式 改変 の主因)"
+    related: [label-overwrite-bug, openpyxl-destroys-drawings, pdf-cell-label-vs-data-disambiguation, diff-form-xlsx-detection, diff-form-docx-detection]
+  - id: label-input-structure
+    legacy: "5-1"
+    level: 3
+    title: "構造"
+  - id: label-overwrite-bug
+    legacy: "5-2"
+    level: 3
+    title: "典型バグ (= 様式改変)"
+    related: [label-vs-input-antipattern, pdf-cell-label-vs-data-disambiguation, diff-form-xlsx-detection]
+  - id: diff-form-xlsx-detection
+    legacy: "5-3"
+    level: 3
+    title: "機械的検出: `diff-form-xlsx.py`"
+    related: [template-provenance-check, diff-form-docx-detection]
+  - id: diff-form-docx-detection
+    level: 3
+    title: "機械的検出: `diff-form-docx.py` (= docx 様式の記入ミス)"
+    related: [diff-form-xlsx-detection, pdf-visual-confirm, docx-fill-xml-edit, docx-checkbox-content-control, docx-paragraph-split, docx-layout-unverified, docx-new-run-rfonts-fallback]
+  - id: docx-layout-unverified
+    level: 3
+    title: "「見た目は未確認」 は止まる理由であって、 先へ進む印ではない (= docx の描画が止まった時の確かめ方の順)"
+    related: [pdf-visual-confirm, diff-form-docx-detection, docx-pdf-stale-cache, docx-to-pdf-pages, office-app-reset-guard]
+  - id: template-provenance-check
+    level: 3
+    title: "テンプレの素性確認 (= 「最新様式」 が誰かの記入済み修正版である罠)"
+    related: [diff-form-xlsx-detection, clear-yellow-fill-marks, openpyxl-destroys-drawings, form-dump-first]
+  - id: fill-prevention-workflow
+    legacy: "5-4"
+    level: 3
+    title: "予防 workflow (= 規律)"
+    related: [form-dump-first, choice-label-marking]
+  - id: embedded-instruction-in-label
+    legacy: "5-5"
+    level: 3
+    title: "label 内 embedded instruction の見落とし防止"
+    origin: "2026-05"
+  - id: cell-address-rule-rot
+    level: 3
+    title: "🔥 記入指示をセル番地で書くと、 様式の組み替えを生き延びて**別の意味の行**に書く"
+    related: [embedded-instruction-in-label, label-overwrite-bug, template-base-not-precedent-base, form-layout-invariant-gate]
+  - id: label-detection-at-dump
+    legacy: "5-6"
+    level: 3
+    title: "dump 段階での label 識別"
+    related: [form-dump-first]
+  - id: choice-label-marking
+    legacy: "5-7"
+    level: 3
+    title: "選択肢ラベルの選択マーク (= 専用 input cell がない選択)"
+    related: [label-input-structure, label-overwrite-bug, label-overwrite-detection-limit, manual-review-required]
+    origin: "2026-06"
+  - id: multi-sheet-formula-propagation
+    legacy: "5-8"
+    level: 3
+    title: "multi-sheet form の数式伝播 + literal の帰属区別"
+    related: [form-dump-first]
+  - id: clear-yellow-fill-marks
+    legacy: "5-9"
+    level: 3
+    title: "事務が黄色マークした入力 cell は fill 後に「白に戻す」 (= 黄色残置 = 様式改変扱い)"
+    related: [label-overwrite-bug, diff-form-xlsx-detection, pdf-visual-confirm, xlsx-to-pdf-script, multi-sheet-form]
+  - id: xlsx-visual-unobservable
+    legacy: "6"
+    level: 2
+    title: "xlsx visual rendering の Claude 観察不可 と PDF 視認義務"
+  - id: claude-cannot-observe-render
+    legacy: "6-1"
+    level: 3
+    title: "構造的限界"
+  - id: wrap-text-row-height-prereq
+    legacy: "6-2"
+    level: 3
+    title: "wrap_text 依存の落とし穴 (= row height prerequisite)"
+  - id: explicit-newline-break
+    legacy: "6-3"
+    level: 3
+    title: "explicit `\\n` 改行 = wrap_text 依存しない確実方法"
+  - id: pdf-visual-confirm
+    legacy: "6-4"
+    level: 3
+    title: "PDF visual confirmation 義務"
+    related: [pdf-mutation-verification-schema, image-budget-exhaustion, signature-image-overlay-density]
+  - id: form-layout-invariant-gate
+    level: 3
+    title: "値が正しくても紙で崩れる — form には**レイアウト不変条件の gate** を作って生成 driver に配線する"
+    related: [pdf-visual-confirm, pdf-mutation-verification-schema, excel-merged-cell-write-anchor, excel-merged-border-anchor-seed, diff-form-xlsx-detection]
+    origin: "2026-07-28"
+  - id: pdf-mutation-verification-schema
+    level: 3
+    title: "PDF mutation 後の機械検証 schema (= text 不変 + keyword in/out + image stream delta)"
+    related: [pdf-prefill-direct, pdf-visual-confirm, signature-image-overlay-density, pdf-cell-label-vs-data-disambiguation, label-vs-input-antipattern, scan-pdf-pixel-anchor-overlay]
+    origin: "2026-06-28"
+  - id: image-budget-exhaustion
+    legacy: "6-5"
+    level: 3
+    title: "画像レンダリング検証の \"image budget\" 枯渇 → text-first 原則"
+    related: [pdf-visual-confirm, docx-pdf-stale-cache, bool-cell-hash-overflow, datetime-cell-hash-overflow, claude-cannot-observe-render, visual-check-by-user, manual-review-required]
+    origin: "2026-06"
+  - id: multi-sheet-form
+    legacy: "7"
+    level: 2
+    title: "多 sheet form の構造理解と sheet 全 sweep 義務"
+  - id: all-sheet-sweep
+    legacy: "7-1"
+    level: 3
+    title: "sheet 全 sweep 必須 (= form fill 完了直前の checklist)"
+  - id: cross-sheet-formula-chain
+    legacy: "7-2"
+    level: 3
+    title: "数式自動連動 cell の chain effect"
+  - id: side-by-side-page-split
+    legacy: "7-3"
+    level: 3
+    title: "横並び left + right page 分割構造"
+    related: [multiple-print-areas]
+  - id: hidden-sheet-user-expectation
+    legacy: "7-4"
+    level: 3
+    title: "hidden sheet 判断は user 期待に依存"
+  - id: same-pattern-grep-sweep
+    legacy: "7-5"
+    level: 3
+    title: "同型文字列 grep 全 cell sweep (= user 指摘 1 cell scope trap 防止)"
+  - id: print-area-pagebreak
+    legacy: "8"
+    level: 2
+    title: "印刷範囲 / page break / scale の設定"
+  - id: print-area-tradeoff
+    legacy: "8-1"
+    level: 3
+    title: "print_area の設定 trade-off"
+  - id: fittopage-vs-scale
+    legacy: "8-2"
+    level: 3
+    title: "fitToPage vs scale 明示"
+  - id: multiple-print-areas
+    legacy: "8-3"
+    level: 3
+    title: "multiple print_areas (= 横並び form 用)"
+    related: [side-by-side-page-split]
+  - id: row-col-breaks
+    legacy: "8-4"
+    level: 3
+    title: "row_breaks / col_breaks (= manual page break)"
+  - id: print-setup-visual-confirm
+    legacy: "8-5"
+    level: 3
+    title: "印刷 setup 変更後の PDF visual confirmation 義務"
+    related: [pdf-visual-confirm]
+  - id: print-dialog-whole-workbook
+    legacy: "8-6"
+    level: 3
+    title: "user 印刷時の dialog 「ブック全体」 vs 「アクティブシート」"
+  - id: multi-sheet-pdf-assembly
+    level: 2
+    title: "多 sheet xlsx → 提出用 PDF: ページ分割・余白・体裁の作り込み"
+    related: [form-dump-first, multi-sheet-form, openpyxl-xlsx-fill, all-sheet-sweep, same-pattern-grep-sweep, print-area-bbox-fit, even-margins-centering, trailing-print-artifact, excel-pdf-whole-workbook-export, one-sheet-multi-page-split, fitz-pdf-toolkit, pdf-visual-confirm, pdf-margin-pixel-measure, image-budget-exhaustion]
+  - id: excel-pdf-whole-workbook-export
+    level: 3
+    title: "Excel の PDF 書き出しは workbook 全体を出す (= sheet 選択は効かない) → ほかの sheet を隠してから出す"
+    related: [xlsx-to-pdf-script, cross-sheet-formula-chain, one-sheet-multi-page-split]
+  - id: one-sheet-multi-page-split
+    level: 3
+    title: "1 sheet を複数ページに分割する (= print_area 切替 → 個別出力 → 結合)"
+    related: [excel-pdf-whole-workbook-export, fitz-pdf-toolkit, soffice-excel-fidelity, row-col-breaks]
+  - id: print-area-bbox-fit
+    level: 3
+    title: "print_area は実内容の bounding box に詰める (= 広いと fitToHeight で縮小+余白偏り)"
+    related: [print-area-tradeoff, even-margins-centering, fittopage-vs-scale]
+  - id: even-margins-centering
+    level: 3
+    title: "余白を均等にする (= page_margins 統一 + 水平/垂直 中央寄せ)"
+    related: [soffice-excel-fidelity, pdf-margin-pixel-measure, print-area-bbox-fit]
+  - id: fitz-pdf-toolkit
+    level: 3
+    title: "PyMuPDF (fitz) で PDF を render / crop / 結合 / ページ数確認"
+    related: [pdf-visual-confirm, image-budget-exhaustion, one-sheet-multi-page-split]
+  - id: fitz-insert-pdf-index-clamp
+    level: 3
+    title: "⚠️ `insert_pdf` の from_page/to_page は範囲外 index を silent clamp する → 構成変更で結合がずれても黙って通る + page-count assert を焼き込む"
+    related: [fitz-pdf-toolkit, excel-pdf-whole-workbook-export, one-sheet-multi-page-split]
+    origin: "2026-07"
+  - id: pdf-annotation-markup-read
+    level: 3
+    title: "共同編集者の「青字 / 赤字」 マークアップは text 色でなく注釈 (ink / Stamp) のことがある"
+    related: [fitz-pdf-toolkit, visual-check-by-user, image-budget-exhaustion]
+  - id: pdf-margin-pixel-measure
+    level: 3
+    title: "余白を px で客観測定する (= render → 非白 bbox)"
+    related: [even-margins-centering, pdf-visual-confirm]
+  - id: soffice-excel-fidelity
+    level: 3
+    title: "soffice と Excel の体裁差 (= verticalCentered / page break の扱い)"
+    related: [xlsx-to-pdf-script, even-margins-centering, fittopage-vs-scale]
+  - id: trailing-print-artifact
+    level: 3
+    title: "表末尾の「浮いた点線」 = 印刷範囲に余分な末尾行/半スロットが入っている"
+    related: [print-area-bbox-fit, merged-cell-write-topleft]
+  - id: label-overwrite-detection-limit
+    legacy: "9"
+    level: 2
+    title: "label overwrite 機械検証 limit + 手 review 必須"
+    related: [diff-form-xlsx-detection]
+  - id: detection-miss-example
+    legacy: "9-1"
+    level: 3
+    title: "典型検出漏れ事例"
+  - id: manual-review-required
+    legacy: "9-2"
+    level: 3
+    title: "手 review 義務"
+  - id: header-row-detection-helper
+    legacy: "9-3"
+    level: 3
+    title: "dump 時の header row 識別 helper"
+  - id: business-trip-proof-forward
+    legacy: "10"
+    level: 2
+    title: "学外団体主催出張の用務証明書類 forward flow"
+  - id: forward-mail-template
+    legacy: "10-1"
+    level: 3
+    title: "forward mail 構造 (= template)"
+  - id: forward-mail-components
+    legacy: "10-2"
+    level: 3
+    title: "構成要素"
+  - id: forward-record-sync
+    legacy: "10-3"
+    level: 3
+    title: "内部 record の同 turn 同期"
+  - id: external-vs-internal-form
+    legacy: "11"
+    level: 2
+    title: "学外者 form vs 学内者 form の構造差認識"
+  - id: external-internal-structure-diff
+    legacy: "11-1"
+    level: 3
+    title: "典型的 構造差 (= 機関別 form 設計の一般 pattern)"
+  - id: seal-field-verify-method
+    legacy: "11-2"
+    level: 3
+    title: "user 質問への verify method (= 印欄存在問合せ reflex)"
+  - id: tpl-only-false-positive
+    legacy: "11-3"
+    level: 3
+    title: "「TPL のみ存在」 = false positive trap (= hidden sheet 関連)"
+  - id: seal-approval-sweep
+    legacy: "12"
+    level: 2
+    title: "印鑑欄 / 承認 chain の機械的 sweep"
+    related: [seal-field-verify-method]
+  - id: seal-keyword-set
+    legacy: "12-1"
+    level: 3
+    title: "sweep keyword set (= 漏れなし list)"
+  - id: seal-diff-with-template
+    legacy: "12-2"
+    level: 3
+    title: "diff with template (= 提出前 verify)"
+  - id: seal-question-reflex
+    legacy: "12-3"
+    level: 3
+    title: "user 質問への reflex 統合"
+    related: [seal-diff-with-template]
+  - id: seal-image-generation-embed
+    legacy: "12-4"
+    level: 3
+    title: "認印画像の生成 + xlsx 埋め込み (= 印影が必要な認印レベル様式)"
+    related: [pdf-visual-confirm]
+  - id: xlsx-cell-value-zip-surgery
+    level: 2
+    title: "値 cell だけの zip 直編集 (= Excel も openpyxl も使わない第 3 経路)"
+  - id: xlsm-macro-export-trap
+    level: 2
+    title: "xlsm (マクロ付き様式) の Excel export は「マクロ実行不可 → 印刷範囲未適用 → 全面 dump → crash」 に落ちる"
+  - id: vector-pdf-page-rescue
+    level: 2
+    title: "壊れた Excel export から様式ページを vector のまま救出する (= clip + show_pdf_page)"
+  - id: pdf-cell-text-patch
+    level: 2
+    title: "vector PDF の表セル文字を差し替える (= 塗り色 sampling + 罫線保護 + CJK/Latin 分割描画)"
+  - id: pymupdf-builtin-font-print-mojibake
+    level: 2
+    title: "PyMuPDF で描いた文字 (組み込み `japan` / `helv`、 OTF 埋め込みも) は**プリンタで文字化け**しうる — 印刷用は raster 化"
+  - id: docx-autofit-grid-overflow
+    level: 2
+    title: "docx 様式の autofit 表は「1 セルの長い値」 で**別の行**が折り返し、 1 頁様式が 2 頁にはみ出す"
+  - id: docx-body-line-budget
+    level: 2
+    title: "docx 様式の本文の段落に長い値を入れると、 末尾の行 (「以上」・空の段落) が 2 頁目に落ちる — 余りの行数を先に測る"
+  - id: docx-exact-row-height-clipping
+    level: 2
+    title: "docx 様式の表で行の高さが固定 (`hRule=\"exact\"`) だと、 枠を超えた本文は頁も増えずに黙って消える"
+    related: [docx-autofit-grid-overflow, diff-form-docx-detection, docx-to-pdf-pages, template-provenance-check]
+  - id: docx-form-repeat-pipeline
+    level: 2
+    title: "docx 様式を毎回作り直す pipeline の 4 点 — 雛形から作る・値の置き場を分ける・凍結は値と書式の digest・印は語の位置から"
+  - id: print-preflight
+    level: 2
+    title: "印刷直前の preflight (= 「画面で見えた」 を印刷の保証にしない)"
+  - id: print-submission-pages-only
+    level: 2
+    title: "刷るのは窓口に出す頁だけ — 頁の役割を記入 map に書き、 刷る file に埋め込み、 刷る直前に読む"
+  - id: single-gray-level
+    level: 2
+    title: "グレーは 1 段階に固定する — 薄さは色でなく線幅で出す (2026-09-12)"
+  - id: printed-artifact-staleness
+    level: 2
+    title: "印刷した紙は digital SoT の fork — 印刷後の修正は「物理伝播 event」"
+    related: [print-preflight]
+  - id: unsealed-page-mail-submission
+    level: 2
+    title: "押印の無いページは紙にしなくてよい — 提出・差し替えの経路は「押印の有無」 で分岐"
+    related: [printed-artifact-staleness, physical-seal-required]
+  - id: pdf-overlay-anchoring
+    level: 2
+    title: "PDF overlay の値配置は「ラベルの右端」 でなく「セルの罫線」 に anchor する"
+  - id: zip-cp932-filenames
+    level: 2
+    title: "日本語ファイル名 zip の展開 (= cp932 文字化け)"
+    origin: "2026-07-02"
+  - id: example-sheet-to-real-data
+    level: 2
+    title: "「記入例」 シートの実データ化 (= 記入例置換型の様式)"
+    related: [diff-form-xlsx-detection, form-dump-first]
+    origin: "2026-07-02"
+  - id: printed-page-number
+    level: 2
+    title: "人に頁を示すときは冊子の頁番号で — PDF の何枚目かとは違う"
+  - id: related-repos
+    legacy: "13"
+    level: 2
+    title: "関連リポ"
+    related: [docx-fill-xml-edit, wrap-text-needs-row-height]

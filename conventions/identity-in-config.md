@@ -1,0 +1,141 @@
+<!-- doc-meta
+when: config file に ID/PII (Discord ID 等) を置く設計をするとき + 人の業績一覧 (INSPIRE の著者ページ・検索) へリンクするとき・著者 ID で論文を機械で拾うとき (#split-and-polluted-author-records) + 人の業績一覧を ORCID の出力で受け取って書類に添えるとき (#orcid-export-polluted)
+category: infra
+summary: Identity-in-Config 規約（Discord 等 PII-in-disguise、layer 2 + env var bridge）
+-->
+# Identity-in-Config 規約
+
+**対象**: 設定ファイル (`*.yaml` / `*.toml` / `*.json` / `.env` / 等) に埋め込まれる、実在する特定個人を指す identifier の取扱い。
+
+## 問題: "PII-in-disguise"
+
+下のような field は **application config のフォルトラインに紛れこんだ PII** で、email や phone number と同等の識別子として扱う必要がある。しかし field 名が innocent (timeout や retry_count と同クラス) のため、書き手の認識が起動しない。
+
+| 形式 | プラットフォーム | 例（placeholder） |
+|---|---|---|
+| `<@NNNNNNNNNNNNNNNNN>` | Discord (user mention) | `<@USER_ID>` |
+| `<@&NNNNNNNNNNNNNNNNN>` | Discord (role mention) | `<@&ROLE_ID>` |
+| `UXXXXXXXXXX` / `WXXXXXXXXXX` | Slack (user ID) | `U01A2B3C4D5` |
+| `@user:server.tld` | Matrix | (既存 email regex で拾う) |
+| `@user@instance.tld` | Mastodon / ActivityPub | (既存 email regex で拾う) |
+| 数値のみ (int64) | Telegram / LINE chat ID | regex で拾えない — field 名から推測するしかない |
+
+> **例示の書き方**: 上表および後述の diagram では、例示を `<@USER_ID>` や `<18-digit snowflake>` のように **regex に非マッチな形**で書く。17-20 桁の実数字を例に使うと hook / audit が自分自身の convention doc を false positive として flag する（self-reference 問題）。将来 editor が「例なんだから数字にしよう」と修正したくなっても、**ここはあえて非数字のまま**にするのが正しい。
+
+### なぜ危険か
+
+Discord 数値 ID 単体の危険度は低いが、**実名・所属・役職・所属コミュニティと並列されると dox (doxxing) 素材価値が跳ね上がる**。public repo の profile / config / docs にこれらの情報が隣接して存在するのが最悪パターン。
+
+加えて、これらの ID は一度 public に push されると:
+
+- force-push で main から外しても、GitHub が orphan commit を SHA 直接アクセスで serve し続ける (自然 GC まで数日〜数ヶ月)
+- 本人が ID を変更することは困難 (Discord は user ID 不変、Slack は workspace 固定)
+- archive.org / fork / clone されていたら完全除去不能
+
+## 対策: layer 2 + env var bridge パターン
+
+odakin の 4 層アーキテクチャ (`docs/personal-layer.md`) に従って、identity-in-config は **layer 2 (collaborator registry)** を canonical source とし、public tool (layer 1) 側は **env 変数名のみ**を保持する:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ layer 2 (private, git-crypt)                                    │
+│   research-collab/collaborators.yaml                            │
+│   - id: alice                                                   │
+│     discord_id: "<18-digit snowflake>"  ← 正本                 │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ odakin が手動 (or sync script で)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ runtime (local, gitignored)                                     │
+│   <tool>/.env                                                   │
+│   DISCORD_MENTION_ALICE=<@USER_ID>                              │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ os.environ[...] at load time
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ layer 1 (public)                                                │
+│   <tool>/profiles/alice/config.yaml                             │
+│     mention_target_env: DISCORD_MENTION_ALICE   ← env 名のみ   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 実装ルール
+
+1. **public repo の config.yaml / profile には identity 数値 ID を直接書かない**。`mention_target_env: DISCORD_MENTION_<NAME>` のように env 変数**名**のみ保持する
+2. **canonical source は private 層の 1 箇所**。 共同研究者だけなら `collaborators.yaml` (git-crypt) の `discord_id` field (`conventions/collaborators.md` 参照)。 事務職員・学生・別 server の人まで扱うなら、 人の ID だけを持つ private な台帳 (key → ID + 根拠 + 確認済みか) を正本にし、 `collaborators.yaml` の field はその**写し**として扱う。 どちらにしても:
+   - **正本は 1 つ**。 写し (collaborator DB の field、 bot の許可リスト、 tool の `.env`) の値の一致は機械で検査する (= 片方だけ空・片方だけ更新、 が黙って起きる)
+   - **script は key で引き、 ID を直書きしない**。 doc にも ID の表を作らず key で指す (= 表を作ると 2 つ目の正本になる。 検査で「doc の表の行に正本の ID」 を警告にすると再発が見える)
+   - ID を足すときは推測で入れず、 根拠と確認の有無を一緒に書く (引き方 = [`discord-bot.md#group-call-mentions`](discord-bot.md#group-call-mentions))
+3. **runtime 側は `.env` (gitignored)** が実値を保持。`load_dotenv()` 等で env に展開
+4. **Cross-machine sync**: 新 Mac では `git-crypt unlock` 後に helper script (例: `tools/sync_mentions.py`) で `collaborators.yaml` → `.env` を再生成。Dropbox 暗号化 backup は不要 (layer 2 git-crypt が backup も兼ねる)
+5. **Fail-soft**: env 未設定時に tool が crash しない設計にする。mention なしで送信 + warning log が無難
+
+## 自動検出
+
+- **`hooks/public-leak-guard.sh`** の tier A pattern `discord_mention` が `<@&?[0-9]{17,20}>` を検出 → PreToolUse で `permissionDecision=ask`
+- **`scripts/audit-public-repos.sh`** が同 regex で既存 repo を遡及 scan → `### [tier-a/discord_mention]` section に report
+
+## 他プラットフォームの扱い
+
+現時点で regex 化しているのは Discord のみ。理由と今後の方針:
+
+- **Slack (`UXXXXXXXXXX`)**: `\b[UW][A-Z0-9]{8,}\b` は false positive が多すぎる (大文字始まり英数識別子は一般的)。Slack 統合が実際に発生し leak 事例が出た時点で追加。それまでは convention doc でのみ規範化
+- **Matrix / Mastodon**: `@user:server.tld` と `@user@instance` は既存 email regex で拾われる (tier-a/email に分類される)
+- **Telegram / LINE chat ID**: 数値のみで regex 識別不能。field 名ベースで検出するには lint 層が必要、overengineering につき見送り
+- **GitHub user ID (数値)**: 公開情報、PII 扱いしない
+
+## <a id="homonym-author-id"></a>Homonym 注意: author ID (INSPIRE BAI 等) の取り違え
+
+INSPIRE BAI (`T.Kono.1`, `H.Otsu.4` のような形式の author ID。 例は架空) は **同姓同名の別著者を別 ID として管理する**が、setup 時に検索結果から **同姓の誰か別人**を選んでしまうと、「subscriber は実際 A さんなのに INSPIRE profile は A' さんのもの」という状態になる。公開リポに BAI を書くことで:
+
+- 第三者の共同研究者リスト (Super-K collaboration 15 名等) がその subscriber の profile として公開される
+- arxiv-digest の scorer が A' さんの研究分野で採点するため、本来の A さんの興味と乖離する
+- subscriber が「知らない人の研究リスト」で scoring される気持ち悪い状態になる
+
+### 対策
+
+- **setup_inspire 実行時の検証**: 最初の検索結果をそのまま採用せず、本人に以下を確認:
+  - 最近の論文タイトル 2-3 件が本人の研究と一致するか
+  - affiliation 履歴が本人の経歴と一致するか
+  - 共著者 list の top 5 が知り合いか
+- **不一致を発見した場合**: 人物台帳の `inspire_id` と、digestの運用configの `inspire_bai` をそれぞれ未設定に戻す。運用configの自動カテゴリも空にし、`inspire_profile.txt` を削除する。`collaborators.yaml` の該当entryの `notes` に訂正経緯を記録する。
+- **BAIが特定できない場合**: 未設定のまま運用し、scorerは手書きの `interest_profile.txt` を使う。
+- **定期更新で復活させない**: 定期更新は実行時点の設定から対象の識別子を読み取る。取り違えを理由に消した値を、過去のコマンドや固定リストから補わない。設定にないIDを起動例が固定指定すると、修正済みの設定と生成物が再び汚染される（実測）。null・空文字・項目なしでは生成されないことと、有効な設定では生成されることを同じfixtureで確かめる。
+
+### <a id="split-and-polluted-author-records"></a>1 人が複数の record に割れる・record に別人の論文が混じる
+
+上の取り違え (別人を選ぶ) の逆向き。 INSPIRE の著者 record は自動の名寄せで作られるので、 正しい人を選んでも次の 2 つが起きる (実測):
+
+- **割れる**: 1 人の業績が 2 つ以上の record (BAI の末尾の番号だけが違う) に分かれる。 所属が変わった前後で分かれていることが多い。
+  著者ページ `inspirehep.net/authors/<recid>` を業績一覧のリンクにすると、 その record の分しか出ない (一覧が数分の 1 になる)。
+- **混じる**: record に同姓同頭文字の別人の論文 (別分野・別の実験 collaboration・名の綴りが違う人) が付いている。 最新順の先頭に出ることもある。
+
+名前検索の URL (`literature?q=a <姓>, <頭文字>`) をリンクにするのも解にならない (別の頭文字の人まで大量に混じる)。
+
+**確かめ方と直し方** — 道具 = [`../scripts/inspire-author-records.py`](../scripts/inspire-author-records.py) (`--selftest` あり):
+
+1. `survey '<姓>, <頭文字>'` で、 名前検索の hit を record ごとに数える。 本人の行 (所属の履歴・表記で見分ける) が 2 つ以上あれば割れている。
+2. `check <recid> <recid> --name '<表記>' ...` で、 本人の record の合算から、 record に付いた著者の表記が本人のどれでもない論文 (= 別人の候補) を出す。
+   `--name` には `survey` の表記の列から本人のもの (略記と、 名を綴った形の両方) を並べる。
+3. 道具が出す「本人の表記で絞った式」 `(authors.recid:<A> or authors.recid:<B>) and (a "<姓>, <頭文字>" or a "<姓>, <名>")` の画面 URL をリンクにする。
+   API と画面は同じ式を受けるので、 API で件数と「別人の候補の残り 0」 を確かめてから、 画面でも件数・先頭・左の Author / Collaboration の絞り込み欄を見る。
+
+**式の罠** (実測):
+
+- 引用符なしの `a <姓>, <頭文字>` は名寄せ済みの record で引くので、 record に付いた別人の論文も通る = 絞りにならない。 表記の一致で絞るのは引用符つきの `a "<姓>, <頭文字>"`。
+- `not a <別人の表記>` で除く形は期待どおりに効かず、 本人の論文まで大きく落ちた。 除くのでなく、 本人の表記で拾う形にする。
+
+**機械の key は表示用のリンクと分ける** — 業績一覧を機械で拾う道具 (所属の論文の自動更新など) が「リンクが `authors/<recid>` の形なら、 その recid で拾う」 という作りだと、
+機械の都合でリンクを片方の record に寄せた瞬間、 人に見せる一覧が黙って欠ける (実測)。 recid は別の欄 (例 `inspire_authors: [<A>, <B>]`) に並べ、 道具はそちらも読む。
+1 つの欄に「人が開く先」 と「機械の key」 を兼ねさせない。
+
+**根本の直し方は INSPIRE 側** — 本人が ORCID で INSPIRE にログインして自分の論文を claim し、 別人の論文を外す。 record の統合は INSPIRE の窓口に頼む。
+本人でない者が勝手に頼まない (本人に知らせるかは持ち主が決める)。 直るまでは上の絞った式で持ちこたえる。
+
+<a id="orcid-export-polluted"></a>**ORCID の record も混じる** — ORCID の論文の欄を外部の DB から自動で登録する設定にしていると、 同姓同名の別人の論文が付くことがある (実測)。
+人の業績一覧を ORCID の出力で受け取って書類に添えると、 その別人の論文が本人の業績として出る。 書類に添える業績一覧は、 本人が全件を確かめたものを頼む
+(ORCID の出力で受けるなら、 添える前に本人に全件の確かめを頼む)。 根本の直し方は本人が ORCID の自動の登録を見直して別人の論文を外すこと = 上の INSPIRE と同じく、 本人でない者が勝手に頼まない。
+
+## 変更履歴
+
+- 2026-04-14 作成。`arxiv-digest` の複数 user profile で Discord 数値 ID が public config.yaml に直書きされていた leak を根本原因まで遡った結果として、identity-in-config カテゴリを独立規約として分離。事例記録は owner の private layer の leak-incidents 記録の 2026-04-14 entry (ε + β 類型、force-push 修正)

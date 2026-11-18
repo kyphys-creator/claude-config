@@ -1,0 +1,417 @@
+<!-- doc-meta
+when: wolframscript を書く・debug するとき + 対数プロット (LogPlot / LogLogPlot) の目盛・凡例を触るとき + Mathematica / wolframscript を Apple Silicon の Mac に入れ直すとき (#apple-silicon-install) + notebook (.nb) の入力セルを front end 無しで読む・評価するとき (#read-notebook-input-cells)
+category: research-domain
+summary: wolframscript の Print[NumberForm] literal stringification + ToString wrap helper、 SetDirectory[DirectoryName[$InputFileName]] の空文字 fallback、 PDF Plaintext import を secondary fallback として活用、 #plotlegends-export = PlotLegends は Graphics でなく Legended を返すため GUI 保存で凡例が落ち (対処 = 変数に入れて Export)、 位置調整で LineLegend を挟むと PlotStyle の色継承が切れて凡例だけ黒くなる (対処 = Placed にラベルだけ渡す)、 #logplot-ticks = LogLogPlot の目盛は user 指定が「データ座標」 で読み出し (ScaledTicks / AbsoluteOptions) が「自然対数座標」 という非対称があり Log を掛けて渡すとラベルが黙って全消失、 自動生成器は 6〜8 decade を境に decade 内の細目盛を落とす (実測表あり、 密度引数は効かない) 、 #apple-silicon-install = Apple Silicon ネイティブは 12.3.1 から・入手は Wolfram アカウントの Direct File Download (Platform を ARM に、 Standard のダウンロードマネージャは落ちた)・wolframscript は app 同梱の物を symlink・移行した機械では再アクティベーション (= scientific-computing.md の数値 silent failure とは別 scope の Wolfram tool semantics gotcha 集)
+-->
+# Wolfram / wolframscript scripting conventions
+
+Wolfram Language を script モード (= `wolframscript -file foo.wl` / `wolframscript -code ...`) で使うときの gotcha を集約する。 対象 = 数値解析・記号計算・図生成・PDF 抽出 等で wolframscript を CLI として叩く全般のリポ。 notebook (`.nb`) では起きない、 **script 特有の semantic 差** が大半なので、 notebook で動いていた code を script に移植する場面で踏みやすい。
+
+scope 補足: 「数値計算が silently 壊れる patterns (= scale-dependent default, explicit-Euler 発散等)」 は [`scientific-computing.md`](scientific-computing.md) で扱う。 本ファイルは **Wolfram の tool semantics 起因** の gotcha (= notebook と script で `Print` が違う等) に絞る。
+
+---
+
+## <a id="numberform-literal"></a>1. `Print[NumberForm[x, spec]]` は script モードで literal 化する
+
+### 問題
+
+```mathematica
+Print["mu = ", NumberForm[N[mu], {6, 4}]];
+```
+
+を notebook で実行すると `mu = 0.8169` と正しく formatted されるが、 wolframscript の console 出力は
+
+```
+mu = NumberForm[0.8169, {6, 4}]
+```
+
+と **literal stringification** される。 `Print` が format function を解釈せず、 `NumberForm` の wrapped expression をそのまま `ToString` する。 これは Wolfram の documented behavior: `Print` は最後に `OutputStream` へ `ToString[expr, OutputForm]` を流すが、 `OutputForm` は notebook の StandardForm/TraditionalForm renderer を経由しないため `NumberForm` の format function が発火しない。
+
+console の table を読み手に提示する用途で発覚することが多く、 大量の数値出力で全部 literal 化されると output が unusable になる。
+
+### 解決策: ToString で wrap
+
+```mathematica
+(* helper を script 冒頭で 1 行定義 *)
+fmt[x_, spec_] := ToString[NumberForm[x, spec]];
+
+(* 以後 NumberForm 直書きを fmt に置換 *)
+Print["mu = ", fmt[N[mu], {6, 4}]];
+(* → "mu = 0.8169" 正常 format *)
+```
+
+`ToString` が StandardForm 経由で format function を発火させる。 `NumberForm` 以外 (= `ScientificForm`, `EngineeringForm`, `AccountingForm`, `PaddedForm` 等) も同症状なので、 `fmt[x, spec]` helper を `Print` 前に必ず通す習慣にする。 機械精度の数を全桁で出したいときの `Print[InputForm[x]]` も同じで `InputForm[…]` が literal に出る (実測) = `ToString[x, InputForm]` を渡す。
+
+### Alternative: `WriteString` + `ToString`
+
+複雑な行を組み立てる時は
+
+```mathematica
+WriteString[$Output, "mu = " <> ToString[NumberForm[mu, {6, 4}]] <> "\n"];
+```
+
+`WriteString` は `Print` のような自動 newline / 自動 stringification がなく、 全て explicit に組み立てるため diagnostic 出力で安定。 重い loop の中で `Print` の overhead を避けたい時にも有効。
+
+### Anti-pattern
+
+- **notebook で動いたから script でも動くと assume**: notebook の Print は StandardForm renderer 経由なので format function が発火する。 script は OutputForm 経由で発火しない。 同 code が different semantic を持つ
+- **数値が「ほぼ正しく見える」 ので literal 化を見落とす**: 数値部分が literal の中に埋まっているので、 `0.8169` を期待していると `NumberForm[0.816870378..., {6, 4}]` の中に `0.816...` が見えて「format spec が効いていないだけ」 と誤読しがち。 実際には spec を含めて何も発火していない
+- **`Print[N[NumberForm[...]]]` で逃げる**: `N` は numeric evaluation で format には関係なし、 NumberForm が外にあるので literal 化は同じ
+
+### 適用範囲
+
+wolframscript の `-file` および `-code` 両方で発生。 notebook (`.nb` を CLI で実行する `-script` を含まない普通の interactive eval) では発生しない。 jupyter 上の Wolfram カーネルでも StandardForm 経由なので発生しない。 純粋に「OutputForm 経由か否か」 で決まる。
+
+---
+
+## <a id="inputfilename-empty-fallback"></a>2. `SetDirectory[DirectoryName[$InputFileName]]` で `$InputFileName` が空文字の fallback
+
+### 問題
+
+script 冒頭の慣用パターン
+
+```mathematica
+SetDirectory[DirectoryName[$InputFileName]];
+Get["my_package.wl"];
+```
+
+は `$InputFileName` が常に set されていることを前提とする。 ところが wolframscript の起動経路によっては (例: `-code` 経由、 stdin pipe、 一部の hook 環境) `$InputFileName` が **空文字 `""`** になり、 `DirectoryName[""]` も `""` を返して `SetDirectory[""]` が
+
+```
+SetDirectory::badfile: The specified argument should be a valid string or File.
+```
+
+を出す。 関連 `Get` も current directory に対して resolve するので、 unrelated path の package を loading したり not-found で fall through する。
+
+### 解決策: `$ScriptCommandLine` への fallback
+
+```mathematica
+SetDirectory[DirectoryName[
+  If[$InputFileName =!= "", $InputFileName, First[$ScriptCommandLine]]]];
+Get["my_package.wl"];
+```
+
+`$ScriptCommandLine` は wolframscript の引数を保持し、 `-file foo.wl` 起動時は `First[...]` で `foo.wl` の絶対 or 相対 path が取れる。 `$InputFileName` が空のときの fallback として安定。
+
+`-code` 起動時は両方とも空になるので、 その場合は script を `-file` で起動するよう運用側で揃える。 `-code` での short one-liner を許容するなら `SetDirectory` 自体を skip して `Get` に絶対 path を渡す。
+
+### Anti-pattern
+
+- **`SetDirectory[NotebookDirectory[]]`**: notebook での慣用だが script では `NotebookDirectory[]` が undefined で fall through。 同 code を notebook / script 両方で使うときも `$InputFileName` fallback の方が portable
+- **try-catch で `SetDirectory::badfile` を握り潰す**: warning は出ないが `Get` が想定外の場所から load するので、 silent な misload になる
+- **`Get[FileNameJoin[{DirectoryName[$ScriptCommandLine[[1]]], "package.wl"}]]` で bare filename invocation の root path fail** (= 2026-05-25 RCA): wolframscript を script と同 dir から `wolframscript -file run_xxx.wl` で起動すると `$ScriptCommandLine[[1]] = "run_xxx.wl"` (= path prefix なし)、 `DirectoryName["run_xxx.wl"] = ""`、 `FileNameJoin[{"", "package.wl"}] = "/package.wl"` (= filesystem root 絶対パス) で `Get` が silent fail。 cascade で全 function 未定義、 後続呼び出しが unevaluated form のまま続行 (= `KeyExistsQ::invrl` 等の cryptic error 経由で発覚)。 解決: `SetDirectory[DirectoryName[...]] + Get["package.wl"]` pattern に統一 (= 上 §「解決策」 の form、 cwd 既に script dir なら `SetDirectory[""]` が badfile error 出しても Get は cwd で resolve して成功)。 `FileNameJoin` 形は path 拼接の保証なしに silent fail する点で `SetDirectory + Get` より fragile。 「`$InputFileName` 空 → `$ScriptCommandLine` fallback」 (= 上 §「解決策」) だけでは不十分、 「fallback して `DirectoryName` が空文字 でも `FileNameJoin` の左端 empty がルート扱いされる」 二重防衛が必要
+
+---
+
+## <a id="pdf-plaintext-import"></a>3. PDF text 抽出の secondary fallback としての `Import["...pdf", "Plaintext"]`
+
+### 位置付け
+
+PDF text 抽出の **fallback chain**: **PyMuPDF (`import fitz`) が first-line** (= [`hooks/pdf-read-fallback-nudge.sh`](../hooks/pdf-read-fallback-nudge.sh) が Read tool の `pdftoppm is not installed` 失敗を検出して PyMuPDF 1-liner を system reminder で injection、 機械的に推奨)。 wolframscript の `Import "Plaintext"` は **secondary fallback** (= Mathematica 持ちで PyMuPDF まで届かない or 軽い 1 page 確認等)。 ほかに poppler `pdftotext` (品質高 + layout 保持、 ただし macOS Tier 2 で source build 失敗事故あり)、 sips (macOS 標準だが機能限定)、 arXiv HTML 版 fetch (arXiv 限定、 version 一致 caveat) が候補。
+
+### 用途
+
+Mathematica は PDF を text として読める built-in 機能を持つ:
+
+```mathematica
+(* 全 page を 1 つの String として返す *)
+allText = Import["foo.pdf", "Plaintext"];
+
+(* 個別 page (= paper page number に近いが、 cover offset で ±1-2 ずれることあり) *)
+page67 = Import["foo.pdf", {"Plaintext", 67}];
+
+(* 総 page 数 *)
+n = Import["foo.pdf", "PageCount"];
+```
+
+### いつ wolframscript path を選ぶか
+
+- Python venv setup が面倒で PyMuPDF まで届かない、 かつ Mathematica は既に install されている
+- 1 page だけ確認したい等の軽い用途で、 layout 不要 + PyMuPDF を呼ぶための venv 起動コストを払いたくない
+- poppler bottle 不在で `brew install poppler` が source build 失敗する環境 (= macOS Intel Tier 2、 古い CLT 抱え等) で PyMuPDF も install 不可な fallback 二段目
+
+選ばない (= PyMuPDF や pdftotext を選ぶべき場面):
+- 大量 page (> 30) を頻繁に抽出 — wolframscript のロードコストが高い (1 回 ~3-5 秒)
+- 文字位置・font・table 構造が必要 — PyMuPDF / pdftotext の方が忠実
+- 属性 (= bbox / link / form field) を取り出す — Wolfram の Plaintext は構造を捨てる
+
+### page index の注意
+
+`Import[..., {"Plaintext", n}]` の `n` は **PDF 内 page index** (= 1 始まり、 表紙含む) であり、 paper の本文 page 番号と通常 ±1〜数ずれる (= title page / TOC / front matter で offset)。 取り出した text の頭に paper page 番号が含まれているはずなので、 dump して照合してから本格抽出する。
+
+### return 型に注意
+
+`Import[..., "Plaintext"]` は **単一 `String`** を返し、 list of pages ではない。 `{"Plaintext", n}` で個別 page を取ると同じく String。 `Length[]` 等で list 操作しようとすると意味なく 0 を返すので、 `Head` で確認すると安全:
+
+```mathematica
+res = Import["foo.pdf", "Plaintext"];
+If[Head[res] === List, Length[res], StringLength[res]]
+```
+
+### Anti-pattern
+
+- **`Import["...pdf"]` を引数なしで実行**: default format で raster image list を返し、 OCR していない以上 text にならない。 必ず `"Plaintext"` を明示
+- **page 単位の loop で毎回 `Import` 全文**: 全 page を String 1 個で受けて position split する方が桁外れに速い (= ファイル open 1 回で済む)
+
+---
+
+## <a id="plotlegends-export"></a>4. `PlotLegends` は `Graphics` を返さない — GUI 保存で凡例が落ち、`LineLegend` を書くと色が落ちる
+
+### 問題
+
+`PlotLegends -> {...}` の戻り値は `Graphics` **ではなく** `Legended` wrapper:
+
+```
+Head[fig]  = Legended
+fig[[1]]   = Graphics                    (* プロット本体 *)
+fig[[2]]   = Placed[LineLegend[...]]     (* 凡例。Graphics の「外」にいる *)
+```
+
+ここから 2 つの独立した罠が出る。
+
+**罠 1 — GUI 保存で凡例が消える。** notebook 上で図をクリックして選択されるのは内側の `Graphics` (= `fig[[1]]`) だけ。右クリック → "Save Graphic As…" や Copy As ▸ PDF はその `Graphics` しか掴まないので、凡例のない PDF が出る。「プロットを PDF にすると凡例が選ばれない」の正体。
+
+**罠 2 — `LineLegend` を自分で書くと凡例が黒くなる。** 位置を変えたくて `Placed[LineLegend[styles, labels], {x, y}]` と書き直すと、`LineLegend` の第 1 引数は**凡例自身のスタイル**なので、`PlotStyle` の色は継承されない。`{Automatic, {Thick, Dashed}}` のように色を含まない directive を渡すと凡例だけ黒一色になる。
+
+実測 (`wolframscript` で export → 生成 PDF からテキスト・ピクセルを抽出して判定):
+
+| 書き方 | 凡例 | 凡例の色 |
+|---|---|---|
+| `Export["f.pdf", fig]` (`Legended` のまま) | ✅ あり (ページ幅が広がり右外に配置) | 曲線と一致 |
+| `Export["f.pdf", fig[[1]]]` (= GUI クリック相当) | ❌ **無し** | — |
+| `PlotLegends -> Placed[labels, {x, y}]` | ✅ あり (枠内) | ✅ 曲線と一致 |
+| `PlotLegends -> Placed[LineLegend[stylesWithoutColor, labels], {x, y}]` | ✅ あり (枠内) | ❌ **黒** |
+
+いずれもラスタ化されず、埋め込み画像 0・フォント + パスのみのベクタ PDF になる。
+
+### 解決策 1: GUI 保存をやめて `Export` する
+
+```mathematica
+fig = Plot[..., PlotLegends -> {"a", "b"}];
+Export["out.pdf", fig]     (* Legended をそのまま渡す *)
+```
+
+`Export` は `Legended` を受け取れる。落ちるのは GUI 選択経路だけなので、**変数に入れて `Export` を書く**だけで直る。凡例はページ右外に置かれ、その分ページ幅が広がる。
+
+### 解決策 2: 図の枠内に置きたいなら `Placed` に**ラベルだけ**渡す
+
+```mathematica
+PlotLegends -> Placed[{"a", "b"}, {0.78, 0.82}]
+```
+
+`Placed` は位置を指定するだけでスタイル継承を壊さない。ページ幅も元のまま。
+
+### 解決策 3: どうしても `LineLegend` が要るなら色を明示する
+
+凡例の間隔・枠を細かく制御したい場合のみ。既定の系列色は `ColorData[97][n]`:
+
+```mathematica
+PlotLegends -> Placed[
+   LineLegend[{Directive[ColorData[97][1]],
+               Directive[ColorData[97][2], Thick, Dashed]},
+              {"a", "b"}],
+   {0.78, 0.82}]
+```
+
+`PlotStyle` に書いた directive を `LineLegend` にもう一度書き、さらに色を足す必要がある = **二重管理**。位置を変えたいだけなら解決策 2 を選ぶ。
+
+### Anti-pattern
+
+- **図をクリックして "Save Graphic As…"**: `Legended` の内側しか取れない。論文用の図なら必ず `Export` を書く
+- **`Placed` を使うために `LineLegend` を挟む**: 位置指定だけが目的なら `Placed[labels, pos]` で足りる。`LineLegend` を挟んだ瞬間にスタイル継承が切れる
+- **`Rasterize` で逃げる**: 凡例は入るがベクタ性を失う。上記 3 解のいずれもベクタのままなので、論文図では不要
+
+### 検証のしかた
+
+「凡例が入ったか」は目視でなく生成 PDF から機械的に確認できる。テキスト抽出でラベル文字列の有無を、ラベル文字の**直左**のピクセル彩度で色見本の有無を判定する (凡例の裏を曲線が横切ると誤検出しうるので、複数ラベルで照合する)。
+
+---
+
+## <a id="logplot-ticks"></a>5. `LogLogPlot` の目盛 — user 指定は**データ座標**、 自動生成は decade 数で様式が切り替わる
+
+### 問題
+
+`LogLogPlot` で「横軸には decade 内の細かい目盛 (2,3,…,9) が入るのに、 縦軸には入らない」 という非対称が起きる。 縦軸が対数になっていないように見えるが、 **両軸とも対数**であり、 差は軸が何 decade 走るかだけで決まる。
+
+### 事実 1: 自動生成器は decade 数で様式を切り替える (実測)
+
+既定の目盛は `Charting`ScaledTicks[{Log, Exp}]` が作る。 軸幅を変えて食わせた実測:
+
+| 軸幅 | tick 総数 | ラベル付き | decade 内の細目盛 |
+|---|---|---|---|
+| 3 decade | 42 | 7 | 37 |
+| 4 decade | 55 | 5 | 48 |
+| 6 decade | 64 | 7 | 56 |
+| **8 decade** | 9 | 4 | **0** |
+| 20 decade | 21 | 5 | 0 |
+| 43 decade | 44 | 5 | 0 |
+
+**閾値は 6〜8 decade の間。** それを超えると decade 内の細目盛が落ち、 ラベルも 5〜10 decade おきに間引かれる。 「対数目盛かどうか」 ではなく **解像できるかどうか**の判断なので、 強制しても紙の上では潰れる (下記)。
+
+なお `Charting`ScaledTicks[{Log,Exp}][lo, hi, {n, n}]` の第 3 引数 (既定 `{6,6}`) を上げても、 広い範囲では結果が変わらない (実測: `{6,6}` / `{12,12}` / `{20,20}` すべて同一)。
+
+### 事実 2: 読む座標と書く座標が違う
+
+- **`Charting`ScaledTicks` が返す位置・`AbsoluteOptions` で見える位置 = 自然対数**座標 (`10^-42` が `-96.71`)
+- **user が `Ticks` / `FrameTicks` に渡す位置 = データ座標** (`10.^k` をそのまま渡す)
+
+**この非対称が罠。** 読み出した座標系に合わせて `Log[10.^k]` を渡すと、 `LogLogPlot` が更に `Log` を掛けるので位置が壊れ、 **その軸のラベルが全部黙って消える** (error も warning も出ない)。
+
+### 罠: 同一位置に「ラベル付き」 と「空ラベル」 を重ねると片方が消える
+
+major と minor の `Table` を単純に `Join` すると、 重複位置で後勝ちして major のラベルが飛ぶ。 minor 側から major の位置を除く。
+
+### 動作確認済みの recipe
+
+```mathematica
+(* ⚠️ 位置は Log を掛けずにデータ座標で渡す *)
+majY = Table[{10.^k, Superscript[10, k], {0.02, 0}}, {k, -40, 0, 5}];
+minY = Table[{10.^k, "", {0.01, 0}},
+             {k, Select[Range[-42, 0], Mod[#, 5] != 0 &]}];   (* major の位置を除く *)
+rightY = Table[{10.^k, "", {0.01, 0}}, {k, -42, 0}];
+
+LogLogPlot[curves, {x, 10^-5, 10^1}, Frame -> True,
+  FrameTicks -> {{Join[majY, minY], rightY}, {Automatic, Automatic}},
+  GridLines -> {Automatic, Table[10.^k, {k, -40, 0, 5}]},
+  GridLinesStyle -> Directive[GrayLevel[0.85]]]
+```
+
+`GridLines` も同じデータ座標。 **広い軸では細目盛の代わりに GridLines が対数構造を目に伝える**ので、 こちらの方が実用的。
+
+### 強制する前に実寸で割る
+
+「横軸と同じ様式」 が可能かは印刷実寸の割り算で決まる。 論文の `0.6\textwidth` (≈ 4.3 in 幅、 既定 aspect で高さ 2.7 in) に 42.6 decade を載せると:
+
+```
+1 decade = 4.5 pt = 1.6 mm   →   decade 内 8 本の細目盛は平均 0.5 pt = 178 µm
+```
+
+= 目盛でなく黒い櫛になる。 **軸幅が閾値を超えているなら、 様式を揃えるのではなく (a) 縦軸の範囲を切る (b) ラベル間隔を粗くして GridLines を足す のどちらかを選ぶ**。
+
+### 検証のしかた (headless)
+
+`AbsoluteOptions[plot, FrameTicks]` は **front end を要求する** (`FrontEndObject::notavail`) ので wolframscript から目盛を読み出せない。 §4 と同じ手で **`Export` した PDF から text 抽出**し、 軸ラベルの個数と文字列を機械的に照合する (左端 20% 程度に落ちる word を拾えば縦軸ラベルが取れる)。 目盛が黙って消える罠 (上記) は、 この照合でしか気づけない。
+
+軸幅そのものは front end 不要で読める:
+
+```mathematica
+pr = PlotRange /. AbsoluteOptions[p, PlotRange];   (* 自然対数座標 *)
+(pr[[2,2]] - pr[[2,1]])/Log[10]                    (* 縦軸が何 decade か *)
+```
+
+---
+
+## <a id="nested-comments"></a>6. コメントは**ネスト**する — 説明文に `(*.nb)` と書いた瞬間に file 全体が無音でコメント扱いになる
+
+### 問題
+
+Wolfram Language の `(* ... *)` は C と違って**入れ子**になる。 script 冒頭の説明コメントに `(*.nb)` / `(*.pdf)` のような glob を書くと、 その `(*` が内側のコメントを開き、 最初の `*)` は内側を閉じるだけで外側は閉じない。 file の残り全部がコメントになり、 `wolframscript -file foo.wls` は
+
+- 構文 error も warning も出さない
+- rc = 0 で終わる
+- `Print` も `Export` も走らない (出力ゼロ、 生成物は前の版のまま = mtime 不変)
+
+`Get["foo.wls"]` で読んでも `Null` が返るだけ。 **「無音・rc 0・生成物の mtime 不変」 の 3 点が揃ったらこれを疑う** (実測: 図生成 script の冒頭コメントで起き、 PDF が更新されないことで気づいた)。
+
+### 見つけ方と対処
+
+```bash
+grep -o '(\*' foo.wls | wc -l; grep -o '\*)' foo.wls | wc -l   # 個数が合わなければ入れ子
+```
+
+コメント内の glob は `[*.nb]` か `*.nb` と書く。 文字列リテラルの中の `"(*"` はコメントにならないので code 側は影響しない。
+
+## <a id="logplot-drops-nonpositive"></a>7. `LogPlot` / `LogLogPlot` は 0 以下の値を**黙って描かない** — 符号つきの曲線は「途中で切れた線」 になる
+
+**症状**: 符号を持つ量 (干渉項・差・実部) を `LogLogPlot` に渡すと、 正の区間だけが描かれ、 負の区間は warning も無く抜ける。 曲線が「真ん中だけ」「左だけ」 に見え、 式や規約 (共役の取り方・全体符号・parameter) を変えると見える区間が動くので、 変更の効果を「線が消えた / 現れた」 と誤読する (実測: 共役と全体符号を直したら、 破線が中央だけから左だけに変わった)。
+
+**対処**:
+- 符号つきの量は `Abs[f[x]]` を描き、 符号反転の位置は別に求めて (`FindRoot` / 符号の grid scan) caption と検証 script に記録する。 反転位置は `Abs` の曲線の cusp として見える。
+- 検証 script (Python 側の SoT) に「符号反転は N 回、 位置は x = …」 を assertion として持たせ、 規約や parameter を変えるたびに再計算する。 描画に符号の情報を任せない。
+- 凡例には `|f|` と書く (符号つきの量をそのまま描いたと読ませない)。 図に `PlotLabel` で parameter を文字列で書いているなら、 代入表を変えた時にその文字列も変える (文字列は自動では追従しない)。
+
+関連: [#logplot-ticks](#logplot-ticks) (目盛の silent 消失)、 [scientific-computing.md](scientific-computing.md) の silent failure 群。
+
+---
+
+## <a id="apple-silicon-install"></a>8. Apple Silicon の Mac に入れ直す — 入手・`wolframscript`・アクティベーション
+
+Intel の Mac から移行アシスタントで移すと、 Intel 版の Mathematica と `wolframscript` がそのまま来て Rosetta の下で動く (macOS が「Intel プロセッサ用アプリの対応は終了します」 と出す)。 一般の入れ替えの手順 = [`macos-cpu-arch.md#app-replacement`](macos-cpu-arch.md#app-replacement)。 Wolfram 固有の点 (実測):
+
+- **Apple Silicon ネイティブは 12.3.1 から**。 永続ライセンスで使えるのはライセンスの版まで = その版が 12.3.1 以上なら、 支払いなしで Apple Silicon 版に替えられる (版は Wolfram アカウントの製品の頁に出る)。
+- **入手は Wolfram アカウント (`account.wolfram.com`) の製品の頁** → Downloads。 古い User Portal (`user.wolfram.com`) は移行済みのライセンスを「製品なし」 と出す。 Downloads の **Platform は Intel が既定のことがある** = macOS (ARM) に切り替える。
+- **「Direct File Download」 を選ぶ**。 「Standard Download」 は本体でなくダウンロードマネージャ (数 MB) で、 古い版のものは Intel 版のまま、 新しい macOS では起動直後に内部エラー (`ABORT - Pointer is NULL`) で落ちた。
+- **`wolframscript` は app に同梱の物を使う** (`Mathematica.app/Contents/MacOS/wolframscript`、 kernel と同じ arch)。 PATH の `wolframscript` をそこへの symlink にすれば、 別配布の WolframScript の pkg (管理者パスワードが要る) は要らない。 前の Intel 版の `wolframscript` は symlink を張る前に退避する。
+- **新しい機械では最初に 1 回アクティベーションが要る**。 移行で来たライセンス file (`~/Library/Mathematica/Licensing/mathpass`) は機械名ごとの行で、 前の機械の行では通らない (`wolframscript` が「Please activate the product」 で止まる)。 12.3.1 の画面の選択肢は activation key の入力・所属機関の SSO・別の方法 (MathID による手動) で、 個人の Wolfram ID でサインインする欄は無い (実測) = 個人で買ったライセンスはキーを入れる。 キーの全文はアカウントの頁 (My Products → 製品) にあるが、 **どのキーが使用中かは頁に出ない**。 使用中のはずのキーでも新しい機械で通ることがある (実測) = 頁の「System transfer」 (申請のフォームで即時ではない) の前に、 まずキーを入れてみる。 どの機械にどのキーを入れたかは手元の記録に残す (頁から後で分からない)。 済んだら `wolframscript -code '{$Version, $SystemID}'` で `MacOSX-ARM64` が返るのを確かめる。
+
+---
+
+## <a id="headless-notebook-evaluate"></a>7. 隠れた front end で notebook を「再評価して保存」 しない — 止まると file が壊れ、 kernel が license の席を食う
+
+### 問題
+
+`wolframscript -code 'UsingFrontEnd[nb = NotebookOpen[...]; NotebookEvaluate[nb, InsertResults -> True]; NotebookSave[nb]]'` で、 入力セルを書き換えた notebook の出力セルを揃えようとした (実測)。 起きたこと:
+
+- 評価が 10 分を超えて終わらず (重い `FullSimplify` か、 隠れた front end の dialog かは見えない)、 呼び元を止めたあとに **notebook が 1/6 の大きさに書き換わっていた** (出力セルの途中までの状態で保存された)。
+- 止めても `WolframKernel -mathlink …` と `MathematicaServer -mathlink -server …` が残り、 次の `wolframscript` が **`No valid password found` / `Connection closed by WolframKernel`** で起動しなくなった (= 残った kernel が license の席を取っている。 GUI の kernel とは別の、 後から生まれた pid)。
+
+### 対処
+
+1. notebook の入力セルを機械で直すときは **text として patch する** (`Cell[BoxData[RowBox[{…}]]]` の box 構文、 `"-", "2"` のような token 列を書き換える) = front end を起動しない。 出力セルは古いまま残し、 その旨を Text cell に書いて、 再評価は GUI で人がする。
+2. 触る前に **必ず別の場所に写しを取る** (`cp` で別の dir へ)。 Dropbox の版履歴は保険であって手順ではない。
+3. 残った kernel は `pgrep -fl 'WolframKernel|MathematicaServer'` で GUI の分 (古い pid) と見分けて止める (`kill -9`)。 `No valid password found` が出たらまずこれを疑う (license の切れではない)。
+4. 図を出すだけの `UsingFrontEnd[Export[…]]` は短時間で終わり、 壊れたことはない (実測)。 壊れるのは notebook の評価と保存。
+
+---
+
+## <a id="read-notebook-input-cells"></a>9. notebook の入力セルを front end 無しで読む・評価する — `"Input" -> "InputExpression"` と `Hold`
+
+### 問題
+
+`.nb` に書かれた計算の処方 (どの式・どの代入・どの時刻・どの格子) を確かめたい。 GUI で開くと保存で file が変わりうるし、 front end を隠して評価すると上の [#headless-notebook-evaluate](#headless-notebook-evaluate) の事故になる。 `NotebookImport[nb, "Input" -> "Text"]` は front end が無いと、 代入や描画のセルの多くを `Failure[InterpretationFailure, …]` で返す (実測)。
+
+### 対処
+
+```mathematica
+cells = NotebookImport[nb, "Input" -> "InputExpression"];
+(* 読むだけ: 評価せずに InputForm の文字列にする。 巨大な式のセルは長さで切って先頭と末尾だけ出す *)
+Do[WriteString[s, "== cell ", i, " ==\n",
+     ToString[InputForm[ToExpression[cells[[i]], StandardForm, Hold]]], "\n"], {i, Length[cells]}];
+(* 途中の定義を使う: 順に ReleaseHold。 描画のループや重いセルは番号で飛ばす *)
+Do[If[! MemberQ[skip, i], ReleaseHold[ToExpression[cells[[i]], StandardForm, Hold]]], {i, 1, last}];
+```
+
+- `Hold` のまま文字列にすると、 セルの代入 (後で値が入る `xd = x0` のような定義を含む) と式が書かれたとおりに読める。 ギリシャ文字は出力の文字コードで化けることがある (実測) = 記号の名前で読む。
+- 番号は `NotebookImport` が返した順の番号で指す。 notebook の `In[n]` とは一致しない (連続するセルが 1 つにまとまることがある = 実測)。
+- 評価して得た式は `Function[{u, v}, Evaluate[N[expr /. {y1 -> u, y2 -> v}]]]` で数値関数に固めると、 1 点の評価が速い。 機械精度の丸めの大きさは、 同じ式を `N[…, 40]` で評価した値と比べて測れる。
+- 読むだけで front end を起動しないので、 notebook は変わらない。 終わったら `git diff -- <notebook>` で確かめる。
+
+---
+
+## <a id="check-catches-precision-warning"></a>10. `Check[expr, fallback]` は精度の警告も失敗と取る — option が黙って別の手法の値を返す
+
+### 問題
+
+- 高い `WorkingPrecision` (例 `50`) の `FindRoot` / `FindMinimum` に、 機械精度の数 (option で受けた `0.5` など) が混じった式を渡すと、 `FindRoot::precw` (関数の精度が WorkingPrecision より低い) が出る。 根そのものは返る = ただの警告。
+- その呼び出しを `Quiet@Check[expr, $Failed]` で包むと、 `Check` は message が 1 つでも出れば第 2 引数を返す。 警告が失敗になり、 失敗の枝 (例: 代わりに曲率から出した誤差) に毎回入る。 `Quiet` が message も消すので、 option が一度も効いていないことは出力にも log にも出ない (実測: 区間の端から誤差を出す option が、 もう一方の手法と最後の桁まで同じ値を返し続けていた)。
+
+### 見つけ方
+
+- option を替えた 2 つの出力が最後の桁まで同じなら、 fallback に入っていると疑う。 `Quiet` と `Check` を外して同じ呼び出しを 1 回流し、 出る message を読む。
+- どの message が fallback に入れたかは、 `Check[expr, "caught", FindRoot::precw]` のように message を名指して確かめられる (名指した message のときだけ第 2 引数が返る)。
+
+### 対処
+
+- 式に入る数を WorkingPrecision に揃え、 それでも残る `precw` だけを名指しで `Quiet` にする (手順と理由の正本 = [`scientific-computing.md#nintegrate-workingprecision`](scientific-computing.md#nintegrate-workingprecision) の「SetPrecision」 と「限定 Quiet」。 `NIntegrate` と同じく `FindRoot` にも効く)。
+- `Check` も同じく、 失敗と取る message を第 3 引数で名指す (`Check[expr, $Failed, {FindRoot::nlnum, FindRoot::cvmit}]`)。 全部の message を失敗にしない (全部の message を握る `Quiet[expr]` と同じ形の罠)。
+- fallback に入ったら返り値に印をつける (例: `"seMethodUsed" -> "Curvature"`) か `Message` を出す。 黙って別の手法の値を返さない。
+- 区間の端の根は、 始点 1 つの Newton でなく、 両端で符号が変わる区間を `{x, a, b}` と `Method -> "Brent"` で渡して探す。 始点から跳んで反対側の根に落ちることがある (実測: 両側を別々の始点から探したら同じ根が 2 回返った)。 得た端が `lo < 中心 < hi` を満たすかを確かめる。
+- 言語を問わない test の守り方 = [`scientific-computing.md#alternative-method-option-test`](scientific-computing.md#alternative-method-option-test)。
+
+---
+
+## 関連
+
+- 数値計算の scale-dependent default 等 numerical silent failure: [`scientific-computing.md`](scientific-computing.md)
+- マシン固有 install 不可 package の蓄積 (= poppler 等が source build 失敗した時の machine-local 記録): [`install-failures.md`](install-failures.md)
+- PDF text 抽出の代替 tool (= PyMuPDF / sips / arXiv HTML) と環境別の選択順序は 個人層 (`<your>-prefs/`) の dev-environment 規約で machine 別に分岐表として持つのが筋 (= 「マシン A では PyMuPDF first / マシン B では wolframscript も候補」 のような machine-dependent fact は cross-machine 比較を含むので layer 3 行き、 cf. [`docs/personal-layer.md`](../docs/personal-layer.md))

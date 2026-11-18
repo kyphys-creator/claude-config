@@ -34,6 +34,8 @@ chmod 600 ~/.secrets/git-crypt.key
 
 > **なぜ `~/.secrets/`？** `setup.sh` がこのパスを自動検出し、ブートストラップ時（Step 5b）に暗号化リポを自動 unlock する。別のパスを使う場合は `setup.sh` を更新すること。
 
+> **この repo 専用の鍵にするか？** `setup.sh` は `~/.secrets/<repo>.key` を先に試し、 無ければ `~/.secrets/git-crypt.key` を使う。 後で人と共有するかもしれない repo や、 他人の個人情報を持つ repo は `~/.secrets/<repo>.key` に書き出す。 共有するときにこの repo の鍵だけを渡せばよく、 先に[鍵を付け替える](#rotate-key)必要が無い。
+
 ### 4. `.gitattributes` の設定
 
 リポルートに `.gitattributes` を作成し、暗号化対象を指定する：
@@ -57,13 +59,25 @@ private/** filter=git-crypt diff=git-crypt
 SESSION.md filter=git-crypt diff=git-crypt
 ```
 
-### 5. コミット・push
+### 5. コミット・確認・push
+
+機密の file を add する前に `.gitattributes` を書く。 パターンが掛かる前に commit した file は、 履歴に平文で残る。
 
 ```bash
 git add .gitattributes
 git add .  # 暗号化ファイルも通常通り add
+git-crypt status
 git commit -m "Initial commit (git-crypt encrypted)"
-git push
+```
+
+`git-crypt status` は各 file を `encrypted:` か `not encrypted:` で出す。 後者に並ぶのが、 平文で残すつもりの file だけであることを確かめる。 最初の push の前に、 commit した blob が本当に暗号文かを確かめる。 中身は印字せず、 真偽だけで見る (暗号化に失敗していれば、 印字した先頭はそのまま平文になる)。 push は確認が通った分岐の中でだけ打つ (次の行に `git push` を置くと、 確認に落ちた後でも走る):
+
+```bash
+if git cat-file -p HEAD:<暗号化される file> | head -c 9 | grep -qa GITCRYPT; then
+  echo encrypted && git push
+else
+  echo "PLAINTEXT - do not push"
+fi
 ```
 
 `.gitattributes` のパターンにマッチするファイルが GitHub 上で暗号化される。
@@ -90,6 +104,45 @@ git-crypt unlock ~/.secrets/git-crypt.key  # 共有鍵で置き換え
 
 **トレードオフ**: 鍵管理がシンプルになるが、1つの鍵が漏洩すると全リポが露出する。全リポが同一オーナーで脅威モデルが同じなら許容範囲。
 
+## <a id="rotate-key"></a>鍵を付け替える (使い回しの鍵の repo を人と共有する・人が抜けた)
+
+使い回しの鍵 (上の節) の repo を他人と共有するときは、 その repo だけ専用の鍵に付け替えてから渡す (使い回しの鍵を渡すと全リポが開く)。 人が抜けた・鍵が漏れた疑いのときも同じ。 中身は変えず、 暗号化 file を全部新しい鍵で暗号化し直す:
+
+```bash
+# unlock 済み・未 commit の変更なしの clone で
+git-crypt status -e | awk '$1=="encrypted:"{print $2}' > /tmp/enc-paths     # 暗号化対象の一覧
+mkdir -p /tmp/plain && while IFS= read -r p; do mkdir -p "/tmp/plain/$(dirname "$p")"; cp -p "$p" "/tmp/plain/$p"; done < /tmp/enc-paths
+git-crypt lock && rm -rf "$(git rev-parse --absolute-git-dir)/git-crypt" && git-crypt init
+(cd /tmp/plain && find . -type f | sed 's#^\./##') | while IFS= read -r f; do cp -p "/tmp/plain/$f" "$f"; done
+git add --renormalize . && git-crypt status | grep -c WARNING              # 0 = 全部暗号化された
+git-crypt export-key ~/.secrets/<repo>.key && chmod 600 ~/.secrets/<repo>.key
+git commit -m "git-crypt: 鍵を付け替える (中身の変更なし)" && git push
+rm -rf /tmp/plain /tmp/enc-paths
+```
+
+- **付け替えより前の commit は古い鍵でしか読めない** — 新しい鍵の持ち主に古い版は見えない (共有の前の版を渡さない、 という意味ではちょうどよい)。 古い版の平文も消したいときは、 履歴の書き換えで「今は暗号化と宣言した path の平文だった版」 を新しい鍵で暗号化し直す ([`sensitive-repo-patterns.ja.md#pattern-2-5`](sensitive-repo-patterns.ja.md#pattern-2-5))
+- **鍵を作る・書き出す操作と、 付け替えの commit は本人の terminal で** (実測: Claude Code の auto mode は鍵の生成・書き出しを秘密の置き場への書き込みとして止める。 付け替えの直後は HEAD の暗号化 file が古い鍵のままなので、 HEAD を読む agent 側の検査も検査不能で止まる)。 agent には上の手順を script にして渡させる
+- **他の clone は、 古い鍵のまま pull しない** — 新しい鍵の commit を古い鍵で smudge できず、 変わった暗号化 file が作業 tree から消えたまま止まる (実測)。 順序は: 新しい鍵を置く → `git-crypt lock` → `git pull` (書き換えた履歴なら追従の道具) → `git-crypt unlock ~/.secrets/<repo>.key`。 もう壊れた clone は `git-crypt lock --force` → `git reset --hard origin/<branch>` → `git-crypt unlock <新しい鍵>` で戻る (未 commit の変更があれば先に退避)。 追従の道具 (`scripts/git-rewrite-follow.py`) は、 鍵が合わない clone を reset の前に止める。 ⚠️ **`lock --force` が戻すのは暗号化 file だけ** — 壊れ方によっては新しい履歴の平文 file (`.gitattributes` など) の変更と新しい未追跡 file が作業 tree に残り、 追従の `reset --keep` が「未 commit の変更が重なる」 で止まる (実測)。 その時は残った file が新しい履歴の版と同じか (`git show origin/<branch>:<path> | cmp - <path>`) を確かめ、 同じなら退避してから追従をやり直す。 違う file は、 新しい履歴の古い版 (`git log -p origin/<branch> -- <path>` で探す) か手元の編集かを確かめてから扱う (実測では、 途中まで書かれた版が新しい履歴の少し前の版だった)
+- 鍵の配布は 下の §「共有リポでの自動復元」 の形で (暗号化した鍵を共有フォルダに置き、 パスフレーズだけ別経路)
+
+## <a id="encrypt-existing-files"></a>平文で commit 済みの file を後から暗号化する
+
+git-crypt を使っていない repo の一部の file (台帳・一覧・記録) を、 後から暗号化に切り替えるとき。 中身は変えない:
+
+```bash
+# 未 commit の変更なしの clone で。 使い回しの鍵なら init せずに unlock だけで鍵と filter が入る (実測)。 専用の鍵なら git-crypt init
+git-crypt unlock ~/.secrets/git-crypt.key
+# .gitattributes に対象の path を書いてから、 index の blob を入れ直す (属性を足しただけでは、 index の blob は平文のまま)
+git rm --cached -q <path>... && git add .gitattributes <path>...
+for p in <path>...; do git cat-file -p ":$p" | head -c 9 | grep -qa GITCRYPT || echo "PLAINTEXT: $p"; done   # 何も出なければ全部暗号文
+git commit -m "<対象> を git-crypt に切り替える" -- .gitattributes <path>...
+```
+
+- **確かめるのは 3 つ** — 手元の作業 tree が平文で読める / push した後の remote の blob が暗号文 (GitHub なら `gh api repos/<owner>/<repo>/contents/<path>?ref=<branch> -H 'Accept: application/vnd.github.raw' | head -c 9` が `\0GITCRYPT`) / 中身が切り替えの前の commit と同じ (`cmp <(git show HEAD~1:<path>) <path>`)。 読めるかの検査 (`scripts/check-gitcrypt-readable.py`) は、 前の 2 つのうち手元と、 commit 済みの blob を見る
+- **切り替えより前の commit の版は平文のまま残る** — 消すなら履歴の書き換え ([`sensitive-repo-patterns.ja.md#pattern-2-5`](sensitive-repo-patterns.ja.md#pattern-2-5))。 切り替えだけでは「今後の版を守る」 にしかならない
+- **他の機械の clone は、 pull すると対象の file が暗号文になる** — その clone で `git-crypt unlock <鍵>` (未 commit の変更が無い状態で)。 pull だけでは解錠されない (解錠するのは `setup.sh` の git-crypt の段) = それまで、 その機械の読めるかの検査が LOCKED と出す
+- 対象を名の形 (`sessions/*/*.json` など) で書くと、 後で同じ形の名前で置いた file も暗号化される。 script と説明の README は平文に残せる (暗号化すると、 鍵の無い人に手順が読めない)
+
 ## 別端末でのセットアップ
 
 1. 鍵ファイルを安全に転送（暗号化バックアップ、SSH 経由の直接コピー等）
@@ -103,13 +156,100 @@ cd my-sensitive-repo
 git-crypt unlock ~/.secrets/git-crypt.key
 ```
 
+## 共有リポでの自動復元 (`.claude/git-crypt-backup` 経路)
+
+共有 git-crypt 鍵を使う collaborative リポでは、**鍵バックアップを暗号化してクラウドストレージ (Dropbox / Google Drive / iCloud Drive 等) に置き、setup.sh で全自動復元**するパターンを推奨する。共同編集者が新端末でセットアップする時、Dropbox 内のフォルダ構造を覚えていなくても (= 共有フォルダのマウント先がデバイス間で違っていても) 動く。
+
+### 仕組み
+
+リポルートに `.claude/git-crypt-backup` ファイルを置き、暗号化バックアップの **ファイル名 (パスではない) を 1 行**で記載:
+
+```
+my-sensitive-repo.key.enc
+```
+
+新端末で `setup.sh` を実行すると、**Step 5b-pre** が以下を行う:
+
+1. 各リポの `.gitattributes` に `git-crypt` 設定があるかチェック
+2. `~/.secrets/<repo>.key` が既にあれば skip
+3. なければ `.claude/git-crypt-backup` のファイル名を読み、クラウドストレージ root を `~/Dropbox` 等から resolve (`scripts/dropbox-root.sh`)
+4. `find <storage-root> -maxdepth 5 -name "<filename>"` で暗号化バックアップを発見
+5. `openssl enc -aes-256-cbc -d -pbkdf2` で復号 (パスフレーズ入力のみ対話)
+6. `~/.secrets/<repo>.key` に配置 (mode 600)
+
+その後 **Step 5b** が `git-crypt unlock` を自動実行する。
+
+### 共同編集者向け運用
+
+このパターンを採用するリポでは、collaborator 向け README に以下を **必ず最優先で**記載:
+
+```bash
+# 推奨: claude-config の setup.sh で全自動復元 + unlock
+gh repo clone <your-config-repo>/claude-config
+cd claude-config && ./setup.sh
+# → パスフレーズプロンプトに答えるだけ
+```
+
+**手動 `openssl enc -d ...` を最初に書かない**。手動経路は「setup.sh の前提が崩れた時の最後の砦」として fallback 節に置く。理由:
+
+- 手動経路はクラウドストレージ内の literal path を覚えている必要があり、collaborator の環境で path がズレると file-not-found に陥る
+- placeholder 入りの中継ドキュメントを読んだ場合、prompt 上で誤展開されて誤った path で openssl を投げる事故が起きる
+- bad decrypt 時に exit code を確認しないと garbage を `~/.secrets/` に残し、後続セッションで「鍵があるが unlock 失敗」状態になり原因究明が長引く
+
+`setup.sh` Step 5b-pre は `find` で path 非依存にし、復号失敗時は warning を出してファイルを残さない。**手動 openssl では同等の防御を毎回書き直すコストがあるため、機械化された経路を最優先にする**。
+
+### セットアップ例 (公開しても安全な記述例)
+
+リポの README:
+
+```markdown
+## 共同編集者向けセットアップ
+
+**Quick start (推奨)**: `claude-config` の setup.sh で全自動。
+\`\`\`bash
+brew install git-crypt gh
+gh auth login
+gh repo clone <your-config-repo>/claude-config
+cd claude-config && ./setup.sh
+# パスフレーズは out-of-band で受領 (対面 / Signal 等)
+\`\`\`
+
+**手動セットアップ (fallback)**: setup.sh が動かない場合のみ。
+\`\`\`bash
+# 1. 暗号化鍵を Dropbox 共有フォルダから openssl で復号
+mkdir -p ~/.secrets
+openssl enc -aes-256-cbc -d -pbkdf2 \
+  -in ~/Dropbox/<shared-folder>/keys/my-repo.key.enc \
+  -out ~/.secrets/my-repo.key
+chmod 600 ~/.secrets/my-repo.key
+# 2. リポを clone + unlock
+gh repo clone <your-org>/my-repo
+cd my-repo && git-crypt unlock ~/.secrets/my-repo.key
+\`\`\`
+
+Dropbox の共有フォルダパスが手元と違う場合: `mdfind -name "my-repo.key.enc"` (macOS) で検索。
+```
+
 ## 鍵のバックアップ
 
 **鍵ファイルはデータを復号する唯一の手段。** 紛失してバックアップがなければ、GitHub 上の暗号化ファイルは復元不能。
 
 推奨プラクティス：
-- 暗号化したバックアップを別の場所に保管（クラウドストレージ、USB ドライブ等）
-- バックアップの暗号化には強いパスフレーズを使用
+- **控えはその機械の外に置く。** 同じディスクの別フォルダは控えにならない (機械ごと一緒に失う)。 別の端末から別のログインで開ける場所 (クラウドストレージ、 パスワード管理アプリ) か USB ドライブに置く
+- **クラウドストレージには暗号化した控えだけを置く。** 平文の鍵を置くと、 そのストレージを開ける人なら誰でも repo を復号できる。 上の「共有リポでの自動復元」 の控えと同じ方式でパスフレーズ暗号化する:
+  ```bash
+  /usr/bin/openssl enc -aes-256-cbc -pbkdf2 -salt -in ~/.secrets/<repo>.key -out <クラウドのフォルダ>/<repo>.key.enc
+  ```
+  パスフレーズはそのストレージの外 (パスワード管理アプリなど) に置く。 控えの file 名 (path ではない) を repo の `.claude/git-crypt-backup` の 1 行目に書き、 その file は平文にしておく (`.gitattributes` に `.claude/git-crypt-backup !filter !diff`)。 別のマシンでは `setup.sh` (Step 5b-pre) がクラウドのフォルダから控えを探し、 パスフレーズを聞いて `~/.secrets/<repo>.key` に置く
+- **文字列のままの控えはパスワード管理アプリにだけ置く** (中身を暗号化して保管する): macOS は `base64 -i ~/.secrets/<repo>.key | pbcopy` (Linux は `base64 -w0 ~/.secrets/<repo>.key`)。 貼り終えたらクリップボードを `pbcopy < /dev/null` で空にする
+- **頼る前に、 控えから戻せることを確かめる。** 次の往復は秘密を何も印字しない。 暗号化した控えなら:
+  ```bash
+  /usr/bin/openssl enc -aes-256-cbc -d -pbkdf2 -in <控え>.key.enc | cmp - ~/.secrets/<repo>.key && echo match
+  ```
+  文字列の控えなら `base64 -D -i <控えの file> | cmp - ~/.secrets/<repo>.key && echo match` (Linux は `base64 -d <控えの file>`)。 「控えを作った」 と「控えを開ける」 は別の主張 ([`secret-handoff.md#backup-round-trip`](../conventions/secret-handoff.md#backup-round-trip))
+- **戻し方**: `setup.sh` を走らせる (`.claude/git-crypt-backup` を使う)。 手で戻すなら `/usr/bin/openssl enc -aes-256-cbc -d -pbkdf2 -in <控え>.key.enc -out ~/.secrets/<repo>.key` で復号し、 openssl が成功したときだけ `chmod 600 ~/.secrets/<repo>.key` を打つ。 失敗したら、 できた file を消してからやり直す (復号に失敗すると、 鍵のように見えて使えない中身が残る)。 文字列の控えは `base64 -D -i <控えの file> -o ~/.secrets/<repo>.key`
+- **控えの場所 (値ではなく場所だけ) を、 鍵なしで読める所に書いておく** (例: その repo の平文の `CLAUDE.md`)。 暗号化した側に書いたメモは、 必要になったときに読めない ([`secret-handoff.md#do-not-store-inside-the-lock`](../conventions/secret-handoff.md#do-not-store-inside-the-lock))
+- **平文の控えを一度でもクラウドに置いたら、 そのサービスの「削除済み」 からも消す。** クラウドのサービスは、 消した file をしばらく復元できる形で残している
 - 定期的に復元テストを実施
 
 ## トラブルシューティング
@@ -138,3 +278,41 @@ Step 5b は以下の両方が揃った場合のみ実行される：
 - `~/.secrets/git-crypt.key` が存在する
 
 どちらか一方でも欠けていればサイレントスキップされる。
+
+### <a id="blame-reads-ciphertext"></a>暗号化した file で `git blame` が暗号文を読む (行がいつ入ったかを引くとき)
+
+git-crypt で暗号化した file に `git blame -L <行>,<行>` を当てると、 blob の暗号文を行に割って読む = 行番号も中身も平文と合わない (`file … has only N lines` で止まる、 または文字化けした行が出る)。 `--textconv` を付けても同じ (実測)。
+
+行がいつ入ったか・最後にいつ変わったかは pickaxe で引く:
+
+```bash
+git log -S'<その行の特徴的な部分>' --format='%h %ad' --date=short -- <file> 2>/dev/null
+```
+
+- textconv (git-crypt の diff driver = 平文に戻す) は既定で効く = 平文の文字列で探せる。 `--no-textconv` を付けると暗号文を探して 0 件になる = 「その文は履歴に無い」 と読まない (実測)。
+- 暗号化を入れる前の平文の古い版があると、 版ごとに `git-crypt: Warning: file not encrypted` が stderr に出て結果が埋もれる = `2>/dev/null` を付ける。
+- `-S` は文字列の出現回数が変わった commit を新しい順に並べる = 最後の行がその文の入った commit。 回数の変わらない移動は見えない。
+- `git show <rev>:<path>` が暗号文を返すのと同じ根 (下の節の corollary)。
+
+### `git diff --stat` が encrypted file を「Bin N -> 0 bytes」 と誤解させる表示
+
+git-crypt 暗号化対象 file (= `.gitattributes` で filter=git-crypt 指定) が working tree clean 状態でも `git diff --stat` で「`Bin 22 -> 0 bytes`」 等の差分があるように表示されることがある (= 特に `.gitkeep` 等の空 plain content を持つ file)。
+
+**真因**: git-crypt の clean/smudge filter は encrypt 時に header + IV を付与するため、 plaintext 0 byte の `.gitkeep` は encrypted 22 bytes になる。 `git diff --stat` は表示時に **HEAD stored size (= encrypted 22) と working tree decrypted size (= 0) を mix 比較** する UI 挙動で、 あたかも差分があるように見える。
+
+**確認方法**:
+```bash
+git status                                    # ← clean (= 実態は stage 差分なし)
+ls -la <file>                                 # ← 0 byte (= working tree 実体)
+git cat-file -p HEAD:<file> | wc -c           # ← 22 (= HEAD stored encrypted size)
+git-crypt status <file>                       # ← encrypted ✓
+git add <file> && git status                  # ← stage されない (= SHA 同一)
+```
+
+**実害**: なし。 `git status` clean + `git add` で stage されない = git は content 同一性を SHA で正しく判定している、 `--stat` の表示 UI のみが mix 表示で誤解を招く。
+
+**corollary (= committed 版の field 比較には `git show` を使えない)**: `git cat-file -p HEAD:<file>` / `git show <rev>:<path>` は git-crypt'd file に対して **ciphertext を返す** (= clean/smudge filter は working tree ↔ blob 変換でのみ走り、 `git show <rev>:` 出力には適用されない)。 → committed 版の plaintext field を parse して working tree と比較する (= 例: live API test の token-refresh で drift した OAuth credential の durable `refresh_token` が不変かを確認) ことは `git show` では**不能** (= UnicodeDecodeError)。 こういう時は git diff に依存せず semantics (= 標準的 OAuth access_token refresh は refresh_token を rotate しない) で判断し、 ephemeral drift は `git checkout --` で破棄する (= MCP server を live test する場合の手順は [`conventions/mcp.md` runbook §1](../conventions/mcp.md#runbook-handshake-check))。
+
+**RCA reflex**: sweep / audit で「想定外の bin diff」 を観察したら、 まず上記 5 step で「git-crypt encrypted file の表示挙動」 を rule out。 「leak / corruption / 別 session の touch」 と reflex 結論しない (= [`conventions/debugging-discipline.md §9`](../conventions/debugging-discipline.md#mcp-zero-result-not-absence) 「count return 0 reflex」 と同 trait family の git-diff display domain での現れ)。
+
+**実例 (= 2026-05-26 観察)**: ある講義運営 repo の 12 file の `.gitkeep` (= 各 `exams/`, `grades/` 配下) が複数の sweep で「`Bin 22 -> 0 bytes`」 と一斉に表示、 working tree clean + git-crypt encrypted の状態だった。 上記 5 step で transient = leak / bug でなく git-crypt 表示挙動と判明。

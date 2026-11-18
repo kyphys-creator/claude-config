@@ -1,0 +1,741 @@
+<!-- doc-meta
+when: bug fix を提案する前・audit verdict を出す前 (検証規律) + CI が red のとき (= red streak の起点と原因 commit を探す・手元で Linux CI を再現する、 §17) + 外部 GUI app / daemon / browser の復旧で start・open・restart・retry を提案または実行する前 (= #recovery-state-dispatch) + 直しの前後の CPU・速さを比べて効果を示すとき (= #side-by-side-before-after) + 「時間がかかりすぎた」 の原因を調べるとき (= #delay-rca-critical-path) + 他の app が開いている SQLite (WAL) を読む道具を書く・直すとき、 読み取り専用で `unable to open database file` が出たとき (= #reading-live-app-sqlite)
+category: infra
+summary: Fix 提案の 3 verification (V1 numeric trace + V2 code coverage + V3 algorithm enumeration)、 audit verdict re-evaluation、 multi-commit drift sweep、 sibling violation sweep、 dry-run/introspection facility 優先 (§6)、 Claude 自身を容疑者から外す .jsonl grep 手法 (§7)、 症状 forensics 前に既存 doc を grep (§11)、 再現≠検証 = 決定論的/撤回済 artifact の provenance 確認 (§12)、 性能修復は measure-first + 出力等価性 (= 受け入れ diff の前に noise floor を測る / 旧版は同じ dir に別名で置いて並走) + 決定的並列化 + #run-scoped-cache = 鮮度が価値の検出器 fleet の cache は TTL でなく run に閉じる 〔TTL は新着を silent に隠す〕 (§15)、 機能の回復は調査終了の条件でない = 症状が「余剰」 型だと retry で直った瞬間に原因が再発源に残る + origin 不明の残骸は恒常 noise 化して調査 trigger を失う (§16)、 復旧は起動命令の反復でなく事前状態別 dispatch = healthy は reuse / 接続異常は reconnect / stopped だけ launch / context 不一致は explicit switch / unknown は fail-loud (#recovery-state-dispatch)、 CI の red streak は起点から遡る = 着手前に最新 run を再照会 / 最後の green → 最初の red (run は push 単位) + pickaxe で導入 commit / 使い捨て clone × native・GNU userland × 空 HOME の行列で再現 / 無言の assertion を自己申告型に / 常時 red は情報を運ばない / #flaky-is-a-symptom = 「flaky」 は診断名ではない 〔再実行で緑でも原因を見るまで閉じない。 疑う順 = 値の中身・順序/時刻・環境差・資源。 `--log-failed` は抜粋なので完全ログを取る〕 (§17、 scripts/ci-red-streak.py・scripts/ci-local-repro.sh)
+-->
+# Debugging discipline
+
+Bug fix 提案を 「root だ」 と確信する前に通すべき audit と、 fix 採択後の drift 防止規律。 Claude が fix 提案を生成する際の reflex として universal applicable。
+
+LorentzArena Bug 14 完全治療 (2026-05-06) の spiral で複数の fail-recover round を経験した経緯から、 個人の personal layer にあった個人特有の規律のうち universal な核を抽出 promote (= personal layer は owner 管理 / collaborator は access 不要)。
+
+---
+
+## <a id="fix-verification-3-axis"></a>1. Fix 提案の 3 verification (= L4-L5 + numeric trace + code coverage)
+
+**ルール**: fix 提案を 「root だ」 と確信する前に **3 verification** を全て通す。 全 pass まで commit / approval / 「root 確定」 NG。
+
+| # | Verification | 内容 |
+|---|---|---|
+| **V1 (semantic + numeric)** | Semantic / scenario trace | L4 (= 概念モデル / 設計柱と矛盾なし) + L5 (= 数値解析的安定性 / 不変条件) で root を identify、 全 case scenario で実数値 / 状態 trace、 corner case 破綻 (= over/under count、 race、 boundary 不整合) が無いか |
+| **V2 (code coverage)** | 「既存が handle 済」 主張 verify | pattern match で済まさず **actual code を読んで scenario trace で coverage 確認**、 grep + 関数 read + walk-through で想定 path = actual path を confirm |
+| **V3 (algorithm enumeration、 L5 fix のみ)** | 代替 algorithm 網羅 | L5 fix で「substep / cap / clamp」 系 workaround を提案したら、 **代替 algorithm 全列挙** (= explicit / implicit / analytic / symplectic / RK4 / substep) して 1st choice の正当性 confirm。 線形 ODE は通常 closed-form で解ける、 substep は workaround で root ではない (= 詳細: [`scientific-computing.md` explicit-integrator-instability](scientific-computing.md#explicit-integrator-instability)) |
+
+「conceptually clean」 「既存 mechanism handle するはず」 はいずれも **未検証の仮説**、 user / 自己が「ad hoc 感」 を覚えたら 3 verification を反射的に走らせる trigger。
+
+### 自己 audit signal (= 絆創膏 sign 早期検知)
+
+提案 fix が下記のどれかの形をしていたら絆創膏 sign:
+
+- 「**...if X > threshold then truncate / clamp**」 (= cap 系絆創膏)
+- 「**...add Y listener to catch X case**」 (= listener 系絆創膏)
+- 「**...reset state on Y event**」 (= reset 系絆創膏)
+- 「**...switch implementation A to B to side-step the problem**」 (= 別実装で逃げる)
+- 「**Y で X case を fall back**」 (= mechanism overload signal、 別 mechanism Z の natural class fit を inventory walk で identify)
+
+「意味論レベルで何が ill-defined か」 「数学的に何が不安定か / どの不変条件が破られているか」 を答えられないなら L4-L5 まで掘り切れていない。 V1 で refinement 試行が他 case を破壊するなら closed-form root にならない signal、 別 approach (= 別 mechanism / 別 type 識別) に移る。
+
+### How to apply
+
+1. fix 提案直後に **scenario list (5-10 個)** + 各 case の数値 / 状態 trace で V1。 L5 fix なら **代替 algorithm 全列挙** (= V3) で 1st choice の正当性 confirm
+2. 「既存 X が Y を handle」 主張を含むなら V2 で `grep -n` + 該当関数 read + scenario walk-through、 想定 path が actual code path と一致 confirm
+3. V1 + V2 (+ V3 if applicable) 全 pass まで commit / approval / 「root 確定」 NG
+
+### Cross-level meta-principle
+
+- **データ層 structural separation** (= 異なる事実は異なる storage、 「同じ概念を複数 ref に置かない」 系 rule) は state design の話、 V2 とは別軸
+- **Mechanism 層 structural separation** (= 「Y で X case を fall back する」 → Y 過負荷 signal、 別 mechanism Z の natural class fit を inventory walk) は responsibility design の話、 V1 self-audit signal の一部
+- **Assumption 層 verification** (= V2) は coverage 主張の verify 軸、 「pattern match での mechanism class 推論」 と「actual code path 確認」 は別作業
+
+---
+
+## <a id="audit-verdict-reeval"></a>2. Audit verdict 「正当化済」 は user 質問で再評価
+
+**ルール**: audit / 4 軸 sweep / 設計 review で 「正当化済」 「scope 外」 「fully closed」 と verdict を出した後でも、 user の epistemic skepticism signal (= 「絆創膏に見える」 「原理的におかしくない?」 「もう一度深く」 「ad hoc では?」 「本当?」) を受けたら、 **verdict を reset して 3 verification を再 trigger**。
+
+「正当化済」 verdict は user 質問で **無効化**、 deeper layer の存在可能性を再 audit。
+
+### Why
+
+「conceptually clean」 や 「pattern match で類似」 で audit が通過しても、 user の実装 / 物理 / 設計感覚は別軸の signal を捉えている可能性が高い。 user pushback を反射的に rationalize したり 「scope 外」 と再判定したりせず、 **「verdict 無効化 → 3 verification 再 trigger」 の reflex** を作る。
+
+複雑な debug session では 1-shot で root に到達するのは例外、 multi-round spiral が norm。 各 round で 「これは root だ」 verdict を出していても user pushback で更に deeper layer 発見することが多い。 reflex 化された 3 verification 再 trigger が必須。
+
+### How to apply
+
+- audit verdict を出した直後の user comment は反射的に skepticism signal として扱う
+- 「絆創膏に見える」 「原理的におかしい」 「もう一度深く」 等を受けたら、 「では V1 V2 V3 全部回し直そう」 と即応する
+- **rationalize しない** (= 「これは scope 外」 「これは clean」 等で push back を defuse しない)
+- 「もう変わらない?」 と user に尋ねられても 1 round 余計に push して back-checked V1 V2 V3 で再 confirm してから返事
+
+## <a id="relay-detector-as-judgment"></a>2b. 検出器の判定は、 判定として伝える — 事実として言い切る前に一次の source を 1 回引く
+
+**ルール**: 見張り・一覧・surface の行 (「未登録」「未返信」「期限超過」「不在」) を user に伝えるときは、 検出器の判定であることが分かる形で伝える (「見張りでは未登録と出ています」)。 「〜は入っていません」 と事実として言い切るのは、 一次の source (カレンダーなら API で 1 回 list、 メールなら thread を 1 回読む) を引いて確かめた後だけ。
+
+### Why
+
+検出器は、 照合の相手の写しの範囲がずれる ([`../docs/convention-design-principles.md#comparison-window-alignment`](../docs/convention-design-principles.md#comparison-window-alignment))・取得が失敗して空になる ([`#silent-probe-false-healthy`](../docs/convention-design-principles.md#silent-probe-false-healthy)) と、 正常なものを異常として出す。 判定をそのまま事実の文に言い換えると、 検出器の誤りが agent の断定に格上げされ、 user は agent の誤りとして受け取る (実測: 見張りの「未登録」 を事実の文で伝え、 登録済みだったと指摘されて、 見張りの照合の範囲のずれが分かった)。 一次の source を引くのは 1 コマンドで済むことが多い。
+
+### How to apply
+
+- 伝える文の主語を検出器にする (「見張りでは」「一覧では」)。 次の一手の提案 (「入れましょうか」) も、 確かめていないうちは条件つき (「入っていなければ」)
+- 一次の source を 1 回引けるなら、 伝える前に引く。 食い違ったら、 user に伝えるのは一次の source の方で、 検出器の誤りは直す対象として扱う
+
+---
+
+## <a id="multi-commit-sweep"></a>3. Multi-commit refactor で 4 軸 sweep + docstring drift
+
+**ルール**: 連続 commit 後の最終 push 前に 4 軸 sweep (= [`CONVENTIONS.md §3`](../CONVENTIONS.md)) を回し、 **docstring と実装の drift** を必ず捕まえる。 commit 単位では一貫していても session 横断で docstring が stale 化することがある。
+
+4 軸: 整合性 / 無矛盾性 / 効率性 / 安全性。
+
+### 特に注意するべき drift pattern
+
+- **constant 名の言及** が複数ファイルに散在、 1 commit で改名 / 削除した後の他ファイルの言及が stale
+- **数値 (= performance characteristics、 build value、 test count 等)** が SESSION / docs / commit message で drift
+- **section 名 / numbering** の参照先が rename / renumber で broken
+- **「現状こうなっている」 系の説明** が refactor で stale 化、 「✓ 現行」 / 「✗ 撤廃済」 marker で設計史保持しつつ更新
+
+### How to apply
+
+- multi-commit session の最終 push 前に必ず:
+  1. `git log --oneline <last-record>..HEAD` で commit 列挙
+  2. `git diff <last-record>..HEAD` 全体に対し PII / 私的情報 / private repo 名の grep
+  3. 触ったファイルの cross-reference 整合性 grep (= 数値定数 / section 名 / file path)
+  4. typecheck + tests 実行
+  5. drift 発見時は即修正 commit、 sweep を skip して push しない
+
+詳細: [`CONVENTIONS.md §3`](../CONVENTIONS.md)、 [`docs/sensitive-repo-patterns.ja.md §パターン 5-3`](../docs/sensitive-repo-patterns.ja.md)。
+
+---
+
+## <a id="sibling-audit-on-violation"></a>4. Rule violation 1 件発見 → sibling audit 即時実施
+
+**ルール**: structural rule (= state 単一化、 4 層モデル、 命名規約 等) で **1 件 violation を発見** したら、 同 session 内に同 rule の他 sibling violations を即時 sweep。
+
+「単独事例」 と扱わない、 systemic pattern の signal として全件捜索。
+
+### Why
+
+structural rule の違反は同 codebase / 同型コード設計で **再生産される**。 1 件発見した時点で他にも存在する確率が高い。 「気付いた 1 件だけ直して終了」 すると残存 sibling が future contributor を mislead する。
+
+具体例:
+- state 単一化 (= 「同じ概念を複数 ref に置かない」) の violation 1 件発見 → 同 codebase で類似 dual-state pattern 兄弟 sweep
+- 4 層モデル layer 違反 1 件発見 → 同 repo 内全 cross-layer reference grep で他 violations も発見、 同 commit で全件修正
+- **2026-05-10 claude-config self-audit**: `hooks/memory-guard*.sh` の deny message に `odakin-prefs/` literal 1 件発見 → 同 session で hooks → scripts → setup.sh と段階的に sweep を broaden、 結果 sibling 20+ 件 (= `git-state-nudge.sh` の runtime emit、 `public-precommit-runner.sh` 等 3 scripts の hardcode、 `setup.sh:863` の `SECRETS_REPOS` hardcode + comment 言及) を 6 commits + 個人層 1 commit で全件 closure。 narrow scope (= memory-guard 2 件) で stop していたら sibling は次 session 以降に発見 / 残存リスク。 broadening pattern: surface ごと (= hooks → scripts → setup.sh) に「同 class があるか」 を順次問う。 関連 universal 原則: [`docs/convention-design-principles.md §12`](../docs/convention-design-principles.md#monitoring-list-scope-marker) (= 監視 list の scope marker = 暗黙 scope blind spot を防ぐ doc 規律)
+
+### How to apply
+
+- rule violation 1 件発見時点で、 同 session 内に sibling sweep を schedule
+- sweep 手段: `grep` で同型 pattern を全 codebase 検索、 violation list 作成、 全 fix を同一 PR / commit に集約
+- sibling sweep を defer すると同 violation が再発、 session を跨いで残存
+
+### Fix 時 sibling sweep (= 2026-05-25 RCA 追加: violation 発見時だけでなく fix 時にも sweep 義務)
+
+**ルール拡張**: 上記は「violation 発見 → sibling 即 sweep」 だが、 **fix 自体を narrow scope で済ませて sibling を残置する failure mode** が独立に存在。 fix 適用時にも「同 fix が他 sibling に適用できるか」 を sweep する。
+
+**Why**: 「flagged された 1 件を fix」 だけで止まると、 同 trait family の sibling default / sibling pattern が **未 flagged のまま残存** し、 別 unit system / 別 context で symptom が顕在化する遅延発見 cycle になる。
+
+**実例 (2026-04-20 → 2026-05-25 の約 5 週遅延発見)**: [`scientific-computing.md` scale-dependent-default](scientific-computing.md#scale-dependent-default) の `TauSqMax` scale-blind default fix を 2026-04-20 に commit。 同 fix で `TauSqMax` を scale-adaptive 化したが、 **同 file 同 function の `MuRange` default (= `{Min[xs]-10, Max[xs]+10}` = 同形式 scale-blind)** を sweep しなかった。 約 5 週後 (2026-05-25) 別 unit system (= 無次元の量) で margin 10 が data spread の 100 倍以上過大 → posterior peak under-resolved → SE が数十 % inflated として symptom 顕在化。 fix-time に同 file の sibling default を grep していれば同 commit で防げた。
+
+**How to apply (= 通常 fix workflow に追加)**:
+
+- fix を decide した直後 (= patch を書き始める前)、 fix 対象の **同 file / 同 function / 同 関数族** を grep で sweep:
+  - 同 anti-pattern keyword (= 上 例なら literal `- 10` や `1000` の scale-blind constant) で grep
+  - 同型 default 構造 (= `default = constant`) で grep
+  - 同 function family の他 option で同 issue 候補列挙
+- 発見した sibling は **同 commit で同時 fix** (= 「別 commit で defer」 は次 session で reflex skip され silently 残存する — 上の実例では約 5 週)
+- defer する場合は **explicit marker** (= 「TODO: same defect at line X, defer to next commit because Y」) を fix file 内に書き、 session 内 follow-up を guarantee
+
+**Anti-pattern**:
+- ✗ 「flagged された 1 件だけ fix、 他は別 task で」 (= defer reflex で残置)
+- ✗ fix 適用後に「同 file の他 instance がないか」 を grep skip (= narrow scope closure)
+- ✗ commit message に「foo を fix」 と書くが「他 sibling は不明」 と sweep 状態を明示しない
+
+<a id="same-mechanism-sweep"></a>**機構で束ねる sibling sweep (= 2026-09-25 追記: 症状の名前でなく、 同じ機構が他に何を壊したかを数える)**: RCA が報告された症状 (例: 「checkbox が消えた」) の名前で検査を組むと、 **同じ機構 (例: ある library の保存) が同じ file から落とした別の物** (図形・標題・画像・数式の cache) は見えない。 実測: 1 つの保存で 22 個の form control と 9 部の図形が同時に消えていたのに、 checkbox の数だけを数えた RCA は図形の消失を見ず、 後に別の症状として別の RCA が立った。 → RCA の型に 1 段を足す: **「同じ機構・同じ経路で、 他に何が消えた・変わったか」 を、 症状の名前を持たない数え方 (部品と要素の数の差) で 1 回出す**。 名前を知らない種類の損失も「数が減った」 として現れる (Office file の instance = [`office-automation-principles.md#extending-the-catalog`](office-automation-principles.md#extending-the-catalog) 1 / [`form-case-pipeline.md#fidelity`](form-case-pipeline.md#fidelity))。 sweep の単位は「repo」 でなく「機構 × 対象」 = 同じ機構が別の repo の同じ様式を通っていれば、 そこまで掛ける ([`office-automation.md#cross-repo-sweep`](office-automation.md#cross-repo-sweep))。
+
+**meta-meta**: 本 §4 拡張 = §4 主旨 (= violation 発見 → sibling sweep) を **fix 時 timeline にも適用**。 violation 発見 → sibling A 認識 → A を fix する commit を書く際、 sibling B/C/D を再 sweep。 「発見 sweep」 と「fix sweep」 は別タイミングで両方必要。 narrow fix の自己強化 cycle (= 1 件 fix で「片付いた感」 が出て次の sweep を skip する) を防ぐ。
+
+---
+
+## <a id="plan-file-lifecycle"></a>5. Plan ファイル lifecycle = multi-doc atomic operation
+
+**ルール**: plan file (= `plans/YYYY-MM-DD-*.md` 等の session を跨いだ将来の自分への message を encode する artifact) を新規作成 / 大幅 supersede する commit には、 同 commit 内で以下を全て含める:
+
+1. plan file 本体 (= 新規 / 改訂)
+2. **SESSION.md (or 等価な session pointer file) の Active plans 等の発見可能な section に link 追加**
+3. **supersede 関係があれば双方向 marker**:
+   - 新 plan §1 / 冒頭付近に 「**Supersedes:** [old plan link]」
+   - 旧 plan の該当 section 冒頭に 「**⚠️ Superseded by:** [new plan link]」
+   - 旧 plan の 「実装済」 narrative を 「supersede 済 (= 撤回予定)」 narrative に修正
+
+「plan file 単独」 を 1 commit にしない。 plan file は **discoverability mechanism (= SESSION.md mention) と双方向 supersession marker** と組で初めて 1 単位、 単独 commit は半製品。
+
+### Why
+
+plan file は session を跨いだ将来の自分 (= 別 Claude session) への message を encode する artifact。 物理的に commit + push されていても、 **次 session が SESSION.md / 等価 pointer から発見できなければ存在しないのと同じ**。
+
+事故例 (= LorentzArena 2026-05-06): plan A §6.5 (b) を supersede する独立 plan B を新規作成、 plan B 単独で commit + push、 SESSION.md は plan A への link のみ、 plan A 本文も 「✅ implement 済」 narrative のまま → 次 session が SESSION.md → plan A の chain で navigate して plan B に到達経路無し、 plan A の narrative を信用して 「もう完了」 と誤認、 plan B 不可視化。
+
+根本原因: plan lifecycle の atomicity 違反。 「ファイル commit したから完了」 と effort-reduce、 plan が機能する discoverability layer (= SESSION.md mention + supersession markers) と同期されていない。
+
+### How to apply
+
+- plan 新規 / supersede commit の self checklist:
+  1. ✅ plan file 本体
+  2. ✅ SESSION.md / 等価 pointer file の Active plans section に link 追加
+  3. ✅ supersede 関係あれば forward marker (= 新 → 旧) + backward marker (= 旧 → 新) 双方
+  4. ✅ 旧 plan の narrative を supersession を反映する形に修正 (= 「実装済」 → 「supersede 済」 等)
+
+- **Stop signal = sweep trigger reframe**: user の 「終わろう」 「もう完了でいい?」 は **effort 削減指示ではない**、 4 軸 sweep + multi-doc atomicity check 開始の signal と read する。 commit + push だけで終了せず、 lifecycle invariants を回す。
+
+- **機械的 enforcement (= 将来の hook)**: PostToolUse(Bash, command matches `git commit`) で `git diff HEAD~ --name-only` が `plans/*.md` 新規追加を含む場合に同 commit 内に SESSION.md (or 等価 pointer) 変更が無ければ warning。 false positive (= plan 修正のみの commit 等) は許容 (= 軽量 nudge、 hard block しない)。
+
+### §1 (3 verification) との関係
+
+Plan creation / supersede commit にも 3 verification を application:
+- **V1 (= scenario trace)**: 「次 session が SESSION.md から plan を発見できるか」 をシミュレート (= 自分が cold start で SESSION.md だけ読んで plan に到達できるか)
+- **V2 (= code coverage)**: 「SESSION.md / 等価 pointer に link あるか + 旧 plan の narrative 整合性」 を mechanical 検査
+- **V3 (= alternative algorithm enumeration)**: 「supersession ではなく旧 plan を update する選択肢ではないか」 を考慮 (= 別 file に出す valid reason は時間軸 / 視点軸の独立性、 単純 patch なら旧 plan 内 update が筋)
+
+---
+
+## <a id="introspection-facility-first"></a>6. Introspection facility (= dry-run / --force / --print-only / -n / --noop 等) を grep / code review より優先
+
+**ルール**: 容疑者として name 上がった script / tool / CLI が **dry-run-like introspection facility** を持つなら、 grep / code review / docstring 読み を skip して**先に実行** (= `--dry-run`、 `--force --dry-run`、 `-n`、 `--noop`、 `--print-only`、 `--what-if`、 framework によって `--plan` 等)。 実行ログが「**この script は何を touch するか**」 の ground truth、 code review は「**何を touch するつもりか**」 の intention でしかない。
+
+### Why
+
+code review は **静的、 author の意図と実装の一致を仮定**。 author の意図と実装が乖離する場合 (= bug、 stale docstring、 implicit branch、 dynamic dispatch、 hidden side-effect via library) を grep + 関数 read だけで全部捕まえるのは困難。
+
+introspection facility は **動的、 actual runtime behavior の simulation**。 「もし実行したら」 を実行せずに観測する verification path。 code review が「**probably this**」 を返すのに対し、 introspection は「**actually this**」 を返す。
+
+特に 「相関は強いが因果は code 上見えない」 ケースで決定的: code review 「無罪っぽい」 + correlation 「有罪っぽい」 で hung jury 状態のとき、 dry-run で actual touch list を見れば瞬時に解決。
+
+### Sample
+
+```bash
+# Script に dry-run 系 flag があるか確認 (--help / docstring grep)
+script.py --help | grep -iE 'dry|noop|print[- ]?only|what[- ]?if|plan'
+
+# あれば先に実行、 actual touch list を観測
+script.py --dry-run                    # 通常モード
+script.py --dry-run --force            # skip 系 (HORIZON / unconfirmed / past 等) を bypass
+script.py --dry-run --period A:B       # 範囲を絞って局所検証
+
+# 出力の "WOULD shift / WOULD delete / would touch" 行を観測、 期待外の対象が含まれるか
+```
+
+terraform `plan`、 ansible `--check`、 git `--dry-run`、 rsync `-n`、 make `-n`、 kubectl `--dry-run=client`、 dpkg `--dry-run`、 brew 系 `--dry-run` 等、 多くの CLI が標準装備。 自作 script で「何を touch するか不安」 と user が言う pattern は dry-run flag 標準装備の signal。
+
+### How to apply
+
+1. 容疑者 script / tool / CLI が judgement の中心になった時点で、 まず `--help` か docstring の引数列挙で introspection flag の存在確認
+2. あれば即実行、 ground truth として code review より優先採用
+3. なければ code review に fallback、 ただし「dry-run flag が無い script は author が dry-run の必要性を見落とした signal」 = 第二容疑度 up
+4. introspection flag を追加 / patch する PR が cheap なら、 verify と同時に PR 化
+
+### 反例 (= 検証で済まない場面)
+
+introspection が **存在しない / 信頼できない** ケース: 
+- C library / system call 系 (= dry-run なし、 strace / dtruss 等で trace)
+- API call の冪等性が不明 (= dry-run flag が server side まで届かない、 sandbox 環境推奨)
+- side-effect が non-deterministic / 環境依存 (= dry-run で trigger しない bug もある)
+
+これらは V1 (= scenario trace) + V2 (= code coverage) の伝統的 path に戻る。 但し introspection を **試す前に grep に戻る** のは効率損失。
+
+### <a id="tooling-that-lies-on-binary-and-non-ascii"></a>19. 検査を書くときの前提 — 標準 tool は binary と非 ASCII で静かに嘘をつく
+
+検査 script (= 何かの不在・健全性を主張する道具) は、 素の shell/git の既定挙動を信じると
+**黙って誤答する**。 実測で踏んだもの (2026-09-12、 いずれも「検査が全 repo を誤判定」 or
+「hook が全 commit を止める」 という形で顕在化):
+
+| 道具 | 既定の挙動 | 正しい書き方 |
+|---|---|---|
+| `grep "X"` | 入力に NUL が含まれると binary 扱いになり、 **一致しても報告しない**ことがある | byte 比較する (`head -c N \| xxd -p` と期待値を突き合わせる) |
+| `grep` / `sed` の `[...]` に非 ASCII | `LANG` が空 (C locale) だと byte の集合になり、**一致しないのに error を出さない** | python で書くか `LC_ALL=en_US.UTF-8` を付ける ([shell-multibyte-truncation.md#bracket-expression-c-locale](shell-multibyte-truncation.md#bracket-expression-c-locale)) |
+| `git ls-files` | 非 ASCII の path を **引用符 + 8 進エスケープ**で返す (`"docs/\346\227\245..."`) | `-z` で NUL 区切り、 `surrogateescape` で decode |
+| `git diff --name-only` / `git status --short` / `git log --name-status` | 同じ quote。 ⚠️ **帰結が誤検知より悪い** (2026-09-13): quote 付きの path を下流の検証に渡すと、 その path には差分が「無い」 ので検証は**空振りして PASS** する。 実測で `§` を含む 2 file が未検証のまま「検証済」 になり、 別の分類 (末尾が `.md"` = 「md 以外の変更」) で commit も黙って skip された | `-z` で取る。 **検証は対象ごとに「入力が在った」 ことを要件にする** (差分 0 行・対象 0 件は PASS でなく FAIL) |
+| `git diff --cached` を `text=True` で読む | staged に binary (画像 / tar) があると `UnicodeDecodeError` で **落ちる** | `errors="replace"` で decode する |
+| `$0` | 相対で渡されうる。 別 dir に `cd` してから再帰呼び出しすると壊れる | 冒頭で絶対化する |
+| 一括処理 script 内の `grep -c` / 存在 probe | 「0 件」 が「無い」 と「調べられなかった」 を区別しない | 判定不能を第 3 の状態として出す |
+
+共通するのは **「検査が誤答しても誰も気づかない」** こと — 検査の出力は普段 OK なので読まれない。
+∴ 検査には必ず **その検査自身の回帰 test** を付ける。 とくに:
+
+- **非 ASCII の file 名を含む fixture** (= 上の 2 行目で 6 repo が一斉に誤検知になった)
+- **binary を staged に置いた fixture** (= 上の 3 行目で、 その repo の commit が全部できなくなった)
+
+⚠️ **「誤検知の原因」 をサンプル数件で決めない。** 6,800 件の誤検知のうち最初に見た 12 件が
+すべて同じ原因だったため区切り線が原因と判断したが、 実際はその 1/3 で、 残りは別の 2 原因だった。
+**出どころ別に全件集計**して初めて分かる。 → [§18](#moving-baseline-comparison) の姉妹。
+
+関連: [`shell-multibyte-truncation.md`](shell-multibyte-truncation.md) (= 多バイトの切り詰め) /
+[`confidential-repo-boundary.md`](confidential-repo-boundary.md) (= これらを踏んだ検査群の設計)
+
+## 関連事故 / 検証例
+
+- **2026-05-12 calendar event 2 限消失** (個人 layer 内 private repo の SESSION.md に詳細記録): shift-worship-period.py が 2 限相関で容疑かかったが、 `--dry-run --force` で touch 対象が 4 件のみ (= religious_week の特定日付の event 4 件) と判明、 4-5 月 events は range 外 → 冤罪確定。 code review 30 分 vs dry-run 30 秒、 後者が決定的。 真犯人候補は Apple Calendar sync。
+
+---
+
+## <a id="claude-self-suspect-jsonl"></a>7. Claude 自身を容疑者から外す手法: `~/.claude/projects/*/*.jsonl` の tool_use grep
+
+**ルール**: 「過去の Claude session が悪さしたのでは?」 という容疑が浮上したら、 `~/.claude/projects/<project-hash>/*.jsonl` を grep して **過去の actual tool_use 履歴**を確認。 user の記憶 / 想像でなく、 実際の tool 呼び出し ledger が ground truth。
+
+### Why
+
+Claude Code は full session transcript を `~/.claude/projects/<project-hash>/<session-uuid>.jsonl` に local 保存している (1 行 1 record の JSONL)。 各 tool 呼び出しは `type: tool_use` record として残る。 「過去にこの tool を呼んだか」 は ledger を grep すれば deterministic に判定可能。
+
+user / Claude の memory は信頼性低い (= autocompact、 session 跨ぎ、 関連無しと判断して捨てる、 等)。 .jsonl 全件 grep は cheap (= 数百ファイル × 数 MB を 1 秒)。 「Claude が悪さした?」 という容疑は **頻繁** で、 cheap test path として常備すべき。
+
+### Sample
+
+```bash
+# 過去 session 全件で 特定 MCP tool の呼び出しを検索
+grep -l '"name":"mcp__calendar-cis__delete_event"' ~/.claude/projects/<project-hash>/*.jsonl
+
+# 全 calendar mutation を検索 (read-only を除外)
+grep -h '"type":"tool_use"' ~/.claude/projects/<project-hash>/*.jsonl \
+  | grep -E '"name":"[^"]*calendar[^"]*"' \
+  | grep -vE '"name":"[^"]*list_(calendars|events)"'
+
+# 特定 calendar (= classroom 系) を touch した tool_use を抽出
+grep -h '"input":{[^}]*"calendarId":"c_classroom' ~/.claude/projects/<project-hash>/*.jsonl \
+  | grep -E '"name":"[^"]*(delete|update|patch|insert|create)'
+
+# 件数だけ確認
+grep -h '"type":"tool_use"' ~/.claude/projects/<project-hash>/*.jsonl \
+  | grep -E '"name":"<suspect-tool>"' | wc -l
+```
+
+project-hash は `~/.claude/projects/` 直下の `-` 区切り path 表現 (= 例: `-Users-<user>-<project-path>`)。 `ls ~/.claude/projects/` で列挙。
+
+**発言を探すとき** (tool_use でなく、 user や assistant が何を言ったか。 例: 「前に決めたはず」 と言われて正本に記録が無い): [`scripts/search-agent-transcripts.py`](../scripts/search-agent-transcripts.py) が Claude Code と Codex (`~/.codex/sessions/**/*.jsonl` と、 アーカイブされた session の置き場 `~/.codex/archived_sessions/`。 Codex が古い記録を zstd で圧縮した `*.jsonl.zst` も展開して読む) の記録を横断し、 役割・agent・日付・session で絞り、 harness が差し込んだ文と Codex の重複を除いて、 時刻と前後の文を出す。 Codex の記録は大きく、 素の `grep -r` は時間切れになりやすい (実測)。 見つかった発言を決定として記録するときは、 誰の発言か (提案か、 決定か) を添える ([actor-attribution.md#statement-attribution](actor-attribution.md#statement-attribution))。 0 件は「このマシンの記録に無い」 だけを意味する (展開の手段が無くて圧縮した記録を読めなかったときは、 その本数が stderr に出る = その 0 件は記録の不在を意味しない)。 ⚠️ **Codex の記録を `*.jsonl` だけで grep / glob すると、 圧縮された記録を黙って飛ばして 0 件になる** (実測)。 <a id="transcript-search-archived-and-quoted"></a>⚠️ **Codex の記録を `sessions` だけで探すと、 元の発言は見つからず写しだけが当たる**: Codex はアーカイブした session を `archived_sessions/` へ移し、 別 session には前の会話が `[12] user: …` の形で貼られる。 写しの行は時刻も session も写した側のもので、 そこから「いつ誰が言ったか」 を読むと誤る (実測)。 道具は両方の dir を既定で読み、 写しの一致に「(写し)」 を付ける。 **書いた agent 自身の報告や tool の説明文は「指示に基づき」 と書くことがある**ので、 owner が何を指示したかは user 役の発言そのもので確かめる (実測)。
+
+<a id="transcript-screenshots"></a>**画面写真つきの報告を後から調べるとき** (「開けない」「表示が変」 に写真が添えられていた): 写真は transcript の user 行に base64 で入っているだけなので、 [`scripts/transcript-images.py`](../scripts/transcript-images.py) `<transcript か session id の先頭> --list` で写真の位置と**直前の assistant 発話**を並べ、 `--out <dir> --png` で取り出して見る (Read tool は webp を読めないことがある)。 **写真で確かめてから原因を書く** — 報告の言葉 (「リンクが開かない」) と実際に押したもの (リンクでなく、 リンクとして描かれた inline code だった) が違うことがある (実測)。 同じ transcript に **session の情報**も残っている: 各行の `cwd` (Bash の cd で変わる)、 `entrypoint` (frontend)、 `attachment.type == "environment"` の snapshot (`workingDirectory` = 最初の 1 件が session を始めたフォルダ、 `additionalWorkingDirectories`、 変化した field の `changes`)。 読み出しは [`scripts/lib/transcript_turns.py`](../scripts/lib/transcript_turns.py) の `session_root_and_cwds` / `session_additional_dirs` / `session_entrypoint` (tool call のたびに走る hook は、 先頭だけ読む `session_root_fast`)。
+
+### How to apply
+
+1. 「Claude が消した / 書いた / 上書きしたかも?」 容疑が user / 自己から提示されたら、 即 `~/.claude/projects/<project-hash>/*.jsonl` を grep
+2. **mutation tool だけ** に絞る (= `delete`/`update`/`patch`/`insert`/`create` 系)、 read-only の `list_*`/`get_*`/`read_*` は除外
+3. 0 件なら Claude を容疑者から外す (= 確信度: 高、 .jsonl ledger 全件で履歴無しなら呼んでない)
+4. 1 件以上なら record の `tool_use_id` + 周辺 message を読んで context 復元 (= どの session / どの user prompt が trigger したか)
+5. <a id="ledger-field-history-first"></a>**git で持つ台帳の欄が誤っている・欠けているときは、 欄の値を commit ごとに並べて、 どの書き手が何を消したかを先に特定する** — `git log --format='%h %ad %s | %(trailers:key=Agent-Session,valueonly)' -- <file>` で書き手を並べ、 `git show --textconv <commit> -- <file>` (git-crypt の file も平文で出る) で各 commit の欄の行の前後を読む。 依頼書や報告の「記録した側が直していない」 は、 この並べ方で確かめるまで仮説 (実測: 記録した側は欄に書いていて、 消したのは後の別の書き手の丸ごとの置き換えだった)。 書き手が分かったら、 その書き手の会話記録 (上の道具) で、 どの道具で・読み直してから書いたか記憶から書いたかを引く
+
+### 適用範囲
+
+- Claude Code (= `~/.claude/projects/`) を使う user 全員に applicable
+- Claude API 直接利用 / 他クライアント (= claude.ai web、 Claude for Mac の Chat) は別 storage、 同手法 NA
+- session 履歴の retention は default で残る、 削除規律あれば前確認
+
+### 関連事故 / 検証例
+
+- **2026-05-12 calendar event 2 限消失** (個人 layer 内 private repo の SESSION.md に詳細記録): 過去 Claude session が `mcp__calendar-cis__delete_event` を呼んだのでは? という容疑 3 つ目を 1 grep で潰した (= 全 session で 0 件、 read-only の `list_calendars`/`list_events` のみ)。 user の体感容疑は「shift-worship-period.py / Apple sync / Claude 自身」 の 3 つだったので、 各 1 件ずつ独立に潰す必要があった。 .jsonl grep は 3 個目を即時に潰す cheap test。
+
+---
+
+## <a id="no-pipe-interactive-script"></a>8. Interactive script (= URL 出力 + polling) を `| tail -N` 等の pipe と combine しない
+
+**ルール**: 「URL を stdout に出して user の手操作を待つ」 系 interactive script を `run_in_background` で起動する際、 `| tail -N` / `| head -N` / `| grep PATTERN` 等の pipe と combine すると **stdout が buffer に閉じ込められて URL が出力されない**。 unbuffered (= `python3 -u`、 `stdbuf -oL`、 `node` も default で line-buffer) + pipe なしで起動する。 注意: pipe だけでなく **plain redirect (`> file`) / `run_in_background` でも、 un-line-buffered な script は block-buffer する** (= 「pipe を避ければ安全」 は誤り)。 script を編集できるなら下記「Root fix」 (= stdout を line-buffer 化) が根本対処で `-u` を不要にできる。
+
+### Why
+
+`tail -N` は input が EOF に到達するまで output を出さない (= 「末尾 N 行」 を保証するため buffer 必須)。 `head -N` も同様。 interactive script は polling で永続実行 (= EOF 来ない) → user に URL が見えない → user が action 取れない → script は polling 続けて hang。
+
+加えて Python は stdout が pipe 接続だと block-buffer モード (= 4-8 KB ごとに flush) になる (= terminal 接続なら line-buffer)。 `print()` した URL が pipe の入り口で buffer に溜まり、 buffer 容量に達するまで flush されない。 unbuffered (`-u` flag) で line-buffer に強制すれば flush されるが、 受け側 (`tail`/`head`) が buffer する以上 user には届かない。
+
+### Sample
+
+```bash
+# ✗ NG: URL が buffer に閉じ込められて 何分待っても出力されない
+python3 scripts/fetch-with-picker.py 2>&1 | tail -30
+
+# ✓ OK: 直接実行、 stdout は file に書かれて流れる
+python3 -u scripts/fetch-with-picker.py
+```
+
+`run_in_background` の場合: output file を Read tool で直接読む / `cat` する。 `tail -f` 等 follow 系も interactive ではないなら可、 但し follow は EOF を待たないので script の polling と相性は OK (= follow と "末尾 N 行" は別 semantic)。
+
+### How to apply
+
+1. 「URL 出力 + polling」 「pickerUri」 「ブラウザで開いて完了押下」 等の interactive 要素を含む script は **pipe を一切 combine しない**
+2. Python 系は `-u` flag 付きで起動 (= line-buffer 強制、 file 出力でも line ごとに flush される)
+3. `run_in_background=true` で起動 → output file を直接 Read で取る
+4. 既に pipe で詰まったら kill して再起動 (= script 自体は無罪、 pipe の semantics が罠)
+
+### Root fix: script を自分で書けるなら stdout を line-buffer 化する (= `-u` を不要にする)
+
+上記の `-u` / 「pipe なし」 は **consumer 側の workaround** (= 呼び出すたびに正しく起動する知識に依存する)。 script を編集できるなら **root は script 側で stdout を line-buffer 化する** こと。 起動時 (main 冒頭、 最初の print より前) に:
+
+```python
+import sys
+try:
+    sys.stdout.reconfigure(line_buffering=True)   # Python 3.7+。改行ごとに flush
+except (AttributeError, ValueError):
+    pass
+# さらに block する直前 (= polling / input() の手前) に念のため明示 flush (二重化):
+sys.stdout.flush()
+```
+
+これで **plain redirect (`> log 2>&1`) でも `run_in_background` でも (pipe を combine しなければ) 即 flush** され、 `-u` を毎回付ける必要が消える (= 起動方法の知識に依存せず robust)。 `stdbuf -oL` / `node` の line-buffer default も同じ効果だが、 source を直せるなら script に焼き込むのが最も再発しにくい。
+
+**ただし 2 層あることに注意** — root fix で消えるのは ① の方だけ:
+
+| layer | 原因 | line-buffer 化で消える? |
+|---|---|---|
+| ① script 側 block-buffer | Python は stdout 非 TTY で block-buffer (file/pipe/background すべて) | **消える** (script を line-buffer 化すれば) |
+| ② reader 側 buffer | `\| tail -N` / `\| head -N` が EOF まで出力を保持 | **消えない** (consumer の semantics、 script 無関係) |
+
+→ line-buffer 化した script でも `| tail -N` / `| head -N` に pipe したら URL は出ない。 「interactive-polling script を tail/head に pipe しない」 原則は root fix 後も残る。
+
+⚠️ **「pipe を避ければ安全」 は誤り**: ① は pipe 不在でも発生する。 un-line-buffered な Python script を `> file 2>&1` (pipe なし) や `run_in_background` で起動しても pickerUri は block-buffer に滞留する。 root fix (line-buffer 化) か `-u` の **どちらかが必ず要る**。
+
+### 関連事故
+
+- **2026-05-26**: `fetch-board-photos.py` (= Google Photos Picker workflow) を `python3 scripts/fetch-board-photos.py 2026-05-22 2>&1 | tail -30` で起動、 pickerUri が buffer に閉じ込められて user に届かず、 script は polling で永遠 hang。 kill + `python3 -u ... ` (pipe なし) で再起動 → 即 URL 出力 → user が完了押下 → 正常終了。
+- **2026-06-08**: 同 `fetch-board-photos.py` を `run_in_background` + plain redirect (`> log 2>&1`、 **pipe なし**) で起動 → pickerUri が出力されず 120s+ hang。 §8 の旧 framing が pipe 中心だったため「pipe を使っていないから安全」 と誤認したのが穴。 真因は ① (= plain redirect でも Python が block-buffer する)。 `-u` で一旦凌ぎ、 その後 script の main 冒頭に `sys.stdout.reconfigure(line_buffering=True)` + poll 直前 flush を入れて root fix 化 (= 上記)。 plain redirect (`-u` なし) で pickerUri が約 3s で出力されることを再現確認。
+
+---
+
+## <a id="mcp-zero-result-not-absence"></a>9. MCP / API の count return「0」 / 「期待と違う検索結果」 を reflex で「想定外」 と結論しない (= 「単一情報源の null result を結論に飛躍させない」 trait family の MCP / tool 健全性 domain)
+
+**ルール**: MCP tool / API 呼び出しの count-style return (= `added=0`、 `affected_rows=0`、 `total: 0`、 list が空、 etc.) や「期待と違う検索結果」 を見て即座に「想定外」 「未発生」 「未登録」 「存在しない」 と reflex 結論しない。 その 0 / 結果が「true な空」 か「正常 dedup / filter による empty」 か「**tool が間違った接続先 (account / endpoint) を見ている**」 かを **別 query で 1 path 必ず cross-check** する。 特に user が「絶対あるはず」 と確信を示したら、 source 不在より先に tool 健全性を疑う。
+
+### Why
+
+count return「0」 / 「期待と違う中身」 は 3 つの distinct な状態を同じ表面値で返す:
+- (a) **真の不在**: source 側に entry がない (= 学生が提出していない、 entry が作られていない)
+- (b) **正常 filter 結果**: source 側に entry がある + script の dedup / filter / state 判定で既知 / 対象外と判定された結果 (= 既に sync 済で重複 add なし、 filter 条件に hit しない、 state 不適合で skip)
+- (c) **tool が間違った接続先 (account / endpoint / dataset) を見ている**: MCP / API token が期待と別の account を指している、 endpoint が別 dataset を返している等。 0 だけでなく「らしくない中身」 (= 期待と違う account の data ばかり返る) のが signal。 (a)(b) と違い **tool 自体の健全性の問題**で、 source 側をいくら調べても解決しない。 user が「絶対ある」 と確信を示す場合の典型 root cause
+
+(a) で reflex 結論 → (b) で誤判定の 2 重 cost: (1) user に「想定外」 を伝えて余計な調査を発生させる、 (2) 真の dedup 判定を error と誤認して fix を試み 健全な script を壊す。
+
+これは **「単一情報源の null result を結論に飛躍させない」 trait family** (= web 検索 / gmail 検索 の null result が domain) の、 MCP / API tool 出力 domain への現れ。 本 §9 は MCP wrapper / sync script の count return が domain。
+
+### How to apply
+
+1. count-style return「0」 / 「added=0」 / 「empty list」 / 「期待と違う中身」 を観察した瞬間に「これは (a) true 不在か (b) dedup 等正常結果か (c) tool が間違った接続先を見ているか?」 を必ず問う
+2. 即座に **より低 level な query** で cross-check (= MCP 経由なら raw API 直接 query、 sync script なら DB 内 entry count 直接 grep、 etc.)
+3. **(c) の cross-check は tool の接続先確認**: MCP / OAuth token なら `getProfile` 系で「今どの account を見ているか」 を直接確認 (= 検索結果の中身が「らしくない」 = 別 account の data ばかり、 が強い signal)。 期待と一致しなければ tool 故障 → reauth / 接続修復が先で、 source 調査は無意味
+4. cross-check で (b)/(c) と判明したら「想定外」 narrative を即訂正、 不確実性を expose した path として記録
+5. 「想定外」 「存在しない」 を user に伝える前に最低 1 cross-check を通す reflex を hardcode。 **user が確信を示したら tool 健全性を最優先で疑う** (= source 不在の結論より tool の (c) を先に潰す)
+
+### 関連事故
+
+- **fetch_comments.mjs added=0 reflex 結論**: 複数科目の sync で、 締切を過ぎた回の `added=0` を見て「提出 0 件 = 想定外」 と reflex 結論しかけた。 `classroom_list_submissions` で raw query → 返却済 + 遅延提出で履修者全数に正常提出あり、 既存 `comments.yaml` にその回の entry が揃っている → 別 session が既 sync 済 → dedup の (b) 正常結果と判明。 reflex を 1 cross-check で訂正できた、 もし user に「想定外」 を伝えていたら余計な調査 trigger。
+- **2026-06-01 MCP account すり替わり = (c) tool 接続先誤りの実証**: ある account の受信メールを 4 つの MCP account で検索 → 1 つで 0 hit → Claude が「全 account 検索したが該当メール存在しない」 と user に結論。 user 「絶対来ている」 push で再調査 → 当該 MCP の検索結果が個人購読 newsletter ばかり = 「らしくない中身」 と気付き、 Python 直接で `getProfile` → **その MCP token が別 account (= 業務用のはずが個人用) を指していた** と判明 (= 過去の reauth でアカウント誤選択 + 当時 token に検証 step なし、 約35日間すり替わり)。 検索は全部別 account を見ていたため無効で、 修復後に本来の account で埋もれていた student メールが surface (= 課題提出が21日埋もれていた)。 教訓: 「らしくない検索結果」 + 「user の確信」 = (c) tool 健全性 (account/endpoint) を疑う 2 大 signal、 source 不在の結論より先に潰す。 reauth フローには login_hint + 認証後 getProfile 検証 (不一致なら token 破棄) を入れて silent すり替わりを構造的に防ぐ。 具体経緯は personal layer 運用記録 + 該当 MCP 設定リポの DESIGN を参照。
+
+---
+
+## <a id="silent-dead-e2e-only"></a>10. silent dead / 経路の穴は「violation を仕込んだ実 e2e」 でしか expose できない
+
+§1 (3 verification) / §6 (dry-run 観測) は機構が **何をするか** を verify するが、 機構が **そもそも発火するか** は別問題。 gate / hook / detector / validator が **silent dead** (= 呼ばれない・経路の穴で skip・条件分岐で素通り) の場合、 logic 確認・syntax 確認・関数単体シミュレート・dry-run は **全て pass する** (= 機構の中身は正しいので)。 緑の ✓ が「動く」 の証明にならない (= [`docs/convention-design-principles.md §8.8`](../docs/convention-design-principles.md#proxy-blind-spot) の false confidence)。
+
+### How to apply
+
+- gate / hook / detector を作ったら、 **catch すべき violation を実際に仕込んだ実 e2e** を 1 回通す (= 「正常 input で通る」 だけでなく「**異常 input が本当に block されるか**」)。 破壊的 e2e (= 実 commit / 実書込) は revert 前提で安全に。
+- <a id="violation-e2e-on-a-copy"></a>⚠️ **違反を仕込む e2e は、 守る対象の複製 (使い捨て git / scratch dir) で行う**。 guard がまだ対象を登録していない段階で本物に違反を起こすと、 guard は発火せず、 **試験そのものが守りたかった破壊になる** (実測: 凍結で止まるはずの旧 builder を、 対象を凍結に登録する前に本物で走らせ、 守る対象の出力を作り直した。 git から戻して差分なしを確認)。 順序 = ① 対象を guard に登録 → ② 複製で違反を起こして止まることを確認 → ③ 本物では dry-run か読み取りだけ (本物の 1 件を選んで「止まるはず」 で打たない = 選んだ 1 件が guard の守る形でない 〔守る欄が空など〕 と、 そのまま書き込む。 実測: 宣言を入れた直後の確かめで欄の空の項目を選び、 書き込んで git から戻した)。 revert できる場所でも、 revert は「壊れたことに気づいた」 時にしか起きない。
+- **confidence 境界を report に明示し、 重要な機構は境界を残さず実検証する**。 「logic ✅ だから動く」 と打ち切らない。 4 軸 sweep (= grep / 論理) で error 0 でも、 実 e2e で silent dead が出ることがある (= 静的 sweep と動的 e2e は別 layer)。
+
+### 関連事故 / 検証例
+
+- 2026-06-06: pre-commit chain gate が primary hook の early-exit で **silent dead** (= [`hook-authoring.md` chain-hook-early-exit](hook-authoring.md#chain-hook-early-exit))。 logic / syntax / 関数シミュレートは全 pass、 4 軸 sweep も error 0、 重複を仕込んだ **実 commit e2e (= reject されるべき commit が通る)** でのみ発覚。 confidence 境界に「pre-commit e2e 未実行」 と明示していたのを実検証して捕捉。
+- §6 (dry-run = 動作観測) と本 § (= 発火 verify) は相補: dry-run でも、 そもそも発火しない機構は観測すらされない。
+
+---
+
+## <a id="grep-existing-docs-first"></a>11. 症状の本格 forensics 前に「既存 conventions / docs に同症状の記録が無いか」を grep
+
+**ルール**: 観測した症状 (= error 文字列 / 異常挙動) で fresh forensics (= lsof 全 attribution / web 検索 / transcript 解析 / 実験) に投資する**前**に、 まず project 自身の `conventions/` + docs を症状の distinctive token で grep する。 既知症状なら workaround doc が診断手順・root・対処まで持つことが多く、 再導出は時間の丸損。 = CLAUDE.md inline §3 (= 事実主張前に内部 grep) の debugging domain への適用 (= 「外部検索の null で結論する前に内部 grep」 の対偶 = 「外部 forensics を始める前に内部 grep」)。
+
+### Why
+
+症状 forensics は高価 (= lsof 全プロセス attribution / transcript 解析 / web 調査 / 実験で各数分〜)。 既存 workaround doc は同じ診断を既に済ませている可能性が高く、 grep は 1 秒。 順序を逆にする (= 先に fresh forensics) と doc が持つ答えを高コストで再導出する。
+
+### 付随する 2 失敗 (= 本件で同時発生)
+
+- **正しい OS artifact を測れ**: leak / 枯渇する resource **本体**を測る。 相関するが別物の artifact を測ると誤診する。 例: pty leak は `/dev/ptmx` (= master、 親プロセスが保持) で起きるが、 `/dev/ttys` (= slave、 子 shell 終了で解放) を測ると「9 本だけ open = leak 無し」 と誤結論する。 doc の診断手順 (= 何を測るか) に従えば回避できた。
+- **症状の surface 地点 ≠ 原因 (= victim vs perpetrator)**: 症状が出た component / session は犯人とは限らない。 他が resource を食い尽くした状態で、 その component の正常操作が壁に当たっただけのことがある。 「symptom が出た X」 を即 root と扱わず、 X が victim の可能性を 1 path 検討する。
+
+### How to apply
+
+1. 症状観測 → fresh forensics の前に `grep -ril '<symptom token>' <repo>/conventions/ <repo>/docs/` (= `forkpty` / `ptmx` / error 文字列の distinctive part)
+2. hit したら doc の診断手順・root・workaround を先に読む (= 再導出しない)。 forensics する場合も doc の「測るべき artifact」 に従う
+3. 症状が出た component を即 root としない (= victim 可能性を 1 path check)
+
+### <a id="known-error-lookup"></a>機械の網 — エラー文の台帳
+
+上の 1 は session の反射に頼るので、 下の関連事故のとおり規約に記録済みの壊れ方でも引かれないことがある。 エラー文が決まっている壊れ方は、 hook [`hooks/known-error-nudge.py`](../hooks/known-error-nudge.py) が Bash の出力・エラー文に台帳 [`hooks/known-errors.json`](../hooks/known-errors.json) の文字列を見つけた瞬間に、 その壊れ方を書いた節を Claude に知らせる (PostToolUse と PostToolUseFailure = command が失敗したときも鳴る、 同じ壊れ方は 1 session に 1 回)。
+
+- **規約に壊れ方を書いたら、 そのエラー文の変わらない部分を台帳に 1 件足す**。 `python3 hooks/known-error-nudge.py --check` が doc と anchor の実在と、 match の文字列が doc の本文にあることを確かめる (= 台帳だけに書いたエラー文を作らない)。
+- 射程は台帳にある文字列だけ = 決まった文の無い症状 (遅い・黙って止まる・出力が欠ける) は 1 の grep に戻る。 Bash 以外の tool の出力も見ない。
+
+### 関連事故
+
+- **2026-06-08 pty leak 再診**: macOS pty 枯渇 (`forkpty: Device not configured`) は `conventions/macos-claude-app-pty-leak.md` が症状・診断 (`lsof /dev/ptmx`)・root・workaround まで完全記載済だったのに grep せず、 lsof (= 誤って slave `/dev/ttys` を測定 → 「leak 無し / burst」 と誤診) + web 検索 + transcript 解析の fresh forensics に 1 session 費やして再導出した。 過去 session の transcript (= §7 grep) から既存 doc に辿り着いて自己訂正。 冒頭で `grep -ri ptmx conventions/` していれば即解決 + slave 誤測も回避できた。
+- **macOS 付属 python の `Non-UTF-8 code` (実測)**: [`batch-text-edits.md#system-python-long-multibyte-line`](batch-text-edits.md#system-python-long-multibyte-line) に記録済みの壊れ方に別の session が当たり、 規約を grep せずに書き方を変えて回避し、 締めの報告で「原因を確かめていない」 と書いた。 規律の文だけでは 2 回とも効かなかったので、 上の機械の網を置いた。
+
+---
+
+## <a id="reproduce-not-verify"></a>12. 再現 ≠ 検証: 決定論的 / 撤回済 artifact は誤っていても再現する
+
+ある計算が以前報告された数値を再現したことは、 両者が同じ (誤りうる) convention / 実装を共有している限り **検証にならない**。 決定論的 artifact は正しさと無関係に再現する。 特に **既存の analysis / audit script を結論の根拠に使う前に provenance を確認**せよ — project の retraction log (`RETRACTIONS.md` 等) と script の docstring を distinctive token で grep し、 過去に「非物理 / convention-mismatch / 撤回済」 と判定されていないか見る。
+
+### Why
+
+- 「自前で再現できた → だから正しい」 は循環。 同 bug / 同 convention の再実行は同じ誤値を出す。
+- 撤回済 artifact は歴史記録として file が残ることが多く、 名前で hit するが**使ってはいけない**。 retraction log を読まずに「ちょうど良い既存 script」 として拾うと、 撤回済の誤 narrative を再 instantiate する。
+- = CLAUDE.md inline §3 (= 単一情報源で結論飛躍しない、 安価な検証を先に) + 本 file §2 (audit verdict 再評価) の verification domain への適用。 ここでの「安価な検証」 = retraction log の grep。
+
+### How to apply
+
+1. 既存 script / 過去結果を結論の根拠にする前に、 その docstring + project の retraction log を grep
+2. 「これは physical か、 特定 convention 内の artifact か」 を問う
+3. 別実装 / 第一原理 (= 次元解析・ground-truth 機構・canonical 実装) で cross-check してから結論
+
+### 実例
+
+ある物理計算 session で、 retraction log に「convention-mismatch の非物理 artifact」 として撤回済の audit script を、 log を読まず physical と誤認して結論 (= 新 narrative + 新 commit) を構築。 撤回済 artifact が決定論的に再現したため「再現できた」 を validation と取り違えた。 canonical 実装で再計算して誤りに気付き retract + 削除。 → reflex: convention 依存 / `*_audit` 系 script を結論の根拠に使う前に retraction log を必ず grep。
+
+---
+
+## <a id="reproduce-through-same-channel"></a>12b. 再現は、 落ちた検査と同じ口で観測する
+
+落ちた検査の原因を再現で確かめるとき、 再現の script が検査と別の口で信号を拾っていると、 「再現しなかった」 という 0 件に意味が無い。 例 = 検査は page error と console の error の両方を数えるのに、 再現は page error だけを聞いて 0 件になり、 「再現しない」 と読みかけた。 起動処理の catch が console に書いた error は page error に出ない (実測)。
+
+- 再現を書く前に、 落ちた検査がその信号をどう拾っているか (どの listener・どの filter・どの時点) を読み、 同じ拾い方を写す。
+- 再現の結果には、 拾った口と、 どの段階で出たかを一緒に書く。 0 件のときは「この口で 0 件」 と口を添える (1 つの口の 0 件を、 その信号が無い証明にしない)。
+
+---
+
+## <a id="firing-probe-execute-vs-honor"></a>13. mechanism が「発火したか」 を検証する時は依存ゼロの unconditional probe + 独立 discriminator、 「実行」 と「honor」 を分ける
+
+§10 は「silent dead は実 e2e でしか expose できない」、 §12 は「再現 ≠ 検証」 だった。 本節は **mechanism (hook / 自動化 / guard) が特定 context で発火・効果したかを切り分ける**作法。 雑にやると「動いていない」 と「動いたが効果が捨てられた」 を取り違え、 誤った root cause を作話する。
+
+3 つの落とし穴と対処:
+
+1. **conditional な proxy で発火を判定しない** — 「cache の mtime が更新されたか」 「出力が出たか」 等は、 mechanism が **該当なしで silent** な設計だと「発火したが何も出さなかった」 と「そもそも発火しなかった」 を区別できない。 さらに proxy が複数の writer / 別 path / 認証・権限に依存すると交絡する。 → **依存ゼロの unconditional probe** を使う: 「呼ばれたら無条件に痕跡を残す」 だけの仕掛け (= file に 1 行 append する trace 等)。 API / credit / 権限 / 該当有無に依存しないので、 痕跡の有無 = 発火の有無を一意に決める。 ⚠️ 既存 mechanism に後から probe を差すと snapshot 型 harness では当該 session に反映されない (= [`hook-authoring.md` new-hook-session-snapshot](hook-authoring.md#new-hook-session-snapshot)) ので、 新 context (新 session / 新 frontend) で観測する。
+
+2. **env var / 表層の自己申告を frontend/context の discriminator にしない** — 環境変数は継承・leak・汚染しうる (= 例: `CLAUDE_CODE_ENTRYPOINT` が別 context に漏れる)。 → **独立した観測量**で判別する: 親プロセスの実 path / build 番号 / cwd 等、 自己申告でない物。 1 signal が怪しい時は 2 つ目の独立 signal で corroborate (= §convention-design-principles §8.14 の identity corroboration と同根)。
+
+3. **「実行された (executes)」 と「効果が honor された (honored)」 を分ける** — mechanism は **プロセスとして走った**のに、 その出力・決定を上位層が **捨てる**ことがある (= 例: desktop frontend は hook を実行するが stdout 注入 / permission 判定を honor しない、 [`hook-authoring.md` frontend-dependent-cowork](hook-authoring.md#frontend-dependent-cowork))。 「効果が出ない」 を即「実行されていない」 と結論しない。 副作用 (file 書込等) の有無で「実行」 を、 モデル/flow への反映で「honor」 を別々に確認する。 両者は別の修復を要する (= 未実行なら配線、 honor されないなら surface 自体を変える = [`docs/convention-design-principles.md §8.15`](../docs/convention-design-principles.md#enforcement-surface-frontend-survival))。
+
+4. **帰責する signal は control case で discriminate できることを確認する** (= 発火検証に限らない一般原則) — ある事象 (= 失敗 / 低速 / 異常) の原因として signal X を挙げる前に、 **正常に動いた case (= control) で X を観測**する。 失敗 case と成功 case の **両方に在る** signal は両者の差を説明しない = 原因ではない。 ⚠️ point 2 は「env 値が不正確かも」 だが本点は **env 値が正確でも刺さる**罠 = 値は正しいが discriminate しない。 例 (2026-06-16): 失敗 session の `entrypoint=claude-desktop` を見て「Claude Code desktop を使った user のミス」 と帰責したが、 **正常に完遂した現 session も同じ `claude-desktop`** だった (= live env で確認) → entrypoint は失敗を discriminate せず原因でない。 control を 1 度見れば即 falsify できたのに、 actionable / 外部帰属に飛びついた (= tool-call-robustness.md メタ規律「自分で塞げる/相手のせいにできる原因に飛びつくバイアス」 の attribution 版)。 ⚠️ 特に **user / 外部の選択を「ミス」 と断ずる**前に必ず control で discriminate する (= 誤帰責は user の信頼を直接損なう)。
+
+reflex: 「この mechanism、 ここで効いてる?」 / 「この症状の原因は X?」 を検証する時、 (a) 痕跡が conditional な proxy になっていないか、 (b) frontend/context 判別が自己申告 env に依存していないか、 (c) 「効果不在」 を「未実行」 と短絡していないか、 (d) 原因として挙げる signal が control case で不在 (= discriminate) することを確認したか、 の 4 点を問う。
+
+origin: 2026-06-13 desktop-hook-gap 調査。 当初 SessionStart hook の死活を cache mtime で推定 → 交絡 (cache は別 writer + CLI 認証 credit 切れ + Terminal の EventKit TCC で書かれない) で不確定。 依存ゼロの trace (file append) に切替えて発火を確定、 親プロセス path で frontend を判別 (env var は汚染懸念)、 さらに「desktop は hook を実行するが出力を honor しない」 = 実行 ≠ honor を分離して初めて正確な像を得た。 起票 session は cache mtime 1 点 + env var で「SessionStart 死亡」 と推定し一部誤帰責していた (= §9.1 snapshot 交絡で PreToolUse 非発火も実は未分離だった)。
+
+## <a id="execution-path-attribution"></a>14. 実行経路の帰属診断は「内容指紋」 で確定 + A/B の negative arm は前提を検証
+
+同じジョブ / 同種の artifact を **複数の実行経路**が生み得る状況 (= 機構移行の旧登録残置 [`scheduled-tasks.md` mechanism-migration-kill-all-registrations](scheduled-tasks.md#mechanism-migration-kill-all-registrations)、 多重配備、 similar な自動化の並走) で、 観測された run / session / 成果物が**どの経路か**を診断する作法。 §13 は「発火したか」、 本節は「発火したのは**誰**か」。 ⚠️ 本節の対象は**機構** (= 実行経路) の帰属。 **人**の行為・発言の帰属 (= commit author / 送信者 / 議事書き手 ≠ 判断主体・発言主体) は [actor-attribution.md](actor-attribution.md) が SoT。
+
+1. **命名 pattern・タイミング・もっともらしい機構仮説で帰属を断定しない。 経路ごとに必然的に異なる「内容指紋」 で確定する** — 実例 (2026-07-04): 正体不明の定期 session 群の帰属を、 命名から 2 回・設定値から 1 回、 **3 連続で誤帰属** (別 task 群 → headless cron session → RC 自動登録) し、 各仮説に対策を built した後、 session の**登録 prompt 本文** (= engine 生成の ASCII 英文 vs 手書き日本語 + 自己無効化手順つき) が一発で真因 (= 旧 desktop task の復活) を確定した。 経路が違えば必然的に違う内容 (= prompt 文面 / 生成物の format / 署名的な引数) が最強の discriminator。
+2. **A/B 比較の negative arm (= 「こちらでは起きない」) は、 その経路がそこで実際に走っていることを先に確認しないと無効** — 実例 (同日): standby マシン (= failover gate が cron を defer = **一度も走っていない**) で「session が一覧に出ない」 を観測し、 「headless は出ない」 と layer 1 doc に焼いて同日 errata。 negative arm の前提 (= 走っている) を 1 コマンド (`launchctl print` / log / gate 状態) で確認してから比較する。
+3. **判定 check 自体の環境を容疑者に含める** — check の負結果が domain の負 (= 「未 login」 「不在」) でなく、 **check 自身の実行失敗**であり得る。 実例 (同日): PATH に tool が無い shell で bare コマンドの auth check が silent fail し、 login 済 account を「未 login」 と偽判定 → install 拒否。 negative を報告する前に check の脚 (binary 解決・実 exit code・stderr) を 1 回 expose する (= §9 の null-result 飛躍と同 family、 こちらは「check の infrastructure 故障」 variant)。
+4. **source を読んで挙動を主張する前に、 その file が「実行される実体」 かの binding を確認する** — rule 1 の逆向き (= あちらは観測された run → 経路、 こちらは読んだ source → 経路)。 もっともらしい場所 (= runtime dir 直下の checkout / repo 内の vendored copy) にある source は**死んだ残骸でありうる**し、 死んだコードは reading には生きて見える (= 「死んだコードが生きているふりをする」)。 binding は launch 設定の一次資料から実体 path を引いて確定する (= MCP server なら `mcpServers` の command/args → package-manager cache の実体、 cron なら plist/crontab の program path) + **package identity (package.json の name/version 等) を照合**。 実例 (2026-07-25): runtime dir 内に残置された旧実装 checkout の token 書き戻し handler を読み、 正しく package cache 側を検証していた別調査の verdict を誤反証しかけた (= package.json は別 package 名だった)。 同日の別作業では同じ照合 (= 編集対象が package cache でなく repo-tracked かの確認) が正しく機能しており、 差は binding を確認したか 1 点。
+
+5. <a id="one-variable-per-arm"></a>**比較の 2 本で動かす変数は 1 つにする — PATH の前置はそのディレクトリの全 binary を動かす** — 「bash の版だけ変えて走らせる」 つもりで `PATH=/opt/homebrew/bin:$PATH` を前置すると、 同じディレクトリの `python3` まで Homebrew 版に差し替わる。 実例 (2026-09-11): bash 5 で検査一式を回した run で Python の selftest 7 本が落ちた。 原因は bash でなく、 PyMuPDF / PyYAML の入っていない Homebrew の python3 3.14 が選ばれたこと。 `bash` 1 本だけを symlink した一時 dir を前置し直すと全部通った。 → 変えたい binary だけを入れた一時 dir を前置する (`ln -s /opt/homebrew/bin/bash "$shim/bash"; PATH="$shim:$PATH" ...`)。 GNU 版の userland で試すなら、 Homebrew が unprefixed の GNU 名だけを並べている `<prefix>/opt/<pkg>/libexec/gnubin` を前置する ([`scripts/with-gnu-userland.sh`](../scripts/with-gnu-userland.sh))。 比較の前に、 動かしたくない側 (python3 等) の `command -v` が 2 本で同じことを確かめる。
+
+reflex: 「この run はどの経路?」 には (a) 内容指紋を 1 つ挙げたか、 「こっちでは起きない」 には (b) その経路がそこで走っている証拠を見たか、 「check が negative」 には (c) check 自身の脚を疑ったか、 source から挙動を主張する時は (d) その source が実行実体である binding を見たか、 2 本を比べる時は (e) 差が狙った 1 変数だけか (他の binary の `command -v` が同じか) を見たか。
+
+origin: 2026-07-04 「最近の項目に routine session が数十件」 調査。 3 誤帰属それぞれに実装を積んでから (= どれも無害・一部は独立に有益だったが真因には無効)、 prompt 本文の指紋で 5 手目に確定した。 negative-arm 無効観測は同調査で 2 回 (採用しかけ 1 + doc 焼き errata 1)。 5 は 2026-09-11 の set -e test 整備 (bash 版の比較で python3 まで差し替わった)。
+
+## <a id="performance-fix-discipline"></a>15. 性能修復は measure-first + 出力等価性が受け入れ条件 (= 「速くなったが結果が減った」 は改悪)
+
+「遅い」 の修復は debugging の一種として同じ規律に従う: 症状から原因を推測で断定せず実測し、 fix の正しさを挙動保存で検証する。
+
+1. **measure-first**: 「遅い = network だろう」 等の直感で並列化・cache 化に着手しない。 まず (a) 構成要素ごとの実測 (= per-stage timer を先に仕込む) で犯人を分布として見る、 (b) 最大犯人は profiler (`cProfile` 等) で関数レベルまで落とす。 実例 (2026-07): 多数の network 検査を束ねる dashboard の最大単一犯人は network でなく **local の YAML re-parse ループ** (`yaml.safe_load` 524 回 = 52s CPU) だった — 直感だけで並列化していたら 52s が wall にそのまま残った (= §9 の「単一情報源で結論しない」 の performance domain 形態)。
+2. **出力等価性が受け入れ条件**: 性能 fix の検証は「速くなった」 でなく「**同じ結果のまま**速くなった」。 検証の強い順: (a) 修正前後の出力 byte 一致 (diff) → (b) 出力構造の完全性 (= 全 section / 全 finding 種の存在) + 失敗・timeout ゼロ → (c) 件数の目視。 触った component は (a) を要求、 触っていない component は (b) で足りる。 実例: 逐次 API 呼びの batch 化 (2026-06) と parse cache 化 (2026-07) はいずれも「逐次版と出力一致」 を明示の受け入れ条件にして landed。 ⚠️ **出力が外部世界に依存するなら、 (a) を使う前に noise floor を測る** (= **何も変えずに 2 回走らせた diff**)。 これを先に取っていないと、 世界の変化 (= 新着 mail / 他 session の commit / 経過時間の表示) を自分の regression と取り違える — 逆に本物の regression を「どうせ noise」 と流す方向にも同じだけ壊れる。 noise floor に出た行の種類だけが、 受け入れ diff で「除いてよい」 行。 ⚠️ **既に書き換えてしまった後で (a) を取る方法**: `git show HEAD:<path> > <同じ dir>/zz-old-<name>` で旧版を**同じ dir に別名で置いて**並走させ、 両者の出力を diff する (= 別 dir に置くと `Path(__file__).parent` 基準の sibling import / 相対 path が解けず、 旧版が動かないか別物を読む)。 終わったら消す — 残すと selftest 自動発見や lint の対象に紛れ込む。 実例 2026-09-13: LaTeX 検査 script の masking が 1 文字ごとに `re.match(p, text[i:])` で残りの本文を複製していた (O(n²)、160 KB の原稿で 2.8 s)。`compiled.match(text, i)` にして 0.3 s、受け入れは手元の .tex 473 本での出力一致。 ⚠️ **比較できた件数を必ず印字する** — 1 回目は相対 path の一覧を別の cwd から読み、読めない file を黙って飛ばして「checked 0 files, mismatches 0」 と出た (件数が無ければ一致に見える)。
+3. **並列化は決定性・可視性とセットで**: 独立 subscript 群を並列化するときの 4 点 set — (a) **出力は宣言順 buffer flush で決定的に** (= diff 可能性が (2) の検証と将来の regression 検出の基盤)、 (b) **外部 API は resource lane の semaphore で絞る** (= rate-limit 429 → fail-open silent skip で **finding が黙って減る** のが並列化の典型的な機能退行。 backoff/retry 保証の無い呼び出しが混在する lane は保守的 cap)、 (c) **`stdin=DEVNULL`** (= 子 process の対話 prompt 待ちで全体が無限 hang する経路を閉じる)、 (d) **per-unit timeout + 失敗 marker** (= 1 本の hang が全体を止めない + 「検査が走らなかった」 と 「finding 0 件」 を区別可能に保つ)。
+4. **cache は所有権を明示**: parse cache が返す object は共有 (= caller の mutate が別 caller に漏れる)。 read-only 前提を docstring に焼き、 可能なら mutate しない設計 (= audit / render 用途) に限定する。 具体 recipe (yaml 系検査 script の定番): run 内 dict cache (`{path: parsed}`) + `yaml.load(f, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))` (= libyaml C loader、 pure-Python 比 ~10×) の 2 段で、 「entry ごとに referent file を re-parse する loop」 は桁 2 つ消える。
+
+5. <a id="tool-self-report-is-not-measurement"></a>**tool の自己報告は測定値ではない** — build tool / bundler / linter / profiler が出力する数値は、 その tool 独自の定義と実装による**推定**であって、 判断材料にする量の実測ではない。 実例 (2026-09-09): bundler が build ごとに `gzip:` として印字する値を配布サイズとして読み、 依存の major version 更新を「圧縮後が 9 kB 太る」 と評価して見送った。 **`gzip -9 -c <out> | wc -c` で実測すると逆に 1.6 kB 減っていた** (= 印字値 315 kB / 実測 301 kB)。 存在しないコストで更新を止めかけた形。 → **数値を判断や報告に載せる瞬間に「これは誰が測ったか」 を問う**。 tool の印字は方向の目安 (= 同一 tool 内での相対比較) には使えるが、 **絶対値・他 tool との比較・意思決定の根拠には独立測定を要求する**。 (= §9「単一情報源で結論しない」 の計測 domain 形態。 自己申告を discriminator にしない §14.2 と同根)
+6. <a id="stale-base-measurement"></a>**古い base の branch で測った値は現在の値ではない** — 依存更新 PR (bot 生成含む) の branch は**作成時点の base から分岐**しており、 その間に本体が変わっていれば branch 上の build 結果は現在の構成を表さない。 実例 (同上): 依存更新 branch で build すると出力が 100 kB、 本体は 947 kB — branch の base が data 追加前だったため。 そのまま比較すれば「この更新は出力を 1/10 にする」 という無意味な結論になる。 → **現在の HEAD に依存だけを当てて測る** (= worktree を切って `npm install <pkg>@<ver>` 等)。 merge 後に何が起きるかを知りたいなら、 測る対象は merge 後の構成であって branch ではない。
+
+7. <a id="run-scoped-cache"></a>**鮮度が価値である検出器 fleet の cache は、 TTL でなく run に閉じる** — 独立プロセスの検査 script 群が同じ外部 source (mail / API / DB) を重複して引いているとき、 素朴な高速化は TTL 付き disk cache だが、 **検出器ではこれが速度でなく正しさの問題になる**。 検出器の出力の価値は鮮度に全部乗っており (= 「未読 12 件」 の 12 が 10 分前の数字なら、 遅い答えでなく**誤った答え**)、 TTL cache は新着を TTL 分だけ隠したうえで **画面上は「変化なし」 に見せる** = silent failure。 さらに TTL cache は置き場が固定になるので、 同じ source を読む**別経路** (= session 開始時の surfacer 等) まで巻き込み、 「見落とさないための機構」 同士が互いの stale を再生し始める。
+
+   → **cache の寿命は時計でなく実行境界で切る**: 親が run ごとに一時 dir を作り env で子に渡し、 run 終了で消す (`TemporaryDirectory` = 異常終了でも消える)。 捨てているのは「同じ run の中の重複」 であって鮮度ではない (= 各 run は必ず取りに行く)。 副産物として **全 stage が同一 snapshot を見る**ので、 stage ごとに数十秒ずれた source を見ていた以前より run 内の整合性はむしろ上がる。
+
+   実装の 4 点: (a) **env が無ければ cache しない** (= 単体実行・hook 経路・他の呼び出し元は挙動不変。 cache を後から足せる・剥がせるものに保つ安全弁) (b) key に**呼び出しを決める要素を全部**入れ、 key 化できない引数が来たら cache しない側に倒す (= key の取りこぼしは silent な誤り) (c) cache 層の例外は飲んで素の取得に fallback し、 **取得側の例外は呼び出し側へ透過** (= 各 script の fail-open を壊さない) (d) **本体 (= 本文・添付など大きく機微なもの) は置かない** — 同 run に第二の消費者が居ないなら書くだけ損で、 temp に平文を残す分だけ危険 (= 消費者の有無は「誰がこの format で引くか」 を数えれば決まる)。
+
+   ⚠️ §15.4 (= run 内 dict cache) との違いは**共有面の広さだけ**: 多プロセスでは in-process memo が stage 境界を越えないので、 共有面を env + 一時 dir に外出しする。 鮮度が価値でない参照データ (= 名前 ↔ id の対応表等) は TTL でも壊れないが、 置き場を分けると判断が 1 つ増えるので run-scoped に揃える方が単純。
+
+   実例 2026-09-10: ~65 本の検査を subprocess で並列実行する dashboard で、 複数の検出器が同じ inbox × 30 日窓を各自 fetch していた。 run-scoped 化 + 逐次 get の batch 化で mail lane の実行秒合計 188s → 128s / 壁時計 平均 108s → 81s、 出力 diff は時刻表示のみ。 ⚠️ **同 turn の 4 軸 sweep で (d) 違反を自分の実装から発見している** (= 本文つき fetch まで cache しており、 消費者ゼロなのに temp に本文が落ちていた)。
+
+8. <a id="side-by-side-before-after"></a>**直しの前後の CPU・速さは、 直す前の版を凍結して後の版と同時に並べて測る** — 外の条件 (機械の負荷・外部の更新の頻度) は時間で変わるので、 前と後を別の時間に測ると条件の差が効果に混ざる。 直す前の版を `git archive <base> <dir> | tar -x -C <写しの dir>` で写しとして凍結し (作業ツリーは直していける)、 後の版と**同時に**、 同じ入力・同じ時間で走らせる。
+   - **比べる区間を決める**: 起動直後の一回きりの重い処理 (初回の読み込みなど) を除いた定常の区間で、 累計 CPU の増え方を比べる。 一定間隔で `ps -o time= -p <pid>` を記録しておけば、 区間を後から選べる。 子プロセス (git・ssh など) の CPU は ps の time に入らない = 合計は `/usr/bin/time -p` で取る
+   - **期限で終わる道具は期限を長めに**: 初回の処理が長いと、 比べたい区間にほとんど入らないまま期限で終わる (実測: 1 回目は直した後の版が初回の読み込みで待たされて定常の周回を測れず、 期限を延ばして推移の記録で区間を選び、 測り直した)。 重い処理のたびに 1 行を出す印を環境変数で出せるようにしておくと、 区間の境目と回数が分かる
+   - 動いている道具を直すときは作業ツリーで途中の形を作らず、 写しで直して試してから入れる ([`hook-authoring.md#live-hook-edit-runs-elsewhere`](hook-authoring.md#live-hook-edit-runs-elsewhere))
+
+reflex: 性能修復に入る瞬間に「実測したか (per-unit timer → profiler)」、 fix を宣言する瞬間に「何と何の出力が等価だと **どの操作で** 確認したか」 + 「その diff の noise floor を測ったか」、 前後を比べる瞬間に「同時に並べたか・比べた区間はどこか」、 **数値を報告に載せる瞬間に「この数字は誰が測ったか / どの構成で測ったか」**。
+
+origin: 2026-06-03 Gmail 逐次 fetch の batch 化 (= 540s timeout RCA、 「逐次版と出力一致」 要件で landed) + 2026-07-24 dashboard 検査 fleet の並列 stage runner 化 (= 数分 → ~1 分、 cProfile が直感と違う最大犯人を特定、 byte 一致 + section 完全性で受け入れ)。 いずれも owner の personal layer に実装・設計史 (= 機構の正本は各 script docstring)。
+
+## <a id="recovery-ends-investigation"></a>16. 機能の回復は調査終了の条件ではない — 症状が「欠落」 でなく「余剰」 のとき
+
+失敗が「動くべきものが動かない」 形なら、 直った時点で原因はほぼ手中にある (= 直し方を知っていたから直った)。 だが失敗が **「動くようにはなったが、 副産物がどこかに残った」** 形のとき、 retry で機能が回復した瞬間に調査の圧力が消え、 **原因は再発源 (= recipe / doc / user に提示した文面) に残ったまま**になる。 1 回目を「なぜか失敗した」 で閉じた時点で、 それは workaround を選んだ判断ですらない (= §1 の「絆創膏」 は選択の自覚がある分まだ良い。 ここでは選択自体が発生しない)。
+
+さらに悪いのは残った副産物の運命: **origin 不明の残骸は、 検出器に拾われても「恒常 noise」 として定着し、 調査 trigger としての力を失う**。 surfacing 検出器を多数抱える system ではこれが致命的 — noise は「見えている」 のに「効いていない」 状態で任意に長く生存できる。
+
+reflex: (a) retry / やり直しで直ったとき、 **「1 回目は何をどこに書き込んだか」 を 1 操作分だけ問う** (= 生成物の場所を数える。 失敗した試行も副作用を残す)。 (b) 検出器の finding が origin 不明のまま 2 回目の session を越えたら、 finding の内容ではなく **origin を** 調査対象に格上げする。 ⚠️ この段階で noise の抑制設定 / 除外 glob を先に入れてはならない (= trigger の永久放棄。 除外は origin 確定後に、 その origin に対してのみ)。
+
+origin: 2026-07-02 → 07-30 (= 詳細は owner の personal layer の incident 記録)。 貼り付け用に提示したコマンドで tilde が展開されず、 作業ツリー直下と home に literal `~` dir が 2 箇所生成された。 同日に別形式で認証し直して機能は回復 → そこで調査終了。 残った 6 MB の空 config dir は 4 週間、 別 repo の scan が拾う「発生元不明の恒常 noise」 として定着し、 最終的に user が dir 自体を目で発見して初めて RCA に至った (= 検出器は 4 週間ずっと「見えて」 いた)。
+
+## <a id="ci-red-streak-forensics"></a>17. CI の red streak は起点から遡る — 着手前の再照会・run は push 単位・手元の userland は CI と違う・常時 red は情報を運ばない
+
+CI が長く red のまま (= 複数 session が red の上に push を積んでいる) 状態を直すときの手順。 どれも「もっともらしい推定で 1 手進める」 を「安い機械的照会 1 回」 に置き換える (= §9 の「単一情報源で結論しない」 の CI 形)。
+
+1. **着手前に live で最新 run を再照会する** — 依頼文・SESSION・spawn spec の「CI が N 回連続で落ちている」 は起票時点の snapshot。 `gh run list --limit 5` を newest first で 1 回見る。 実例: 「直近 100 run すべて failure」 という spec を受けた時点で、 別 session の修正 commit が約 2 時間前に push され、 後続 4 run が green だった。 spec どおりに「直す commit」 を作っていれば重複修正になっていた。 受け手側の一般則 = [`multi-session-coordination.md#receiver-premise-snapshot`](multi-session-coordination.md#receiver-premise-snapshot)。
+2. **streak の起点 (最後の green → 最初の red) を run 履歴で確定し、 原因 commit は pickaxe で名指す** — run は **push 単位 (head SHA)** であって commit 単位ではない。 最初の red run が複数 commit を運ぶことがあるので、 失敗行が分かったら `git log -S '<失敗行の断片>' -- <file>` で導入 commit を出し、 各 run の head に対する `git merge-base --is-ancestor` で「その commit を含む最初の run」 と「その直前の run」 を突き合わせる。 起点の run と一致すれば原因確定、 ずれていれば red は別の原因で始まっている。 `--event push` で絞る (pull_request の run は別の head を挟む)。 1 コマンド = [`scripts/ci-red-streak.py`](../scripts/ci-red-streak.py) `--workflow <name> --failed-lines --pickaxe '<断片>' --path <file>`。
+3. **手元の userland が CI と違う前提で再現する** — macOS の BSD 版 `stat` / `sed` / `date` は Linux runner の GNU 版と同じ引数で意味が変わる ([`hook-authoring.md#substitution-fallback-stdout-mixing`](hook-authoring.md#substitution-fallback-stdout-mixing))。 手元で test が通ることは反証にならない。 使い捨て clone (`git clone --shared --template= --no-checkout` + hook を無効にした detached checkout = live checkout に痕跡を残さず、 手元の hook も走らせない) を commit ごとに作り、 `env -i` の空 HOME で native と GNU の両 userland を回す。 **親 commit・導入 commit・HEAD × 2 userland の行列**にすれば、 「導入 commit から GNU でだけ落ちる / HEAD では両方通る」 が commit 単位で確定する。 1 コマンド = [`scripts/ci-local-repro.sh`](../scripts/ci-local-repro.sh) `--at <親> --at <導入> --at origin/main --userland both -- <test command>`。 GNU 側は [`scripts/with-gnu-userland.sh`](../scripts/with-gnu-userland.sh) に任せる (Homebrew の gnubin dir だけを前置し、 python3・bash・awk は動かさない = [#one-variable-per-arm](#one-variable-per-arm))。 今の作業ツリーを 1 回 GNU で走らせるだけなら同 wrapper の `--clean-env` で足りる。 ⚠️ 空 HOME でも system の gitconfig は残る (Apple の Command Line Tools は `init.defaultBranch=main`、 ubuntu runner の git は `master`) ので、 どちらの道具も `GIT_CONFIG_NOSYSTEM=1` を立てる。 fixture 側の規律と ERR trap の実測表 = [`hook-authoring.md#set-e-test-failure-report`](hook-authoring.md#set-e-test-failure-report)。 ⚠️ **userland の外にも macOS でだけ隠れる差がある**: (a) macOS の既定の file system は大文字小文字を区別しない = fixture の file 名 (`todo.yaml`) と読み手が開く名前 (`TODO.yaml`) の食い違いは、 手元ではどの再現でも通り、 Linux runner でだけ「0 件」 になる (実測)。 GNU の userland でも空 HOME でも見えないので、 大文字小文字を区別する volume か Linux で回すまで、 file 名の大文字小文字を疑いに残す (b) HOME を差し替えて再現すると、 `pip install --user` の package (Mac の system python の yaml など) が見えなくなり、 CI に無い失敗が大量に出る = `PYTHONUSERBASE` に元の値を渡す (実測)。 多 repo の layout を CI がどう模すか = [`hook-authoring.md#test-root-not-parent-dir`](hook-authoring.md#test-root-not-parent-dir)。
+4. **無言の assertion を自己申告型にする** — `set -e` の test の bare `[ ... ]` は落ちても何も出さず、 CI log には runner の「✗ test: X」 しか残らない (1 本目の手掛かりは、 別の command がたまたま stderr に出した `stat: cannot read file system information for '%Lp'` の 1 行だけだった)。 正本 = [`hook-authoring.md#set-e-test-failure-report`](hook-authoring.md#set-e-test-failure-report) ([`scripts/lib/test-err-trap.sh`](../scripts/lib/test-err-trap.sh) を source する)。 2 本目は CI log が `FAIL at line 136` と名指したので、 `ci-red-streak.py --failed-lines` の 1 回で原因行まで届いた。
+5. **常時 red の CI は情報を運ばない** — red が既定になると、 各 session の push は「red → red」 で何も変えないように見え、 誰も新しい失敗として読まない (= §16 の「見えているのに効いていない」 恒常 noise の CI 形)。 実例: 2026-09-01〜09-11 に claude-config main の `checks` は push 225 回連続で red だった。 その間、 複数の Claude / Codex session が完了 gate を通過して push を続けた。 同じ日の 21:08 (JST) には別の原因 (上の 3 の git 既定 branch 名) で 2 本目の streak が始まり、 1 時間で 5 session が 12 回 push を積んだ (4ffec7f で解消。 この節を書いた session も `ci-red-streak.py` の実走で同じ streak を見つけて同じ修正を用意していたが、 先に push された方を採った)。 床は完了報告に CI の状態を書くこと ([`CONVENTIONS.md#completion-git-gate`](../CONVENTIONS.md#completion-git-gate) の 6)。 人に届ける reader は [`scripts/check-ci-red.py`](../scripts/check-ci-red.py) (repo 横断で default branch の red workflow を連続 run 数・継続時間つきで出し、 取得失敗は「検査不能」 行にする。 2026-09-11 に owner の session 開始 hook と dashboard へ配線)。 red を見つけた後の原因追跡は `ci-red-streak.py` (単一 repo の 1 行確認なら `--brief`)。 両者の red / green 述語は同じ。 配線の型: session 開始 hook では `--from-repos-md <個人層の repo 一覧> --dependabot=summary` (実測 13〜20 s / 65 repo なので hook の timeout は 30 s)、 dashboard では Dependabot を repo 別に出す既定の `detail`。 hook の打ち切り・異常終了は「未チェック」 として出し、 0 件と区別する ([`#silent-probe-false-healthy`](../docs/convention-design-principles.md#silent-probe-false-healthy))。 走行中の session には次の session 開始まで届かない (= 定期実行 + OS 通知は未実装)。
+6. <a id="utc-dated-fixture"></a>**日付で分岐する test は CI の日付で走る** — GitHub の runner は UTC なので、 手元 (JST) で日付が変わった朝 9 時までは CI 上ではまだ前日になる。 「導入日以降の record だけ数える」 のような閾値を今日の日付で作った fixture は、 手元で緑・CI で赤になる (2026-09-12、 自己同定 stamp の事後 audit の selftest)。 閾値の日付は引数で渡し、 fixture は固定の日付で作る。 手元で `TZ=UTC` を付けて 1 回走らせれば同じ落ち方を再現できる。
+
+7. <a id="flaky-is-a-symptom"></a>**「flaky」 は診断名ではない — 再実行で緑でも、 原因を見るまで閉じない** — 1 回落ちて再実行で緑になると「flaky」 と呼んで閉じたくなるが、 flaky は**症状の名前**であって原因ではない。 実際には「**確率的にしか発火しない本物の bug**」 がこの形で現れる。 発火率が低いほど「たまたま」 に見え、 直るまで**本番で同じ確率を踏み続ける**。 疑う順 (= 実行ごとに変わるもの): (a) **値の中身** — hash / id / 乱数が、 ある桁の組合せのときだけ別構文と衝突する (例: short sha が全桁数字だと `git stash show <N>` が stash index と解釈 = [`shell-env.md#ambiguous-identifier-in-issued-commands`](shell-env.md#ambiguous-identifier-in-issued-commands)) / (b) **順序・時刻** — 並列の起動順、 秒や日付の境界 (上の 6)、 set・dict の反復の順 (文字列の hash は process ごとに乱数の種で変わる = 同じ code の test が 2 つの写しで結果が分かれたら、 差分のせいと決める前に両方で `PYTHONHASHSEED` を固定して回し、 直す前の版でも落ちるかを見る。 一時 dir の名前のような毎回変わる文字列が set に入ると、 種を固定しても順が変わる。 実測: 1 つの文字列の 2 つの形を set の順に置き換えていた test が、 短い形が先に来た回だけ落ちた = 長い形から置き換える) / (c) **環境差** — version・locale・TMPDIR (上の 3) / (d) **資源** — port・lock・同名 dir の衝突 (例: 同じ機械で裏で走る本番の hook と tempdir の lock を共有する test = [`hook-authoring.md#test-isolates-live-machine-state`](hook-authoring.md#test-isolates-live-machine-state))。 手順は **失敗した run の完全ログを取る** (`gh run view <id> --attempt N --log`。 ⚠️ `--log-failed` は**抜粋**なので、 それを全体と読むと落ちた test を取り違える — 2026-09-12 に実際に「T2 で途切れた」 と誤読し、 完全ログでは T16 だった) → 失敗行の値を手で再現 → 原因が分かったら **その性質を test に固定**する (= 結果だけを見る assert は当たりを引いた回にしか落ちない)。 OS の形でしか出ない性質 (macOS の一時 dir の symlink `/var` → `/private/var` など) は、 test の中で同じ形を作って固定する = 一時 dir の中に「実体の path が link の path を丸ごと含む」 link を作れば、 一時 dir が symlink を通らない Linux の CI でも同じ順を試せる (実測: 前からの test は Linux の `/tmp` では 2 つの形が同じ文字列になり、 置き換えの順を一度も試していなかった)。 特定できないまま閉じるなら、 **再現率と次に見る手順**を記録に残す。
+
+8. <a id="secondhand-root-cause"></a>**人から渡された原因診断は、 run log で引き直してから直す** — 並行 session や同僚が「原因は X だ」 と根拠つきで知らせてくれると、 その X を直しに行きたくなる。 だが**もっともらしい診断は外れる**。 2026-09-12 の実例: 「selftest が matplotlib を import しているが requirements に無い」 という報告 (import 行の行番号・requirements の中身・手元の version まで添えられていた) を受けて、 selftest から描画依存を外す書き直しを landed した。 CI は赤のままで、 log の 1 行は `numpy が要る: pip install numpy` — **真因は 1 つ手前の numpy 不在**で、 script は selftest に到達する前に exit していた。 診断の各事実は全部正しく、 **因果だけが違った** (matplotlib も確かに無かったが、 そこまで実行が届いていなかった)。 ∴ 受け取った診断は「どこを見るか」 としては有用、 「何が原因か」 としては未検証として扱う。 費用は `gh run view <id> --log-failed | grep -A5 '<落ちた check 名>'` の 1 回。 ⚠️ 書き直し自体は無駄ではなかった (依存が減り、 別の欠陥が 1 件出た) が、 **報告された症状は直っていなかった** — 「良い変更をした」 と「報告された不具合を直した」 は別で、 前者で後者を報告しない。 受け手側の一般則 = [`multi-session-coordination.md#receiver-premise-snapshot`](multi-session-coordination.md#receiver-premise-snapshot) (あちらは前提の**鮮度**、 本項は前提の**因果**)。
+
+9. <a id="early-abort-masks-later-failures"></a>**途中で止まる suite を直したら、 後ろの赤が初めて出る** — `set -u` / `set -e` で途中の 1 行が落ちる検査 suite は、 そこから後ろの検査を 1 本も回していない。 その 1 行を直した時点で「緑になる」 と報告しない。 suite を最後まで回してから言う (実測: 変数 1 つの修正で止まっていた行を越えたら、 その先の別の test が赤だった)。 手元の検査 runner (`scripts/local-ci.py`) の state に残る出力は suite 全体の末尾なので、 落ちた test の中身は入っていない = その test を同じ env で単独で回して見る。
+
+10. <a id="runner-image-vs-commit"></a>**runner の image の切り替わりと commit を、 run log の image の行で切り分ける** — `ubuntu-latest` のような移る tag は、 ある日から新しい OS の image を指し、 coreutils の実装や同梱の道具が替わる (実測: `stat` が GNU でない実装になり、 `--version` の文字列に `GNU` が無くなった)。 赤の原因を「その頃 image が替わったから」 と日付で決めない: 最後の green と最初の red の run log の冒頭の `Image:` の行 (`gh run view <id> --log | grep -m1 'Image: '`) を並べ、 同じ image なら原因は commit (2 の pickaxe へ)、 違えば image の差を疑う。 1 本の red streak に両方が重なることがある = 落ちた test ごとに、 その test が初めて落ちた run の image を見る (実測: image の切り替わりのせいだと報告した赤が、 前の image の上で既に commit から始まっていた)。
+   - GNU かどうかを version の文字列で見分ける test は、 image が替わると落ちる = 見分けたいのは「GNU 互換の引数が通るか」 なので、 その引数を 1 回通して確かめる
+   - 手元の古い Python (macOS の system python など) は docstring の無効な escape (`"""` の中の `\d` など) に警告を出さず、 CI の新しい Python (3.12 以上) は `SyntaxWarning: invalid escape sequence` を出す。 警告は `.pyc` の無い初回の compile で stderr に出るので、 hook・道具が「何も出力しない」 ことを確かめる試験が落ちる形で現れる (実測)。 新しい Python で `python3.12 -W error::SyntaxWarning -c "import sys; compile(open(sys.argv[1]).read(), sys.argv[1], 'exec')" <file>` を回して見つけ (repo の全部なら `git ls-files '*.py'` の各 file に)、 raw 文字列 (`r"""`) にする。 docstring が他の escape (`\n` など) も意図して持つなら、 raw にすると意味が変わるので、 その文字だけを `\\` にする
+   - 再現の道具に command を複数渡すときは `&&` で繋ぐ (`sh -c 'a; b'` は最後の終了値しか返さず、 前の command の落ちが rc=0 に隠れる。 実測 = これで「手元では再現しない」 と誤読した)
+   - 直したら実行時間も見る: 準備 (apt) と検査の時間が job の上限 (`timeout-minutes`) に近いと、 次の run が上限に当たって cancelled になる (cancel は失敗と別の conclusion = 緑に戻ったかは conclusion で確かめる)
+11. <a id="linux-only-environment-shapes"></a>**手元 (macOS) で通り CI (Linux) でだけ落ちる、 環境の形** — commit も image も同じなのに CI でだけ落ちるときに疑う形 (実測):
+   - **Linux の `/tmp` には他人 (root) の 700 の dir がある** (systemd-private-* など)。 temp dir の親や一時 dir の兄弟を走査する code は、 その下を stat した瞬間に PermissionError を投げる。 macOS の temp の親の下は自分の dir だけなので起きない。 走査の 1 件ずつの確かめを try で包み、 読めない dir は飛ばす。 Python の `Path.exists()` はこの扱いが版で違う (3.12 までは PermissionError を投げ、 3.14 は False を返す = 実測) ので、 版に依らない `stat()` を try で包む
+   - **手元にだけ入っていて CI の requirements に無い module** — それを import する selftest は、 CI で途中から exit する。 CI が全部の selftest を回す設計なら module を CI の requirements に足し、 selftest の側は無い python では理由を出して SKIP する (黙って飛ばさない)。 log の最初の 1 行で、 どこまで届いたかを見る (8 の、 届いていない行の診断の取り違え)
+   - **CI は本 repo だけを checkout する = 隣の repo (engine を置いた別の repo) を読む check は CI では回らない** — 手元では隣に在るので回る。 selftest がその check を engine の有無で黙って飛ばすと、 その check の label を基準の PASS に要求する検査 (foil の歯の spec = `check-foil-teeth.py`) が CI でだけ spec error になる (実測)。 selftest は飛ばす理由の行を出す。 その check だけで落ちる mutant には spec の `requires` に engine の path を書き (engine の無い場所では理由つきの `[SKIP]` になる)、 ほかの mutant は engine に依らない check で落とす = engine の有無で歯が消える mutant を残さない。 上の module と扱いが違うのは、 版を固定できる module と違い、 隣の repo を CI で clone すると、 その repo の今の変更で本 repo の CI が赤くなるから。 再現は、 隣の repo の無い dir に置いた clean export で回す
+   - **SQLite の版で、 閉じた WAL の DB を読み取り専用で開けるかが違う** — macOS の system の Python の SQLite は `-wal`・`-shm` の消えた WAL の DB を `?mode=ro` で開けず、 CI の Linux の Python 3.12 と Homebrew の Python 3.12 (SQLite 3.53) は開ける (実測)。 開ける環境では代わりの開き方 ([#reading-live-app-sqlite](#reading-live-app-sqlite)) を試験が通らず、 その部品を外した mutant が CI でだけ `[NO-TEETH]` になる。 試験の中で、 その 1 file への読み取り専用の接続を `unable to open database file` で断る差し替えを当て、 どの版でも代わりの開き方を通す (実装の例 = `scripts/lib/codex_threads.py` の selftest)
+   - **再現の手**: 手元に CI と同じ版の Python があれば、 その版を `python3` と名乗る shim を置いた dir を PATH の先頭にして、 clean export (`git archive HEAD | tar -x -C <dir>`) の写しで落ちた test を回す = 作業 tree の他人の未 commit の変更も混ざらない。 直す前に同じ落ち方を出してから直す
+
+reflex: CI の修正に着手する瞬間に、 (a) 最新 run を今見たか、 (b) 起点の run と導入 commit が一致したか、 (c) CI の userland で再現したか (「手元で通った」 で止まっていないか)、 (d) test は落ちた行を言うか、 (e) **原因を人から聞いたなら、 log で引き直したか**、 (f) 起点の run と直前の green の image が同じかを見たか。
+
+origin: 2026-09-11。 07866f1 (2026-09-01) が test に BSD 専用の `[ "$(stat -f '%Lp' …)" = "600" ]` を足し、 ubuntu runner の GNU stat で落ち続けた。 streak の起点 run (head 07866f1)、 直前の green (ca5d1bc)、 pickaxe の導入 commit が一致し、 手元の行列 (ca5d1bc / 07866f1 / 704ff48 / HEAD × BSD / GNU) で「07866f1 から GNU でだけ落ちる」 を確定した。 修正は bbc1b62 (別 session)、 失敗行の自己申告化は 2d5cc14。 2 本目 (8f17c20 から、 `codex-hooks.test.sh` の fixture が empty repo の clone で local branch `main` を前提にしていた) は、 空 HOME の native では再現せず、 `init.defaultBranch=master` を固定して再現した (手元の system gitconfig が `main` を与えていた)。 失敗行は 2d5cc14 の ERR trap が CI log に直接出しており、 修正は 4ffec7f (別 session)。
+
+## <a id="moving-baseline-comparison"></a>18. 比較の基準点を「その時そこにあるもの」 で決めない — 物が増えた瞬間に意味が変わる
+
+「前回と比べる」「fixture と比べる」 型の検査・test は、**基準点をどう選ぶか**で寿命が決まる。
+選び方が「dir の中身」「最新のもの」 のような**可変な現況**だと、対象が 1 つ増えた瞬間に
+**壊れるか、もっと悪いことに、黙って別の意味になる**。
+
+| 症状 | 悪い基準点 | 直し方 |
+|---|---|---|
+| 「前回提出と比べて変わっていない」 検査が、後続の提出ができた途端に無意味になる | 「その案件の**最新**の snapshot」 | **「検査対象より前のもの」** に限定する (= 時刻 or 版で明示的に順序を課す)。「最新」 は「前回」 の代用にならない |
+| 回帰 test が、作業 dir に file が 1 つ増えただけで落ちる | `glob("*.pdf")` 等で**作業 dir の現況**を fixture にする | fixture は**固定した名前の集合**にする (= test は「あの時の入力」 を再生する道具であって、今の作業状態を見る道具ではない) |
+| 「差分ゼロ」 が healthy に見えるが、実は自分自身と比べていた | 除外条件を「path が同じ」 だけにする | **内容が同一のものも除く** (= snapshot copy は path が違っても中身が同じ) |
+
+**reflex**: 比較を書く瞬間に「**この基準点は、対象が 1 つ増えたら変わるか**」 を問う。変わるなら、
+順序 (= 時刻・版) か固定集合で**明示的に**選ぶ。「たまたま今そこにある」 を基準にしない。
+
+⚠️ これは [#reproduce-not-verify](#reproduce-not-verify) (= 決定論的 artifact は誤っていても再現する) の
+姉妹だが向きが逆 — あちらは「変わらないものを検証と誤認する」、こちらは「**変わってしまうものを
+不変の基準と誤認する**」。
+
+origin: 前日の事故を捕まえる検査を書いた当日に、当の案件が**再提出された**ことで
+自作の検査が 2 か所同時に壊れた: (a) 「前回提出」 を最新 snapshot で取っていたので、新しい
+snapshot ができた瞬間に**未来と比較**しかけた (b) 回帰 test の fixture が作業 dir の glob だったので、
+新しい確認用 PDF が置かれた瞬間に落ちた。どちらも「対象が増える」 という**正常な運用**で壊れる設計だった。
+先行して同 session で (c) 「自分の snapshot copy と比べて『1 行も増えていない』」 という
+degenerate 比較も踏んでおり、3 件とも基準点の選び方が原因という同型。
+
+## <a id="recovery-state-dispatch"></a>20. 外部 process の復旧は事前状態で dispatch する — launch は recovery の同義語ではない
+
+一般原則と状態保存の序列は
+[`recovery-state-transition`](../docs/convention-design-principles.md#recovery-state-transition) が正本。
+本節は、GUI application、browser、daemon、native host などの復旧を実行する前の診断手順だけを持つ。
+
+1. **対象本体と制御面を別々に測る**: process / singleton lock / application inventory と、extension / socket /
+   native-host / account / profile の接続を別 probe にする。接続失敗は process 不在を意味しない。process-list probe
+   自身が非 0 / permission error なら `unknown` であり、singleton lock・application inventory 等の独立 probe へ移る。
+2. **発生源を帰属する**: crash / hang / 再起動なら OS report の responsible process、parent、coalition、起動時刻と、
+   runtime が生成する command の内容指紋を突き合わせる ([#execution-path-attribution](#execution-path-attribution))。
+   macOS の crash report を型に分ける道具と、 帰属を言う前の除外台帳 = [`macos-app-crash-triage.md`](macos-app-crash-triage.md)。
+3. **実行前に command を展開する**: `--dry-run`、`man`、source の actual binding で、`new` / `fresh` / `force` /
+   `replace` と profile / storage 引数を確認する。同名 script が複数 cache に在るなら live config / process argv から
+   実行実体を解決する。名前が `open` でも新 instance 強制なら destructive transition である。
+4. **5 状態へ bin して 1 本だけ選ぶ**: stopped→launch、healthy→reuse/no-op、transport failure→reconnect、
+   wrong context→explicit switch、unknown→fail-loud。複数 branch を「念のため」連続実行しない。
+5. **before/after の state delta を取る**: 目的機能の回復に加え、process / window / tab / crash report / lock /
+   notification の増分を確認する。retry で目的が通っても余剰が増えたら未修復 ([#recovery-ends-investigation](#recovery-ends-investigation))。
+6. **runtime cache patch と上流修正を分ける**: versioned cache の局所 patch は immediate mitigation。対象 version、
+   actual binding、backup、差分、再適用条件を明示し、update で消える machine-local state を正本や恒久修正と呼ばない。
+   実行 process が source を読み込み済みなら再起動境界も別に検証する。
+
+Codex の外部 Chromium browser では、公式の profile 選択契約と具体的な branch を
+[`codex/PARITY.md#external-browser-lifecycle`](../codex/PARITY.md#external-browser-lifecycle) に置く。
+本節へ browser 名、bundle path、plugin version、owner の profile 名を複製しない。
+
+## <a id="login-lifetime-measurement"></a>21. ログインが「いつ切れるか」 を測る — 手元の記録で境界を取ってから、 交絡を記録しながら probe する
+
+「毎回ログインし直させられる」 と言われたとき、 推測で延命や対策を足す前に、 **どの層が・どういう数え方で切れているか**を測る。
+
+1. **層を分ける**: web app 自身のセッション (例: JSESSIONID) と SSO (IdP) のログインは別の寿命を持つ。 app だけ切れて IdP が生きていれば、 browser で開くだけで追加の認証なしに入り直せる。 script が止まるのは前者、 本人が OTP を求められるのは後者。
+2. **先に組織の決めた値を探す**: IdP の有効期間は組織が方針として決めていることがある (会議の記録・告知)。 決めた値なら**延命の仕組みは作らない** (定期アクセスで延ばすと方針の趣旨に反する)。 減らせるのは「作業の途中で止まること」。
+3. **前向きの測定より先に、 手元の記録で境界を取る** (相手のシステムに負荷ゼロ):
+   - browser の閲覧履歴: IdP の second factor 画面を通った visit = 認証ありのログイン、 assertion だけの visit = 追加認証なしの通過。 「前回の認証ログイン → 次に使った時」 の対から「X 日後は生きていた / Y 日後は切れていた」 の上下限が出る。
+   - OTP メールの受信時刻は**他の端末のログインも混ざる** (ログインは browser ごと) — 履歴と突き合わせて自分の browser の分だけ使う。
+   - script の成否の時刻 = [`search-agent-transcripts.py --tool-runs`](../scripts/search-agent-transcripts.py) (呼び出しと結果の冒頭を対で拾う)。
+4. **browser の再起動を疑う前に cookie DB を見る**: 有効期限なしの cookie (閉じると消える種類) のうち最古の作成時刻が、 既知の再起動より古ければ、 その browser は再起動をまたいで残している (= 再起動説は棄却)。
+5. **前向きの probe は交絡を記録しながら**:
+   - probe 自体がセッションを使う (放置の timer を戻す)。 開いたままのタブも裏で定期通信する。 → 毎回 browser の cookie DB の「最後に送った時刻」 と「作成時刻」 (値は読まない) を記録する。
+   - 起動時に読んだ cookie をメモリに持ち続けて撃つ (毎回 DB から読み直すと、 途中の再ログインで切れが隠れる)。
+   - **本人の操作 (ログアウト・再ログイン) の後に観測した「切れ」 は寿命の証拠にならない** — 結論を書く前に、 同じ時間帯に本人が何をしたかを履歴で洗う (実測)。
+   - ページ移動なしに cookie の値が変わっても、 更新とは限らない (ログインしていない request にもセッション cookie を発行する app がある)。
+   - 放置型か絶対時間型かは 1 回の測定では分からない: 短い一定間隔で撃ち続けても切れる → 絶対時間、 間隔を倍々に空けると切れる → 放置の上限 (経過時間とも両立するので、 別のログインで間隔の型を変えた 2 回目が要る)。
+6. **SQLite の時刻比較の罠** (Chromium の履歴・cookie DB を読むとき): 時刻は 1601-01-01 UTC からのマイクロ秒の整数。 `strftime('%s', …)` は **TEXT** を返し、 SQLite では整数の列と TEXT の比較が常に偽になる = **エラーなしの 0 件** になる。 `CAST(strftime('%s', …) AS INTEGER)` にするか、 整数を計算してから比べる。
+
+## <a id="ask-what-they-saw"></a>22. 「止まっていた」 の報告には、 原因を組み立てる前に「画面に何が出ていたか」 を聞く
+
+人が「止まっていた」「動かない」 と報告したとき、 log や時刻の相関から原因を組み立てて文書に書く前に、 その人が見た画面
+(ログイン画面・エラーの表示・古いままの表示) を 1 問聞く。 相関から立てた説は、 目撃した 1 文で覆る
+(実測: 時刻の相関から「使われていない間は動かない」 と結論して手引きと試験の注記に書き、 本人の「ログイン画面になっていた」 で取り下げた)。
+
+- 聞く前に調べるのは、 答えを待たずに分かる事実 (process が居るか・最後に動いた時刻・エラーの行) までにする。
+- 相関から得た仕組みの主張は、 確かめるまで文書に「未確認の疑い」 と書き、 「実測」 と書かない。 確かめ方 (何をすれば白黒が付くか) を添える。
+- 本人が先に答えていた場合 (報告の文面に画面の様子がある) は、 それを最初の証拠にする。
+
+## <a id="delay-rca-critical-path"></a>23. 「時間がかかりすぎた」 の原因は、 一次記録で区間を数え、 全体を延ばした区間から数える
+
+依頼・作業・検収と何人かの手を経た仕事の遅れを調べるときは、 当事者の説明でなく一次記録 (会話記録・投稿・commit の時刻) で区間を並べ、
+区間ごとに「全体の終わりを延ばしたか」 を分けてから原因を数える。
+
+- 同じ時間に並んで進んでいた区間 (別の待ちに隠れていた区間) の失敗は、 目立っても全体を延ばしていない。 原因の順位からは外し、
+  別の害 (取りこぼし・手直し) があればそちらで数える (実測: 投稿の失敗とその手直しは、 受け手が前の仕事の後始末の最中で依頼を読めなかった待ちの中に収まっていた)。
+- 当事者の説明は、 目立つ失敗 (エラーの出た操作・道具の不具合) を主因に挙げ、 黙って過ぎた待ち (turn の途中の相手に送って queue に入った message・前の仕事の後始末) を落としやすい
+  (実測: 説明は確かめの組版を主因にしたが、 記録で最大の区間は queue の待ちだった)。
+- 確かめの段の所要は、 説明や推測でなく、 その段を単独で 1 回回して測る (実測: 「組むだけで数分」 の説明に対し、 組版は 1 本 20 秒ほどで、 長かったのは別の照合だった)。
+- 区間の長さの合計が始点から終点までの長さと合うまで数え直す (合わないなら区間の境の取り方が違う)。
+
+## <a id="reading-live-app-sqlite"></a>24. 他の app が開いている SQLite (WAL) を読む道具は、 閉じた DB と読めないときの答えを先に決める
+
+他の app の状態 DB (SQLite、 WAL mode) を読む道具を書く・直すときの罠。 実装の例 = [`scripts/lib/codex_threads.py`](../scripts/lib/codex_threads.py) の `_open_state`。
+
+- **書き手が全部閉じた WAL の DB は、 読む側の SQLite の版によって読み取り専用 (`?mode=ro`) では開けない** — app が動いたままでも、 最後の接続が閉じると `-wal`・`-shm` が消え、 macOS の system の Python の SQLite で開くと `unable to open database file` になる (実測)。 この版は WAL の DB を読み取り専用で開くのに `-shm` を要し、 読み取り専用では作れない。 CI の Linux の Python 3.12 と Homebrew の Python 3.12 (SQLite 3.53) は同じ状態を読み取り専用で開ける (実測) = 道具はどちらの版でも読めるように書く。
+  - 開けなければ `?mode=rw` (file が無ければ作らない) に `PRAGMA query_only = ON` をかけて開き直す。 普通の `connect(path)` は、 file が消えた瞬間に開くと空の DB を作る。
+  - この接続は SQLite の側 file (`-wal`・`-shm`) を作る (中身は書かない)。 道具の説明が「何も書かない」 と言っていたら言い直す。 書けない場所 (書き込みを禁じた sandbox) では側 file を作れず開けない = 「分からない」 として扱う。
+  - `immutable=1` は使わない: 読む途中で書き手が書き始めると、 エラーを出さずに壊れた頁を読む。 本物に何も足したくないなら、 DB と `-wal`・`-shm` を一時 dir に写して読む ([`macos-notification-db.md`](macos-notification-db.md) の方式。 写しは写した瞬間の状態)。
+- **「読めない」 を空の一覧で返さない** — 行を返す関数が「読めない」 と「行が無い」 を同じ `[]` で返すと、 呼び元は「生きているものは 0 件」 と読む (実測: 閉じた DB の間、 生存の一覧が 0 本と答えた)。 読めないときは `None` を返し、 空を返す古い関数を残すなら、 区別が要る呼び元は新しい関数を使う。
+- **試験で閉じた WAL の DB を作るときは、 側 file を自分で消す** — macOS の SQLite は最後の接続を閉じても側 file を残す (persistent WAL、 実測) ので、 閉じただけでは「消えた状態」 にならない (側 file を消す SQLite もある = app が同梱した版)。 `PRAGMA wal_checkpoint(TRUNCATE)` の後に閉じ、 `-wal`・`-shm` を消してから読む。 その状態で読み取り専用が実際に開けないことも試験の中で 1 回確かめる (開けてしまう環境では代わりの開き方を通っていない)。 開けてしまう版では、 その 1 file への読み取り専用の接続を断る差し替えを試験の中で当て、 代わりの開き方を通す (CI でだけ歯が消える形 = [#linux-only-environment-shapes](#linux-only-environment-shapes))。
+
+## <a id="aggregate-check-runtime"></a>集計検査の待ち時間
+
+`bash scripts/run-all-checks.sh` は多数の selftest・変異試験・shell 試験を順に回すため、
+環境によって十数分かかる。短い tool timeout で打ち切る前に、出力の進みと process の生存を確認する。
+長い実行は出力を一時 file に保存し、終了コードと末尾の PASS / FAIL の集計まで回収する。
+所要時間を固定の保証値にせず、個別の失敗は表示された test の command で切り分ける。
+
+## 関連
+
+- [`CONVENTIONS.md §3`](../CONVENTIONS.md) — 4 軸 sweep の base 規約
+- [`scientific-computing.md` explicit-integrator-instability](scientific-computing.md#explicit-integrator-instability) — L5 numerical fix の (A)/(B)/(C) 階層、 V3 algorithm 網羅の domain-specific application
+- [`docs/convention-design-principles.md`](../docs/convention-design-principles.md) — 規約配置の meta-rule
+- [`docs/convention-design-principles.md#recovery-state-transition`](../docs/convention-design-principles.md#recovery-state-transition) — 復旧を状態遷移として選ぶ一般正本
+- [`docs/sensitive-repo-patterns.ja.md §パターン 5-3`](../docs/sensitive-repo-patterns.ja.md) — 実装直後の 4 軸 review
+
+### 個人層との関係
+
+owner の personal layer (= layer 3、 collaborator は access 不要) には本規律の application 例 / 反例 / 個人特有の補強規律が記録されている (= 一部は本規律の precursor)。 本 file が universal な核、 personal layer は個人の歴史的事例 + reflex 規律。
